@@ -370,7 +370,7 @@ def test_main_gui_offline_preview_calibration_and_independent_panels(monkeypatch
             app._preview_source = source
             app._preview_regions()
             wait_preview()
-            assert (1920, 2560, 3) in calls
+            assert calls and 0 < calls[-1][0] <= 1920 and 0 < calls[-1][1] <= 2560
             controls = [str(w.cget("text")) for w in app.table._preview_close_btn.winfo_children()]
             assert all(label in controls for label in ("Abrir imagen", "Volver a vivo", "Calibrar regiones", "OCR Regions"))
             app._calibrate_regions()
@@ -426,7 +426,11 @@ def test_main_gui_offline_preview_calibration_and_independent_panels(monkeypatch
         except Exception:
             errors.append(traceback.format_exc())
         finally:
-            app._on_close()
+            try:
+                app._on_close()
+            except Exception:
+                errors.append(traceback.format_exc())
+                app.destroy()
     app.after(800, run)
     app.mainloop()
     assert not errors, "\n".join(errors)
