@@ -283,6 +283,15 @@ class RoboflowModel:
         ]
 
 
+class ManualShuffleModel:
+    """Local rank models have no cutting-card class; no remote poll is needed."""
+    name = "Shuffle reset: manual"
+    hosted = False
+
+    def predict(self, image_bgr, confidence=50, overlap=45):
+        return []
+
+
 class ModelProvider:
     """Process-wide lazy, thread-safe access to the two detection models.
 
@@ -334,8 +343,12 @@ class ModelProvider:
     def dealer_model(self):
         with self._lock:
             if self._dealer is None:
-                self._dealer = self._build(
-                    "dealer_cards.pt", constants.PROJECT_ID_DEALER, constants.MODEL_VERSION_DEALER)
+                local_dealer = any((constants.MODELS_DIR/name).exists() for name in ("dealer_cards.pt","dealer_cards.onnx"))
+                if self._players is not None and not self._players.hosted and not local_dealer:
+                    self._dealer = ManualShuffleModel()
+                else:
+                    self._dealer = self._build(
+                        "dealer_cards.pt", constants.PROJECT_ID_DEALER, constants.MODEL_VERSION_DEALER)
             return self._dealer
 
     def has_hosted(self):
@@ -376,6 +389,8 @@ class ModelProvider:
                 setattr(self, attr, fresh)
 
     def _refresh_one(self, model, weights_name, project_id, model_version, log):
+        if isinstance(model, ManualShuffleModel):
+            return model
         if getattr(model, "hosted", False):
             # Rebuild from scratch via _build: re-checks local weights first,
             # same preference order as startup.

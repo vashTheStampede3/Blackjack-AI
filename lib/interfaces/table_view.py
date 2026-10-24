@@ -8,7 +8,7 @@ with a small debounce. Card images are cached per (name, size).
 import math
 import tkinter as tk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 
 from . import scaling
 from ..common import constants
@@ -149,6 +149,21 @@ class TableView:
         table without 40+ synchronous disk decodes on the Tk thread."""
         master = self._master_cache.get(card_name)
         if master is None:
+            rank = cardlib.rank_of(str(card_name))
+            if card_name == rank and rank in constants.CARD_RANKS:
+                # A range-only model must display a visible rank, not a card
+                # back or an invented suit.
+                master = Image.new("RGB",(300,436),"white")
+                draw = ImageDraw.Draw(master)
+                draw.rounded_rectangle((1,1,298,434),radius=18,outline="#333333",width=4)
+                label = {"Ace":"A","Jack":"J","Queen":"Q","King":"K"}.get(rank,rank)
+                try:
+                    font = ImageFont.truetype("arial.ttf",150)
+                except OSError:
+                    font = ImageFont.load_default(size=150)
+                draw.text((150,210),label,font=font,fill="#202020",anchor="mm")
+                self._master_cache[card_name] = master
+                return master
             path = constants.card_image_path(card_name) if card_name not in (None, "back") \
                 else constants.CARD_BACK_IMAGE_PATH
             if not path.exists():
@@ -273,7 +288,7 @@ class TableView:
             self._dealer_rendered = dealer
             if dealer:
                 # The dealer model reports only ranks; render a representative card.
-                full = dealer if " of " in str(dealer) else f"{dealer} of Spades"
+                full = dealer
                 photo = self.card_image(full, scaling.size(constants.DEALER_CARD_RENDER_SIZE))
             else:
                 photo = self.card_image("back", scaling.size(constants.DEALER_CARD_RENDER_SIZE))
@@ -313,7 +328,7 @@ class TableView:
                 self._extras_rendered[i] = name
                 # Rank-only draws render a representative card, like the
                 # up-card does.
-                full = name if " of " in str(name) else f"{name} of Spades"
+                full = name
                 photo = self.card_image(full)
                 self.dealer_extra_lbls[i].config(image=photo)
                 self.dealer_extra_lbls[i].image = photo

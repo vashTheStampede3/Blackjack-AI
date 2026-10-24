@@ -78,3 +78,16 @@ def test_artifact_sidecar_overrides_numeric_names_and_limits_threads(tmp_path,mo
     assert p["class"]=="10" and p["cx"]==100 and p["cy"]==50
     assert captured["providers"]==["CPUExecutionProvider"]
     assert captured["sess_options"].intra_op_num_threads==2
+
+
+def test_local_rank_setup_does_not_request_a_remote_cutting_card_model(tmp_path,monkeypatch):
+    from lib.common import constants
+    from lib.logic.models import ModelProvider,ManualShuffleModel
+    monkeypatch.setattr(constants,"MODELS_DIR",tmp_path)
+    provider=ModelProvider()
+    provider._players=SimpleNamespace(hosted=False,name="Local ONNX")
+    dealer=provider.dealer_model()
+    assert isinstance(dealer,ManualShuffleModel)
+    assert dealer.predict(np.zeros((10,10,3),np.uint8))==[]
+    assert not provider.has_hosted()
+    assert provider._refresh_one(dealer,"dealer_cards.pt","unused",1,print) is dealer

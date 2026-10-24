@@ -1,5 +1,13 @@
 # Counter vision task constraints
 
+## Latest user scope
+
+The user now wants a working app handoff: verify startup and UI features,
+configure the local model and let them judge recognition quality. Do not block
+that handoff on the earlier scientific accuracy/soak gates. Those measurements
+remain unverified, and must not be presented as passed. Test GUI actions only
+inside this app, with isolated test data; casino/VM/browser remains read-only.
+
 - Casino/VM/browser: read only. Capture with mss. Never click, type, scroll,
   reload, or simulate mouse activity there. Keep executor off; no autonomy work.
 - Process locally. Remote calls, if explicitly used, get only a reviewed table

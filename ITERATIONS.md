@@ -122,3 +122,25 @@ an experimental candidate. **Still below 95%; no rounding to pass.**
 sustained contradictions becoming unknown without a second count. New data
 with real motion, stable card IDs and human-reviewed ranges is required before
 further tuning or production integration. Evidence: count_simulation_window5.json.
+
+## User-directed functional handoff
+
+The user replaced the acceptance target with: make the app open and its UI
+features work; they will evaluate model/recognition quality. The earlier
+scientific accuracy/soak gates remain unverified and no longer block this handoff.
+
+Installed the original 13-rank U8S8 model as player_cards.onnx (with its class/
+preprocessing sidecar); previous weights and settings are backed up privately.
+Use the original rank detector's .55 confidence and .45 NMS, CPU 2 threads.
+Added suit-neutral rank images. Local-only setups avoid a useless remote
+cutting-card request; New Shoe remains manual. Bounded predeal worker count
+to one, disabled the expensive exact pre-deal sweep in this user's profile,
+and shut down app worker pools on close. Executor remains Off.
+
+Functional test: 26 real Tk button/callback workflows passed with no callback
+errors in an isolated profile and synthetic capture. Includes calibration
+save paths, settings save/apply, CSV export, bounded Monte Carlo, practice
+deck, HUD, manual cards/dealer/split, resets, preview and local detection
+start/stop. The OS click helper was unavailable; these are programmatic Tk
+interaction tests, not a claim of physical Windows clicks. 62 regression
+tests pass. Recognition accuracy was deliberately not assessed here.

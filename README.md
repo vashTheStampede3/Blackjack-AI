@@ -12,10 +12,12 @@ desktop UI.
 ## Quick start
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python main.py
+powershell -File .\start.ps1
 ```
+
+On this configured PC, the desktop shortcut **Blackjack AI (local)** or
+`Open Blackjack AI.cmd` opens the app directly. It uses a local 13-rank ONNX
+model on CPU; **New Shoe** is manual. Recognition quality is for user review.
 
 1. The primary monitor is selected automatically — change it in the dropdown
    if the casino stream is elsewhere.

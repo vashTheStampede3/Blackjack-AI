@@ -85,10 +85,32 @@ def main():
         "Ejecutar herramientas con .venv312, desde la raíz. Ver COUNTER_README.md. Pesos/datos/reportes son privados y están ignorados por git.",
         "", "Referencias técnicas: [artefactos originales de Roboflow](https://github.com/roboflow/inference/blob/main/inference/core/roboflow_api.py), "
         "[cuantización y reduced-range](https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html)."]
+    (reports/"SCIENTIFIC_STATUS.md").write_text("\n".join(text)+"\n",encoding="utf-8")
+    functional_ready=False
+    smoke_path=reports/"gui_smoke.json"
+    if smoke_path.exists():
+        smoke=json.loads(smoke_path.read_text())
+        functional_ready=bool(smoke["results"]) and all(r["passed"] for r in smoke["results"]) and not smoke["callback_errors"] and not any(m["type"]=="error" for m in smoke["messages"])
+        if functional_ready:
+            text=["# Lista para prueba manual del usuario", "",
+                "El usuario cambió el alcance: comprobar apertura y funcionalidades; la precisión del modelo y del conteo la verificará él.",
+                f"{len(smoke['results'])} comprobaciones funcionales Tk pasaron; 0 errores de callback. {totals['tests']} pruebas de regresión pasaron.",
+                "Se usó un perfil temporal y una captura sintética; se ejecutaron los callbacks reales de los botones con el modelo ONNX local. No se interactuó con el casino.",
+                "La herramienta de clics del sistema estaba indisponible; no se afirma una prueba de clics físicos de Windows.",
+                "", "Configuración instalada: modelo original de 13 rangos, cuantizado U8S8, CPU con máximo 2 hilos, sin PyTorch. Confianza 55%, NMS 45%.",
+                "Las cartas sin palo se muestran con su rango. Se evita cargar un segundo modelo remoto para la carta de corte; el reset de shoe es manual.",
+                "Exact pre-deal edge está desactivado en el perfil para evitar cálculos de arranque costosos. Un trabajador de predeal como máximo; pesos y ajustes previos respaldados en models/backups/.",
+                "Executor permanece Off. Clave solo en entorno; no es necesaria para esta inferencia local.",
+                "", "## Funcionalidades comprobadas", ""]
+            text += [f"- {r['feature']}: OK" for r in smoke["results"]]
+            text += ["", "## Uso", "", "Abrir el acceso directo **Blackjack AI (local)** del Escritorio, o **Open Blackjack AI.cmd** en el repo.",
+                "Start Detection inicia la lectura; Stop Detection la detiene. Mantener visible la mesa del monitor elegido. Calibrate Regions ajusta las zonas; Preview Regions permite revisarlas.",
+                "Tras un barajado real, usar New Shoe. La precisión de reconocimiento y conteo no se certificó; queda para la prueba del usuario.",
+                "", "La investigación y sus métricas históricas se conservan en SCIENTIFIC_STATUS.md, baseline.md e ITERATIONS.md."]
     (reports/"FINAL.md").write_text("\n".join(text)+"\n",encoding="utf-8")
-    write_json(reports/"status.json",{"complete":False,"tests":totals,"benchmark":rows,
+    write_json(reports/"status.json",{"complete":functional_ready,"functional_ready":functional_ready,"scientific_complete":False,"tests":totals,"benchmark":rows,
         "live_sessions":0,"reviewed_live_cards":0,"live_rounds":0,"blocker":"Current table ROI not yet visible/verified; labels and independent sessions absent"})
-    print(json.dumps({"complete":False,"tests":totals,"report":"reports/FINAL.md"}))
+    print(json.dumps({"functional_ready":functional_ready,"tests":totals,"report":"reports/FINAL.md"}))
 
 
 if __name__=="__main__": main()

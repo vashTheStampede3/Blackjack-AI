@@ -1296,4 +1296,10 @@ class ModernBlackjackGUI(tk.Tk):
             settings.save()
         except Exception:
             pass
+        for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
+            pool = getattr(self.controller.engine,name,None)
+            if pool is not None:
+                pool.shutdown(wait=False,cancel_futures=True)
+        from ..logic import ev_offload
+        ev_offload.shutdown()
         self.destroy()

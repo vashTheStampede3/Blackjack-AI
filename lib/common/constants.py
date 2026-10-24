@@ -37,8 +37,9 @@ MODEL_VERSION_PLAYERS = 1
 PROJECT_ID_DEALER = "carddetection-v1hqz"
 MODEL_VERSION_DEALER = 17
 
-PREDICTION_CONFIDENCE_PLAYERS = 70
-PREDICTION_OVERLAP_PLAYERS = 100
+# The user-trial profile uses the original rank detector on the whole table.
+PREDICTION_CONFIDENCE_PLAYERS = 55
+PREDICTION_OVERLAP_PLAYERS = 45
 PREDICTION_CONFIDENCE_DEALER = 55
 PREDICTION_OVERLAP_DEALER = 45
 
@@ -156,7 +157,7 @@ EV_ADVICE_TIMEOUT_S = 3.0
 # warm caches do NOT help the next round (states key on the exact
 # composition), so parallelism is the only honest lever; the documented
 # next tier is mypyc (V2 F9).
-PREDEAL_WORKERS = max(1, min(6, (os.cpu_count() or 8) // 2))
+PREDEAL_WORKERS = 1  # Laptop profile: keep exact-EV work bounded.
 
 # ---------------------------------------------------------------------------
 # Game rules
