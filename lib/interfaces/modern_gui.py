@@ -89,6 +89,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.after(constants.SNAPSHOT_POLL_MS, self._poll_snapshot)
         self.after(300, lambda: self.table.preload_images())
         self.after(150, self._auto_select_monitor)
+        self.after(250, self._toggle_round_overlay)
         self.after(600, self._maybe_restore_shoe)
         self.set_status("Ready — confirm a monitor, then press Start Detection.")
 
@@ -296,7 +297,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.monitor_status.pack(anchor="w", pady=(0, 4))
         row = tk.Frame(section, bg=C["bg_secondary"])
         row.pack(fill=tk.X, pady=(6, 0))
-        self.round_enabled = tk.BooleanVar(value=False)
+        self.round_enabled = tk.BooleanVar(value=True)
         tk.Checkbutton(row, text="Cartel de ronda", variable=self.round_enabled,
                        command=self._toggle_round_overlay, bg=C["bg_secondary"],
                        fg=C["text_primary"], selectcolor=C["bg_secondary"],
@@ -825,6 +826,8 @@ class ModernBlackjackGUI(tk.Tk):
         if self.monitor is None:
             messagebox.showerror("No monitor", "Confirm a monitor first.")
             return
+        if self.round_enabled.get():
+            self._toggle_round_overlay()
         self.controller.start()
         self.start_btn.config(text="■  Stop Detection", bg=C["danger"],
                               activebackground=C["danger_hover"])
@@ -1229,6 +1232,10 @@ class ModernBlackjackGUI(tk.Tk):
             if self.round_overlay is None:
                 from .round_overlay import RoundOverlay
                 self.round_overlay = RoundOverlay(self)
+            self.round_overlay.update_from_snapshot(
+                self.controller.engine.get_snapshot(), self.controller.running)
+            self.round_overlay.ensure_on_screen()
+            self.round_overlay._show_noactivate()
         elif self.round_overlay is not None:
             self.round_overlay.close()
             self.round_overlay = None

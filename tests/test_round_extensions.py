@@ -153,6 +153,13 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         root.update()
         assert u.IsWindowVisible(overlay.hwnd)
         assert overlay.winfo_width() > 100 and overlay.count_label.winfo_height() > 10
+        overlay.move_to(32000, 32000)
+        root.update()
+        overlay.ensure_on_screen()
+        root.update()
+        assert overlay.winfo_x() < 32000 and overlay.winfo_y() < 32000
+        overlay.move_to(source.x+30, source.y+40)
+        root.update()
         assert u.GetForegroundWindow() == previous_focus, "Overlay stole focus"
         assert u.GetFocus() == previous_keyboard, "Overlay took keyboard focus"
         point = W.POINT(source.x+60, source.y+65)
@@ -355,6 +362,8 @@ def test_main_gui_offline_preview_calibration_and_independent_panels(monkeypatch
 
     def run():
         try:
+            assert app.round_enabled.get(), "Round panel must be enabled at startup"
+            assert app.round_overlay is not None and app.round_overlay.winfo_exists()
             before_count = engine.counter.cards_seen
             original_monitor = app.monitor
             source = ImageSource(np.full((480, 640, 3), 80, np.uint8), (2560, 1920))

@@ -3,6 +3,7 @@ import ctypes
 from ctypes import wintypes as W
 import sys
 import tkinter as tk
+import screeninfo
 
 from ..common import constants
 from ..logic.round_observation import overlay_text
@@ -108,6 +109,27 @@ class RoundOverlay(tk.Toplevel):
             self.api.SetWindowPos(self.hwnd, W.HWND(-1), int(x), int(y), 0, 0, 0x11)
         else:
             self.geometry(f"{int(x):+d}{int(y):+d}")
+
+    def ensure_on_screen(self):
+        """Recover a saved position after a monitor/layout change, without focus."""
+        self.update_idletasks()
+        rect = W.RECT()
+        if self.hwnd and self.api.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+            x, y = rect.left, rect.top
+        else:
+            x, y = self.winfo_x(), self.winfo_y()
+        width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+        monitors = list(screeninfo.get_monitors())
+        if not monitors:
+            return
+        monitor = next((m for m in monitors if
+                        x >= m.x and y >= m.y and x+width <= m.x+m.width
+                        and y+height <= m.y+m.height), None)
+        if monitor is not None:
+            return
+        monitor = next((m for m in monitors if getattr(m, "is_primary", False)), monitors[0])
+        self.move_to(monitor.x+30, monitor.y+70)
+        self.remember_position()
 
     def remember_position(self):
         rect = W.RECT()
