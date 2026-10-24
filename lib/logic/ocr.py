@@ -175,6 +175,13 @@ def read_regions(frame_bgr, regions: dict) -> dict:
         return {}
     import cv2
     from PIL import Image
+    # A Spanish Windows installation may have no English OCR pack. Select an
+    # installed language; do not silently return empty text for every region.
+    from winrt.windows.media.ocr import OcrEngine
+    languages = [language.language_tag for language in OcrEngine.available_recognizer_languages]
+    if not languages:
+        return {}
+    language = next((tag for tag in languages if tag.lower().startswith("es")),languages[0])
     out = {}
     h, w = frame_bgr.shape[:2]
     for key, (left, top, right, bottom) in regions.items():
@@ -186,7 +193,7 @@ def read_regions(frame_bgr, regions: dict) -> dict:
         crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         try:
-            result = winocr.recognize_pil_sync(pil)
+            result = winocr.recognize_pil_sync(pil,lang=language)
             out[key] = (result.get("text", "") if isinstance(result, dict)
                         else getattr(result, "text", ""))
         except Exception:

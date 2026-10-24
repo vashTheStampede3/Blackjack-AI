@@ -1,6 +1,6 @@
 """Record redacted table ROIs, with an explicit duration and disk budget.
 
-uv run --python 3.12 python -m tools.record_table --config data/table.json --session session_a
+.venv312\\Scripts\\python.exe -m tools.record_table --config data/table.json --session session_a
 """
 import argparse
 import ctypes
@@ -11,12 +11,19 @@ from pathlib import Path
 
 import cv2
 import mss
+import numpy as np
 
-from tools.common import ROOT, capture_roi, change_score, digest, load_config, write_json
+from tools.common import ROOT, capture_roi, change_score, digest, load_config, table_anchors_match, write_json
 
 
 def record(args):
     cfg = load_config(args.config)
+    if Path(args.session).name!=args.session or args.session in (".",".."):
+        raise ValueError("Session must be a plain new directory name")
+    if cfg.get("table_kind")!="physical_shoe":
+        raise ValueError("Phase 0 must verify a physical shoe before live recording")
+    if not cfg.get("anchors"):
+        raise ValueError("Add reviewed static table anchors before recording; prevents saving another app after window occlusion")
     if not 0 < args.fps <= 2 or not 0 < args.seconds <= 3600:
         raise ValueError("Capture budget: at most 2 fps and 3600 seconds per session")
     if not 0 < args.max_mb <= 500:
@@ -30,6 +37,7 @@ def record(args):
     start = time.monotonic()
     next_capture, saved, attempts, used, previous = start, 0, 0, 0, None
     reason = "duration"
+    invisible=0
     keep_awake = getattr(getattr(ctypes, "windll", None), "kernel32", None)
     if keep_awake:
         keep_awake.SetThreadExecutionState(0x80000001)
@@ -39,8 +47,16 @@ def record(args):
                 time.sleep(max(0, next_capture-time.monotonic()))
                 image = capture_roi(sct, cfg)
                 attempts += 1
-                thumb, score = change_score(previous, image)
                 next_capture = max(next_capture+1/args.fps, time.monotonic())
+                if float(np.mean(np.max(image,axis=2)>30))<.04 or not table_anchors_match(image,cfg):
+                    invisible+=1
+                    if invisible==10:
+                        write_json(out/"progress.json",{"status":"table_black_or_occluded","saved":saved,
+                            "message":"Reactivate the table manually. No mouse or reload is simulated."})
+                        print("TABLE_NOT_VISIBLE: reactivate the table manually",flush=True)
+                    continue
+                invisible=0
+                thumb, score = change_score(previous, image)
                 if score < args.change_threshold:
                     continue
                 ok, encoded = cv2.imencode(".png", image)
@@ -69,6 +85,9 @@ def record(args):
                                                     "bytes": used, "status": "recording"})
     except KeyboardInterrupt:
         reason = "interrupted"
+    except Exception:
+        reason = "error"
+        raise
     finally:
         if keep_awake:
             keep_awake.SetThreadExecutionState(0x80000000)

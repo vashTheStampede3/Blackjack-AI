@@ -6,6 +6,8 @@
   "host_resolution": [1920, 1200],
   "roi": null,
   "masks": [],
+  "anchors": [],
+  "min_anchors_matched": 2,
   "geometry_verified": false,
   "privacy_reviewed": false,
   "index_height_px": null,

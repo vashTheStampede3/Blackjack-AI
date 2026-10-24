@@ -68,6 +68,26 @@ def digest(image):
     return hashlib.sha256(image.tobytes()).hexdigest()
 
 
+def table_anchors_match(image,cfg):
+    """Reject black screens and window occlusion before any frame is saved.
+
+    Anchors are reviewed, redacted, static felt/logo crops, not account HUD.
+    """
+    anchors=cfg.get("anchors",[])
+    if not anchors:
+        return False
+    matched=0
+    for anchor in anchors:
+        template=cv2.imread(str(ROOT/anchor["image"]))
+        l,t,r,b=map(int,anchor["rect"])
+        patch=image[t:b,l:r]
+        if template is None or template.shape!=patch.shape or not patch.size or template.std()<8:
+            continue
+        score=float(cv2.matchTemplate(patch,template,cv2.TM_CCOEFF_NORMED)[0,0])
+        matched+=score>=float(anchor.get("threshold",.85))
+    return matched>=int(cfg.get("min_anchors_matched",len(anchors)))
+
+
 def change_score(previous, current):
     thumb = cv2.resize(cv2.cvtColor(current, cv2.COLOR_BGR2GRAY), (160, 96))
     if previous is None:

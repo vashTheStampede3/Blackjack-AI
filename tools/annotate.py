@@ -56,7 +56,7 @@ def main(args):
         state["photo"]=ImageTk.PhotoImage(image)
         state["cards"]=[dict(c) for c in label.get("cards",proposed.get(row["image"],[]))]
         state["selected"]=None
-        rid.set(str(label.get("round_id",""))); cid.set("")
+        rid.set(str(label.get("round_id") or rid.get())); cid.set("")
         cross.set(bool(label.get("cross_reviewed",False)))
         info.set(f"{state['index']+1}/{len(rows)} {row['image']} | arrastrar=caja, clic=seleccionar, botón derecho=borrar")
         draw()
@@ -101,7 +101,9 @@ def main(args):
     canvas.bind("<ButtonPress-1>",press); canvas.bind("<ButtonRelease-1>",release); canvas.bind("<Button-3>",remove)
     ttk.Button(bar,text="Aplicar rango/ID",command=apply).pack(side="left")
     ttk.Button(bar,text="Guardar revisado →",command=save).pack(side="left")
-    ttk.Button(bar,text="← Anterior",command=lambda:save(-1)).pack(side="left")
+    def previous():
+        state["index"]=max(0,state["index"]-1); load()
+    ttk.Button(bar,text="← Anterior (sin validar)",command=previous).pack(side="left")
     ttk.Label(root,textvariable=info).pack()
     load(); root.mainloop()
 

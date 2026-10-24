@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import psutil
 
-from tools.common import ROOT, manifest, read_json, write_json
+from tools.common import ROOT, manifest, read_json, redact, write_json
 from tools.detectors import add_arguments, build, iou
 from lib.logic.vision_labels import RANKS, bucket, canonical_rank, delta
 from lib.logic.vision_counter import TemporalCounter
@@ -66,6 +66,9 @@ def evaluate(args):
     rows = manifest(path)
     session_meta = read_json(path.parent/"session.json")
     role = session_meta["role"]
+    cfg = session_meta.get("config",{})
+    if not (cfg.get("privacy_reviewed") and cfg.get("geometry_verified")):
+        raise ValueError("Recorded table ROI and privacy masks must be reviewed")
     if args.final and role != "eval":
         raise ValueError("Final acceptance must use a held-out evaluation session")
     labels = {r["image"]:r for r in manifest(args.labels)} if args.labels else {}
@@ -89,6 +92,7 @@ def evaluate(args):
         frame = cv2.imread(str(source))
         if frame is None or list(frame.shape[1::-1]) != row["roi_size"]:
             raise ValueError("Missing frame or inconsistent ROI dimensions")
+        frame = redact(frame,cfg)
         t0 = time.perf_counter()
         preds = detector.predict(frame)
         latency.append((time.perf_counter()-t0)*1000)
@@ -124,6 +128,8 @@ def evaluate(args):
         correct_rounds += cumulative_truth == cumulative_pred
     temporal_metrics = score_frames(card_scored)
     metrics.update({"session_role":role,"frames":len(outputs),"reviewed_frames":len(scored),
+        "total_predicted_boxes":sum(len(row["predictions"]) for row in outputs),
+        "frames_with_predictions":sum(bool(row["predictions"]) for row in outputs),
         "temporal":temporal_metrics,"annotated_rounds":len(gt_rounds),
         "running_count_round_accuracy":correct_rounds/len(gt_rounds) if gt_rounds else None,
         "latency_p50_ms":float(np.percentile(latency,50)) if latency else None,
@@ -144,7 +150,12 @@ def evaluate(args):
         "cpu_35":bool(latency) and metrics["process_cpu_percent_of_machine"]<=35,
         "ram_1536mb":bool(latency) and metrics["peak_rss_mb"]<=1536,
         "double_count_property":None,"reshuffle_3_shoes_or_manual":None,
-        "soak_30min":False,"held_out_session":role=="eval"}
+        "soak_30min":False,"held_out_session":role=="eval",
+        "live_cycle_p95_800ms":None,"live_app_cpu_35":None,"live_app_ram_1536mb":None,
+        "shoe_origin_verified":bool(session_meta.get("shoe_origin_verified")),
+        "model_training_provenance_verified":None,
+        "human_cross_review_10_percent":bool(scored) and
+            sum(bool(l.get("reviewed") and l.get("cross_reviewed")) for l in labels.values())>=len(scored)*.1}
     metrics["accepted"] = all(v is True for v in metrics["acceptance"].values())
     write_json(out/"metrics.json",metrics)
     (out/"predictions.jsonl").write_text("".join(json.dumps(p)+"\n" for p in outputs),encoding="utf-8")
@@ -161,6 +172,7 @@ def evaluate(args):
     report = ["# Offline evaluation", "", f"UTC: {datetime.now(timezone.utc).isoformat()}",
         f"Session role: {role}. Frames: {len(outputs)}; reviewed: {len(scored)}.",
         "", f"Frame rank accuracy: {pretty(metrics['rank_accuracy'])}",
+        f"All frames: {metrics['total_predicted_boxes']} raw boxes, {metrics['frames_with_predictions']} nonempty frames (not a correctness metric).",
         f"Unique-card consensus accuracy: {pretty(temporal_metrics['rank_accuracy'])}",
         f"Hi-Lo bucket accuracy: {pretty(temporal_metrics['bucket_accuracy'])}",
         f"Annotated unique cards: {temporal_metrics['ground_truth_observations']}; rounds: {len(gt_rounds)}.",

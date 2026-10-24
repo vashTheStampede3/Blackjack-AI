@@ -1,5 +1,9 @@
 # Blackjack AI
 
+Measured counter work: see [COUNTER_README.md](COUNTER_README.md).
+Use `powershell -File .\start.ps1` for the pinned Python 3.12 environment.
+Live accuracy remains unverified until the acceptance evidence in `reports/` is complete.
+
 Watches a live blackjack table on a chosen monitor, detects the dealt cards
 with a YOLO model (local weights or the Roboflow hosted API), keeps a Hi-Lo
 card count across the shoe, and shows basic-strategy advice per seat in a

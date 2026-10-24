@@ -9,11 +9,16 @@ both are converted here so downstream code never has to care.)
 """
 
 import threading
+import json
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 from ..common import constants
+
+_ONNX_INFERENCE_LOCK = threading.Lock()
+cv2.setNumThreads(2)
 
 
 class ModelError(RuntimeError):
@@ -63,7 +68,7 @@ class LocalYoloModel:
         return preds
 
 
-def letterbox(image_bgr: np.ndarray, size: int = 640):
+def letterbox(image_bgr: np.ndarray, size: int = 640, color=(114, 114, 114)):
     """Resize keeping aspect, pad to size x size (YOLO preprocessing).
     Returns (padded, ratio, (pad_x, pad_y))."""
     h, w = image_bgr.shape[:2]
@@ -74,7 +79,7 @@ def letterbox(image_bgr: np.ndarray, size: int = 640):
     top, bottom = int(round(pad_y - 0.1)), int(round(pad_y + 0.1))
     left, right = int(round(pad_x - 0.1)), int(round(pad_x + 0.1))
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
-                                cv2.BORDER_CONSTANT, value=(114, 114, 114))
+                                cv2.BORDER_CONSTANT, value=color)
     return padded, ratio, (left, top)
 
 
@@ -143,13 +148,41 @@ class OnnxModel:
             except (ValueError, SyntaxError):
                 pass
 
+        # Roboflow may export numeric placeholder class names. The authorized
+        # artifact sidecar contains the actual class map and preprocessing.
+        self._resize_mode = "letterbox"
+        sidecar = Path(str(model_path)+".json")
+        if sidecar.exists():
+            try:
+                info = json.loads(sidecar.read_text(encoding="utf-8"))
+                names = info.get("names")
+                if isinstance(names,list):
+                    self._names = dict(enumerate(map(str,names)))
+                elif isinstance(names,dict):
+                    self._names = {int(k):str(v) for k,v in names.items()}
+                preproc = info.get("preprocessing",{})
+                if isinstance(preproc,str):
+                    preproc = json.loads(preproc)
+                self._resize_mode = preproc.get("resize",{}).get("format","letterbox")
+            except (OSError,ValueError,TypeError,AttributeError):
+                raise ModelError("Invalid local model metadata sidecar") from None
+
     def predict(self, image_bgr: np.ndarray, confidence=50, overlap=45):
         conf = max(0.0, min(1.0, confidence / 100.0))
         iou = max(0.05, min(1.0, overlap / 100.0))
-        padded, ratio, (pad_x, pad_y) = letterbox(image_bgr, self._size)
+        h,w = image_bgr.shape[:2]
+        if self._resize_mode == "Stretch to":
+            padded = cv2.resize(image_bgr,(self._size,self._size))
+            ratio = (self._size/w,self._size/h)
+            pad_x = pad_y = 0
+        else:
+            # Roboflow falls back from 'Fit within' to black-edge letterboxing.
+            color = (114,114,114) if self._resize_mode == "letterbox" else (0,0,0)
+            padded, ratio, (pad_x,pad_y) = letterbox(image_bgr,self._size,color=color)
         blob = padded[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
         try:
-            out = self._session.run(None, {self._input.name: blob})[0]
+            with _ONNX_INFERENCE_LOCK:
+                out = self._session.run(None, {self._input.name: blob})[0]
         except Exception as e:
             raise ModelError(f"ONNX inference failed: {e}") from e
         return self._decode(out[0], conf, iou, ratio, pad_x, pad_y)
@@ -176,13 +209,14 @@ class OnnxModel:
         xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
         keep = nms(xyxy, scores, iou)
         results = []
+        ratio_x,ratio_y = ratio if isinstance(ratio,tuple) else (ratio,ratio)
         for i in keep:
-            cx = (boxes[i, 0] - pad_x) / ratio
-            cy = (boxes[i, 1] - pad_y) / ratio
+            cx = (boxes[i, 0] - pad_x) / ratio_x
+            cy = (boxes[i, 1] - pad_y) / ratio_y
             results.append({
                 "cx": float(cx), "cy": float(cy),
-                "width": float(boxes[i, 2] / ratio),
-                "height": float(boxes[i, 3] / ratio),
+                "width": float(boxes[i, 2] / ratio_x),
+                "height": float(boxes[i, 3] / ratio_y),
                 "class": self._names.get(int(cls[i]), str(int(cls[i]))),
                 "confidence": float(scores[i]),
             })
@@ -196,39 +230,50 @@ class RoboflowModel:
     hosted = True  # remote session object — does not survive system sleep
 
     def __init__(self, project_id, model_version):
-        try:
-            from roboflow import Roboflow
-        except ImportError as e:
-            raise ModelError("roboflow is not installed (pip install roboflow)") from e
-        try:
-            rf = Roboflow(api_key=constants.ROBOFLOW_API_KEY)
-            self._model = rf.workspace().project(project_id).version(model_version).model
-        except Exception as e:
-            raise ModelError(f"Failed to initialize Roboflow model {project_id}: {e}") from e
+        import os
+        self._key = os.environ.get("ROBOFLOW_API_KEY", "")
+        if not self._key:
+            raise ModelError("ROBOFLOW_API_KEY is missing; no embedded credential is used")
+        self._model_id = f"{project_id}/{int(model_version)}"
 
     def predict(self, image_bgr: np.ndarray, confidence=50, overlap=45):
-        h, w = image_bgr.shape[:2]
+        import base64
+        import requests
+        from .table_privacy import private_table_frame
+        try:
+            upload, (offset_x, offset_y) = private_table_frame(image_bgr)
+        except ValueError as e:
+            raise ModelError(str(e)) from None
+        h, w = upload.shape[:2]
         scale = 1.0
-        upload = image_bgr
         if w > constants.API_UPLOAD_MAX_WIDTH:
             scale = constants.API_UPLOAD_MAX_WIDTH / w
             upload = cv2.resize(
-                image_bgr,
+                upload,
                 (constants.API_UPLOAD_MAX_WIDTH, max(1, int(h * scale))),
                 interpolation=cv2.INTER_AREA,
             )
         try:
-            result = self._model.predict(upload, confidence=int(confidence), overlap=int(overlap))
-            raw = result.json().get("predictions", [])
-        except Exception as e:
-            raise ModelError(f"Roboflow inference failed: {e}") from e
+            ok, encoded = cv2.imencode(".jpg", upload, [cv2.IMWRITE_JPEG_QUALITY,95])
+            if not ok:
+                raise ModelError("Table ROI encoding failed")
+            response = requests.post("https://detect.roboflow.com/"+self._model_id,
+                params={"api_key":self._key,"confidence":int(confidence),"overlap":int(overlap)},
+                data=base64.b64encode(encoded).decode("ascii"),
+                headers={"Content-Type":"application/x-www-form-urlencoded"},
+                timeout=(5,20),allow_redirects=False)
+            if response.status_code != 200:
+                raise ModelError(f"Roboflow HTTP {response.status_code}; credential and response suppressed")
+            raw = response.json().get("predictions", [])
+        except (requests.RequestException,ValueError):
+            raise ModelError("Roboflow request failed; URL and credential suppressed") from None
 
         inv = 1.0 / scale
         return [
             {
                 # Roboflow x/y are already the box center.
-                "cx": p["x"] * inv,
-                "cy": p["y"] * inv,
+                "cx": p["x"] * inv + offset_x,
+                "cy": p["y"] * inv + offset_y,
                 "width": p["width"] * inv,
                 "height": p["height"] * inv,
                 "class": str(p["class"]),

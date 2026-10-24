@@ -63,7 +63,8 @@ CUTTING_CARD_CONFIRM_FRAMES = 3
 # sampled confirmed locks, and confirmation-flapping detections to
 # output/training_data/ for review and fine-tuning.
 TRAINING = {
-    "enabled": 1,
+    # Use the redacted ROI recorder for measurements. Legacy crops can include HUD.
+    "enabled": 0,
     "confirmed_every": 25,   # save every Nth confirmed lock
     "max_files": 5000,
 }
