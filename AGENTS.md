@@ -8,7 +8,8 @@ that handoff on the earlier scientific accuracy/soak gates. Those measurements
 remain unverified, and must not be presented as passed. Test GUI actions only
 inside this app, with isolated test data; casino/VM/browser remains read-only.
 
-- Casino/VM/browser: read only. Capture with mss. Never click, type, scroll,
+- Casino/VM/browser: read only. Monitor capture uses mss; the user explicitly
+  requested read-only background window capture, implemented with PrintWindow. Never click, type, scroll,
   reload, or simulate mouse activity there. Keep executor off; no autonomy work.
 - Process locally. Remote calls, if explicitly used, get only a reviewed table
   ROI with account HUD masked. Never persist or upload full desktop screenshots.

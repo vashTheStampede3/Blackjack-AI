@@ -144,3 +144,23 @@ deck, HUD, manual cards/dealer/split, resets, preview and local detection
 start/stop. The OS click helper was unavailable; these are programmatic Tk
 interaction tests, not a claim of physical Windows clicks. 62 regression
 tests pass. Recognition accuracy was deliberately not assessed here.
+
+
+## Window capture ? user requested application selection
+Hypothesis: desktop coordinates cause OCR calibration to drift when a target
+window moves or gets covered. Add a read-only client-area PrintWindow source
+alongside mss monitor capture, selected from a refreshable Window dropdown.
+All calibration, preview and detection reuse ScreenCapture and window-local
+coordinates. Normalize resized frames to the selected client size; document
+that page reflow/zoom requires recalibration. No desktop fallback, activation,
+input, refresh or executor change. Minimized/closed/black sources report errors.
+
+Evidence: before, monitor capture only. After, native test-owned window capture
+is pixel-identical after moving and covering, preserves normalized landmarks
+on resize, rejects minimized/closed sources, and never falls back to desktop.
+64 targeted regression tests pass; 27 isolated real Tk functional workflows
+pass (0 callback/error dialogs), including Window selection, refresh/empty list,
+OCR client dimensions and switching back to Monitor. Recognition quality of
+casino video and compatibility of every accelerated renderer remain unverified.
+Decision: keep. Native borders can change antialiasing on resize; the resize
+test checks calibrated interior landmarks rather than requiring edge identity.

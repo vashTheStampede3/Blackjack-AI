@@ -266,7 +266,15 @@ class ModernBlackjackGUI(tk.Tk):
         return btn
 
     def _build_monitor_section(self, parent):
-        section = self._section(parent, "Monitor")
+        section = self._section(parent, "Capture source")
+        self.source_kind = tk.StringVar(value="Monitor")
+        self.source_combo = ttk.Combobox(section, textvariable=self.source_kind,
+                                        values=["Monitor", "Window"], state="readonly")
+        self.source_combo.pack(fill=tk.X, pady=(0, 6))
+        self.source_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_sources())
+        self.refresh_sources_btn = self._button(section, "Refresh windows", self._refresh_sources,
+                                                C["bg_canvas_soft"])
+        self.refresh_sources_btn.pack(fill=tk.X, pady=(0, 6))
         self.monitor_var = tk.StringVar()
         self.monitor_combo = ttk.Combobox(section, textvariable=self.monitor_var,
                                           state="readonly", font=constants.FONT_BODY)
@@ -687,6 +695,31 @@ class ModernBlackjackGUI(tk.Tk):
 
     # --------------------------------------------------------------- actions
 
+    def _refresh_sources(self):
+        if self.controller.running:
+            return
+        if self.source_kind.get() == "Window":
+            from ..logic.window_capture import list_windows
+            try:
+                self._monitors = list_windows()
+            except Exception as exc:
+                self.set_status(f"Cannot list windows: {exc}", error=True)
+                return
+            labels = [f"{m.title} [{m.pid}]" for m in self._monitors]
+        else:
+            self._monitors = list(screeninfo.get_monitors())
+            labels = [f"Monitor {i + 1}: {m.width}x{m.height}"
+                      for i, m in enumerate(self._monitors)]
+        self.monitor_combo["values"] = labels
+        self.monitor_combo.set("")
+        self.monitor = None
+        for button in (self.start_btn, self.regions_btn, self.calibrate_btn,
+                       self.ocr_btn, self.controls_btn, self.anchors_btn):
+            button.config(state="disabled")
+        self.monitor_status.config(text="Select a window" if self.source_kind.get() == "Window"
+                                   else "Select a monitor", fg=C["text_secondary"])
+        self.set_status("Window capture: keep the window restored; it may stay in the background.")
+
     def _auto_select_monitor(self):
         if self._monitors:
             primary = next((i for i, m in enumerate(self._monitors)
@@ -700,7 +733,7 @@ class ModernBlackjackGUI(tk.Tk):
             return
         self.monitor = self._monitors[idx]
         self.controller.set_monitor(self.monitor)
-        status = f"Using monitor {idx + 1} — {self.monitor.width}x{self.monitor.height}"
+        status = f"Using {self.source_kind.get().lower()} {idx + 1} — {self.monitor.width}x{self.monitor.height}"
         from ..logic.ocr import OCR_AVAILABLE
         if (OCR_AVAILABLE and constants.OCR.get("enabled")
                 and not self.controller.engine.ocr_calibrated):
@@ -714,7 +747,9 @@ class ModernBlackjackGUI(tk.Tk):
         self.ocr_btn.config(state="normal")
         self.controls_btn.config(state="normal")
         self.anchors_btn.config(state="normal")
-        self.set_status(f"Monitor {idx + 1} confirmed ({self.monitor.width}x{self.monitor.height}).")
+        self.set_status(f"{self.source_kind.get()} selected ({self.monitor.width}x{self.monitor.height}). "
+                        + ("OCR coordinates follow this window. Keep it restored."
+                           if self.source_kind.get() == "Window" else ""))
 
     def _refresh_profiles(self):
         """Rebuild the table-profile dropdown — '<name> — <saved date>'."""
@@ -752,6 +787,8 @@ class ModernBlackjackGUI(tk.Tk):
                                   activebackground=C["success_hover"])
             self.start_btn._base_bg = C["success"]
             self.monitor_combo.config(state="readonly")
+            self.source_combo.config(state="readonly")
+            self.refresh_sources_btn.config(state="normal")
             self.profile_combo.config(state="readonly")
             self.calibrate_btn.config(state="normal")
             self.ocr_btn.config(state="normal")
@@ -770,6 +807,8 @@ class ModernBlackjackGUI(tk.Tk):
         # in-flight capture cycle — and the calibrate editors can switch
         # the profile too (Save as profile), so they lock with it.
         self.monitor_combo.config(state="disabled")
+        self.source_combo.config(state="disabled")
+        self.refresh_sources_btn.config(state="disabled")
         self.profile_combo.config(state="disabled")
         self.calibrate_btn.config(state="disabled")
         self.ocr_btn.config(state="disabled")
@@ -902,6 +941,8 @@ class ModernBlackjackGUI(tk.Tk):
                                   activebackground=C["success_hover"])
             self.start_btn._base_bg = C["success"]
             self.monitor_combo.config(state="readonly")
+            self.source_combo.config(state="readonly")
+            self.refresh_sources_btn.config(state="normal")
             self.profile_combo.config(state="readonly")
             self.calibrate_btn.config(state="normal")
             self.ocr_btn.config(state="normal")

@@ -90,6 +90,8 @@ class ScreenCapture:
         """Full-monitor frame as a BGR numpy array (what cv2/models expect)."""
         if self.monitor is None:
             raise ValueError("Monitor not set. Select a monitor before capturing.")
+        if hasattr(self.monitor, "grab_bgr"):
+            return self.monitor.grab_bgr()
         shot = self._sct().grab({
             "left": self.monitor.x,
             "top": self.monitor.y,

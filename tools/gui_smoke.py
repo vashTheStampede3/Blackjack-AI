@@ -93,6 +93,36 @@ def main():
                     for tab in widget.tabs(): widget.select(tab);pump(.04)
         close_tops()
 
+    def window_source_workflow():
+        from unittest.mock import patch
+        from lib.logic.window_capture import WindowSource
+        source = WindowSource(0, "Test window", 123, 640, 480)
+        with patch("lib.logic.window_capture.list_windows", return_value=[source]):
+            app.source_combo.set("Window")
+            app.source_combo.event_generate("<<ComboboxSelected>>")
+            pump()
+            assert app.monitor is None and str(app.start_btn.cget("state")) == "disabled"
+            app.monitor_combo.current(0)
+            app.monitor_combo.event_generate("<<ComboboxSelected>>")
+            pump()
+            assert engine.capture.resolution == (640, 480)
+            assert app.monitor is source
+            click("OCR Regions")
+            editor = next(w for w in tops() if "OCR Regions" in w.title())
+            assert editor.resolution == (640, 480)
+            assert editor._frame_bgr.shape[:2] == (480, 640)
+            close_tops()
+            click("Refresh windows")
+            assert app.monitor is None
+            with patch("lib.logic.window_capture.list_windows", return_value=[]):
+                click("Refresh windows")
+                assert len(app.monitor_combo["values"]) == 0
+        app.source_combo.set("Monitor")
+        app.source_combo.event_generate("<<ComboboxSelected>>")
+        pump()
+        app._auto_select_monitor()
+        assert app.monitor is not None
+
     def choose_first():
         picker=next(w for w in tops() if "card" in w.title().lower())
         choices=[w for w in widgets(picker) if isinstance(w,tk.Button) and str(w.cget("image"))]
@@ -205,6 +235,7 @@ def main():
             check("local detection start/stop",detection)
             for label in ["Calibrate Regions","OCR Regions","Capture Controls","Capture Anchors"]:
                 check(f"{label}: save isolated calibration",lambda label=label:save_calibration(label))
+            check("window selection, OCR client coordinates, refresh and monitor fallback",window_source_workflow)
             assert app.executor.mode=="off" and not app.executor.armed
             # Screenshot contains only this app's opaque client area.
             app.lift();pump(.2)
