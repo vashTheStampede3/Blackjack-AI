@@ -164,3 +164,15 @@ OCR client dimensions and switching back to Monitor. Recognition quality of
 casino video and compatibility of every accelerated renderer remain unverified.
 Decision: keep. Native borders can change antialiasing on resize; the resize
 test checks calibrated interior landmarks rather than requiring edge identity.
+
+
+## Application enumeration fix ? no interface tests requested
+Diagnosis from read-only enumeration: VirtualBox Manager is visible/minimized
+but has a 0x0 client area; the dimensions filter excluded it. Vcore9.2,
+Obsidian and Zen were already enumerated. Retain minimized entries independent
+of size, label with process/application plus window title and minimized status,
+and require restoration before initializing capture geometry. Exclude shell
+input infrastructure. Handle windows closing during enumeration.
+Verification limited to enumeration, no interface tests/clicks/screenshots:
+VirtualBox.exe, VirtualBoxVM.exe (Vcore9.2), Obsidian.exe, zen.exe all present;
+VirtualBox Manager correctly marked minimized. Keep this targeted change.

@@ -1,11 +1,12 @@
 """Read-only Windows client capture, independent of desktop position/occlusion."""
 import ctypes
 from ctypes import wintypes as W
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 
 import cv2
 import numpy as np
+import psutil
 
 
 def _api():
@@ -54,6 +55,27 @@ class WindowSource:
     height: int
     x: int = 0
     y: int = 0
+    application: str = ""
+    minimized: bool = False
+
+    @property
+    def display_name(self):
+        name = f"{self.application} ? {self.title}" if self.application else self.title
+        return f"{name} [{self.pid}]" + (" (minimized)" if self.minimized else "")
+
+    def ready_source(self):
+        """Resolve geometry only after restoring; enumeration must not drop it."""
+        u, _ = _api()
+        if not u.IsWindow(self.hwnd):
+            raise RuntimeError("Window closed. Refresh windows.")
+        if u.IsIconic(self.hwnd):
+            raise RuntimeError("Window is minimized. Restore it, then select it again.")
+        width, height = _dimensions(u, self.hwnd)
+        if width < 2 or height < 2:
+            raise RuntimeError("Window has no client area yet. Restore it and select again.")
+        if self.minimized or self.width < 2 or self.height < 2:
+            return replace(self, width=width, height=height, minimized=False)
+        return self
 
     def grab_bgr(self):
         u, g = _api()
@@ -123,9 +145,21 @@ def list_windows():
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == os.getpid():
             return True
-        width, height = _dimensions(u, hwnd)
-        if width > 1 and height > 1:
-            windows.append(WindowSource(int(hwnd), text.value, pid.value, width, height))
+        try:
+            width, height = _dimensions(u, hwnd)
+        except RuntimeError:
+            return True  # window closed during enumeration
+        minimized = bool(u.IsIconic(hwnd))
+        if minimized or (width > 1 and height > 1):
+            try:
+                application = psutil.Process(pid.value).name()
+            except (psutil.Error, OSError):
+                application = ""
+            # Shell/input infrastructure is not an application capture target.
+            if application.casefold() in {"textinputhost.exe", "shellexperiencehost.exe"} or text.value == "Program Manager":
+                return True
+            windows.append(WindowSource(int(hwnd), text.value, pid.value, width, height,
+                                        application=application, minimized=minimized))
         return True
     u.EnumWindows(visit, 0)
-    return sorted(windows, key=lambda item: item.title.casefold())
+    return sorted(windows, key=lambda item: (item.application.casefold(), item.title.casefold()))

@@ -705,7 +705,7 @@ class ModernBlackjackGUI(tk.Tk):
             except Exception as exc:
                 self.set_status(f"Cannot list windows: {exc}", error=True)
                 return
-            labels = [f"{m.title} [{m.pid}]" for m in self._monitors]
+            labels = [m.display_name for m in self._monitors]
         else:
             self._monitors = list(screeninfo.get_monitors())
             labels = [f"Monitor {i + 1}: {m.width}x{m.height}"
@@ -731,7 +731,19 @@ class ModernBlackjackGUI(tk.Tk):
         idx = self.monitor_combo.current()
         if idx < 0 or idx >= len(self._monitors):
             return
-        self.monitor = self._monitors[idx]
+        selected = self._monitors[idx]
+        if self.source_kind.get() == "Window":
+            try:
+                selected = selected.ready_source()
+            except RuntimeError as exc:
+                self.monitor = None
+                for button in (self.start_btn, self.regions_btn, self.calibrate_btn,
+                               self.ocr_btn, self.controls_btn, self.anchors_btn):
+                    button.config(state="disabled")
+                self.monitor_status.config(text=str(exc), fg=C["danger"])
+                self.set_status(str(exc), error=True)
+                return
+        self.monitor = selected
         self.controller.set_monitor(self.monitor)
         status = f"Using {self.source_kind.get().lower()} {idx + 1} — {self.monitor.width}x{self.monitor.height}"
         from ..logic.ocr import OCR_AVAILABLE
