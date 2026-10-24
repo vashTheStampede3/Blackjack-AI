@@ -221,6 +221,9 @@ class SettingsDialog(tk.Toplevel):
                          int(constants.SNAPSHOT_POLL_MS))
 
         row = self._heading(tab, row, "Detection & advice")
+        row = self._field(tab, row, "app:TABLE_CROP_ENABLED",
+                          "Crop to all seat/dealer regions (one inference)", "bool", None,
+                          constants.TABLE_CROP_ENABLED)
         # DEALER_USE_PLAYER_MODEL is gone from the dialog on purpose: dealer
         # cards now always come from the same full-frame player-model pass
         # the preview draws (the old crop path missed cards); the constant

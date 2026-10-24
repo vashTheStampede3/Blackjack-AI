@@ -43,6 +43,7 @@ from .monitor_utils import (Polygon, ScreenCapture, dealer_area_rect,
                             scaling_factors)
 from .session_store import SessionStore
 from .round_observation import RoundObservation
+from .table_inference import predict_table
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
 
@@ -398,13 +399,14 @@ class DetectionEngine:
     def _detect(self, frame):
         t0 = time.perf_counter()
         players_future = self._pool.submit(
-            self.provider.players_model().predict, frame,
+            predict_table, self.provider.players_model(), frame, self.regions, self._dealer_rect,
             constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
 
         self._last_frame = frame  # retained for training-data crops
         left, top, right, bottom = self._dealer_rect
 
-        player_preds = players_future.result()
+        player_preds, input_bounds = players_future.result()
+        self._metrics["input_bounds"] = input_bounds
         # The dealer area is watched for the whole round: before the lock to
         # find the up-card, after it to count the dealer's playout cards —
         # otherwise the shoe composition silently drifts every round.

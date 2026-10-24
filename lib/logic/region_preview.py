@@ -11,6 +11,7 @@ from PIL import Image
 from ..common import constants
 from ..common.card_mappings import PLAYER_CLASS_MAP
 from .monitor_utils import dealer_area_rect, scaled_player_regions
+from .table_inference import predict_table
 
 
 def build_region_preview(engine, source=None) -> Image.Image:
@@ -24,10 +25,17 @@ def build_region_preview(engine, source=None) -> Image.Image:
     model = engine.provider.players_model()
     if getattr(model, "hosted", False):
         raise ValueError("Preview requires a local model; images are not uploaded.")
-    preds = model.predict(
-        frame, constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
+    regions = scaled_player_regions(capture.resolution) if source else engine.regions
+    dealer = dealer_area_rect(capture.resolution) if source else getattr(
+        engine, "_dealer_rect", None) or dealer_area_rect(capture.resolution)
+    preds, bounds = predict_table(model, frame, regions, dealer,
+        constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
 
     img = frame.copy()
+    l, t, r, b = bounds
+    cv2.rectangle(img, (l, t), (r-1, b-1), (0, 220, 220), 2)
+    cv2.putText(img, f"MODEL INPUT {r-l}x{b-t}", (l+5, max(t+18, 18)),
+                cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 220, 220), 1)
 
     # Detected cards (green boxes).
     for p in preds:
@@ -41,7 +49,6 @@ def build_region_preview(engine, source=None) -> Image.Image:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
 
     # Seat polygons (blue) with seat numbers.
-    regions = scaled_player_regions(capture.resolution) if source else engine.regions
     if regions:
         for i, region in enumerate(regions):
             pts = region.vertices.astype(np.int32).reshape((-1, 1, 2))
@@ -51,7 +58,7 @@ def build_region_preview(engine, source=None) -> Image.Image:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 120, 0), 2)
 
     # Dealer area (red).
-    left, top, right, bottom = dealer_area_rect(capture.resolution)
+    left, top, right, bottom = dealer
     cv2.rectangle(img, (left, top), (right, bottom), (0, 0, 220), 2)
     cv2.putText(img, "DEALER AREA", (left + 8, top + 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 220), 2)
