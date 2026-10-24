@@ -58,3 +58,14 @@ End-round running accuracy: 52.436% -> 90.000%; mean absolute final drift:
 Keep .7 as experimental candidate. It still fails the 95% criterion even on
 this simulation. Do not lower it further to force approval; obtain real replay
 labels and diagnose unknowns/motion. Production engine has not been replaced.
+
+## Detection/latency iteration 1 — S8S8 QDQ
+
+Single hypothesis: quantize the original range model's Conv nodes with static
+S8S8 per-channel QDQ to reduce CPU latency. Calibration: only the historical
+diagnostic clip, never a future live holdout. Run the same 30-frame manifest,
+confidence .55 and NMS .45. Size: 103.6 MB -> 26.5 MB.
+
+Detector p95: 1,302.87 -> 1,746.87 ms; worse. Raw boxes: 214 -> 212,
+whose correctness is unknown. Reject this variant as the speed candidate;
+retain its private artifact/evidence, do not activate it. Accuracy is unscored.
