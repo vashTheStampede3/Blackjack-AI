@@ -6,5 +6,5 @@
 6. Grabar: `.\start.ps1 -Mode record -Session session_a -Role train -Seconds 1800`.
 7. Repetir en otra sesión con `-Session session_b -Role eval`.
 8. Revisar: `.\start.ps1 -Mode review -Manifest data/session_b/frames.jsonl`.
-9. Evaluar: `.\start.ps1 -Mode eval -Manifest data/session_b/frames.jsonl -Labels data/session_b/labels.jsonl`.
+9. Evaluar: `.\start.ps1 -Mode eval -Manifest data/session_b/frames.jsonl -Labels data/session_b/labels.jsonl -Weights models/roboflow/carddetection-v1hqz_17_u8s8.onnx`.
 10. Criterios y pendientes en `reports/FINAL.md`; executor siempre Off.

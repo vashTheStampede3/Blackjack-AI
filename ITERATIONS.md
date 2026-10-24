@@ -104,3 +104,21 @@ frames are skipped, only ROI coordinates are requested, masks precede return,
 occluded-anchor frames are not persisted, session names cannot escape data/,
 and the Windows keep-awake state is restored. No desktop data was used by
 these tests. Real recording remains blocked by an unapproved current ROI.
+
+## Counting iteration 3 — bounded vote history (synthetic only)
+
+Single hypothesis: limit votes to the last 5 observations so old outliers do
+not indefinitely block a later stable card. Keep confirmations=3, consensus=.7,
+confidence=.5, geometry/duplicates unchanged. The committed-card health flag
+uses the same consensus instead of treating one late outlier as a contradiction.
+No automatic recount or rank correction is introduced.
+
+Same 30 seeds / 780 rounds / exact generated detections as iteration 2.
+Running-count round accuracy: 90.0000% -> 94.7436% (739/780); mean absolute
+end-shoe drift: 0.2000 -> 0.0667; duplicate events 0. Keep the improvement as
+an experimental candidate. **Still below 95%; no rounding to pass.**
+
+61 tests pass, including stale-outlier expiry, isolated post-lock noise and
+sustained contradictions becoming unknown without a second count. New data
+with real motion, stable card IDs and human-reviewed ranges is required before
+further tuning or production integration. Evidence: count_simulation_window5.json.

@@ -56,6 +56,31 @@ def test_confusion_remains_unknown_until_consensus():
     assert c.snapshot()["unknown"]==1
 
 
+def test_old_outliers_expire_without_reducing_confirmation_threshold():
+    c=TemporalCounter()
+    for i,rank in enumerate(["8","9","6","6","8","6","6","6"]):
+        c.observe("r1",str(i),[pred(rank)])
+    assert c.cards_seen==1 and c.running==1
+    assert c.tracks[0].committed=="6"
+
+
+def test_one_late_outlier_does_not_taint_confirmed_card():
+    c=TemporalCounter(origin_known=True)
+    for i,rank in enumerate(["6","6","6","8","6","6","6"]):
+        c.observe("r1",str(i),[pred(rank)])
+    assert c.cards_seen==1 and c.running==1
+    assert c.snapshot()["count_valid"]
+
+
+def test_sustained_contradiction_becomes_unknown_without_recount():
+    c=TemporalCounter(origin_known=True)
+    for i,rank in enumerate(["6","6","6","8","8","8","8"]):
+        c.observe("r1",str(i),[pred(rank)])
+    assert c.cards_seen==1 and c.running==1
+    assert c.snapshot()["unknown"]==1
+    assert not c.snapshot()["count_valid"]
+
+
 def test_reordered_replay_invariant():
     frames=[{"timestamp":i,"frame_id":str(i),"round_id":i//4,"detections":[pred("A" if i//4 else "3")]} for i in range(8)]
     a=TemporalCounter().replay(frames)

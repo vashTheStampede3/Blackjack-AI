@@ -5,7 +5,7 @@ import random
 
 from tools.common import ROOT, write_json
 from tools.detectors import Detection
-from lib.logic.vision_counter import TemporalCounter
+from lib.logic.vision_counter import TemporalCounter, Track
 from lib.logic.vision_labels import RANKS, delta
 
 
@@ -51,7 +51,7 @@ def main(args):
             "double_count_events":sum(r["double_count_events"] for r in rows),
             "manual_reset_all":all(r["manual_reset_ok"] for r in rows)}
     payload={"scope":"SYNTHETIC ONLY; no live validation", "parameters":{
-        "decks":8,"frames_per_round":10,"consensus":args.consensus,"miss_probability":.1,
+        "decks":8,"frames_per_round":10,"consensus":args.consensus,"vote_history":Track("metadata",[]).history.maxlen,"miss_probability":.1,
         "rank_confusion_probability":.03,"duplicate_probability":.15,"position_jitter_px":.8},
         "summary":summary,"runs":results}
     write_json(ROOT/"reports"/"count_simulation.json",payload)

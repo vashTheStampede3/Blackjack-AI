@@ -3,7 +3,7 @@
 Distinct frames vote on persistent physical tracks. Ambiguous tracks remain
 unknown. Replaying out-of-order input first sorts original capture timestamps.
 """
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 import math
 
@@ -17,6 +17,7 @@ class Track:
     votes: Counter = field(default_factory=Counter)
     committed: str | None = None
     conflicting: bool = False
+    history: deque = field(default_factory=lambda:deque(maxlen=5))
 
     @property
     def rank(self):
@@ -96,11 +97,12 @@ class TemporalCounter:
             rank = canonical_rank(pred.rank)
             if pred.confidence < self.min_confidence or rank == "unknown":
                 continue
-            track.votes[rank] += 1
+            track.history.append(rank)
+            track.votes = Counter(track.history)
             winner, count = track.votes.most_common(1)[0]
             if track.committed:
-                if rank != track.committed:
-                    track.conflicting = True
+                if count>=self.confirmations and count/sum(track.votes.values())>=self.consensus:
+                    track.conflicting = winner != track.committed
                 continue
             if count < self.confirmations or count/sum(track.votes.values()) < self.consensus:
                 continue
