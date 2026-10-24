@@ -129,3 +129,64 @@ def test_static_frame_pending_cards_still_get_a_second_real_inference(engine, mo
     assert engine.counter.cards_seen == 0
     engine.run_cycle()
     assert len(calls) == 2 and engine.counter.cards_seen == 3
+
+
+def test_ambiguous_rank_stays_unread_until_two_clear_observations(engine):
+    uncertain = pred("K") | {"ambiguous": True}
+    for _ in range(3):
+        engine._process_players([uncertain])
+    assert engine.counter.cards_seen == 0 and engine._unread_positions
+    # K/Q share Hi-Lo, but we must not fabricate a rank or pair.
+    engine._process_players([pred("Q")])
+    assert engine.counter.cards_seen == 0
+    engine._process_players([pred("Q")])
+    assert engine.counter.cards_seen == 1 and not engine._unread_positions
+    assert engine.seats[0].cards[0]["name"] == "Queen"
+
+
+def test_unread_card_disappearing_does_not_silently_certify_shoe(engine):
+    engine._process_players([pred("6") | {"ambiguous": True}])
+    engine._process_players([])
+    assert not engine._pending_extra and engine._unread_positions
+    engine.new_round()
+    assert engine._round_observation.count_uncertain
+    assert engine.counter.cards_seen == 0
+
+
+def test_dealer_motion_breaks_confirmation_instead_of_becoming_a_card(engine):
+    card = pred("A", 50, 50)
+    engine._process_dealer([card])
+    engine._process_dealer([card | {"unstable": True}])
+    engine._process_dealer([card])
+    assert not engine.dealer_locked
+    engine._process_dealer([card])
+    assert engine.dealer_locked and engine.counter.cards_seen == 1
+    assert not engine._unread_positions
+
+
+def test_local_motion_gate_ignores_moving_background_but_holds_changed_card():
+    from lib.logic.card_evidence import CardEvidence
+    evidence = CardEvidence()
+    frame = np.full((480, 640, 3), 40, np.uint8)
+    box = pred("8")
+    assert not evidence.observe(frame, [box])[0]["unstable"]
+    frame[0:100] = 200  # animated dealer/video far outside the card
+    assert not evidence.observe(frame, [box])[0]["unstable"]
+    frame[180:220, 65:95] = 220
+    assert evidence.observe(frame, [box])[0]["unstable"]
+    assert not evidence.observe(frame, [box])[0]["unstable"]
+    assert evidence.observe(frame, [box | {"cx": 88}])[0]["unstable"]
+
+
+def test_decode_preserves_runner_up_score_and_can_disable_abstention(monkeypatch):
+    from lib.logic.models import OnnxModel
+    model = object.__new__(OnnxModel)
+    model._names = {0: "6", 1: "9"}
+    raw = np.zeros((6, 12), np.float32)
+    raw[:4, 0] = [40, 50, 20, 30]
+    raw[4:, 0] = [.8, .76]
+    result = model._decode(raw, .55, .45, 1, 0, 0)
+    assert result[0]["class"] == "6" and result[0]["runner_up_class"] == "9"
+    assert result[0]["ambiguous"] and result[0]["class_margin"] == pytest.approx(.04)
+    monkeypatch.setattr(constants, "CARD_EVIDENCE_ENABLED", 0)
+    assert not model._decode(raw, .55, .45, 1, 0, 0)[0]["ambiguous"]

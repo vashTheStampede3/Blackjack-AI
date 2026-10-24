@@ -198,8 +198,15 @@ class OnnxModel:
         class_scores = preds[4:].T       # (n, nc)
         cls = class_scores.argmax(axis=1)
         scores = class_scores[np.arange(len(cls)), cls]
+        if class_scores.shape[1] > 1:
+            top_two = np.argpartition(class_scores, -2, axis=1)[:, -2:]
+            second_cls = np.where(top_two[:, 0] == cls, top_two[:, 1], top_two[:, 0])
+            second_scores = class_scores[np.arange(len(cls)), second_cls]
+        else:
+            second_cls, second_scores = cls.copy(), np.zeros_like(scores)
         mask = scores >= conf
         boxes, scores, cls = boxes[mask], scores[mask], cls[mask]
+        second_cls, second_scores = second_cls[mask], second_scores[mask]
         if not len(boxes):
             return []
         xyxy = np.empty_like(boxes)
@@ -219,6 +226,9 @@ class OnnxModel:
                 "height": float(boxes[i, 3] / ratio_y),
                 "class": self._names.get(int(cls[i]), str(int(cls[i]))),
                 "confidence": float(scores[i]),
+                "class_margin": float(scores[i]-second_scores[i]),
+                "runner_up_class": self._names.get(int(second_cls[i]), str(int(second_cls[i]))),
+                "ambiguous": bool(constants.CARD_EVIDENCE_ENABLED and scores[i]-second_scores[i] < .10),
             })
         return results
 

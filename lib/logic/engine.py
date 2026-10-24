@@ -44,6 +44,7 @@ from .monitor_utils import (Polygon, ScreenCapture, dealer_area_rect,
 from .session_store import SessionStore
 from .round_observation import RoundObservation
 from .table_inference import predict_table
+from .card_evidence import CardEvidence
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
 
@@ -79,6 +80,8 @@ class DetectionEngine:
         self.log = _level_aware(log)
         self.capture = ScreenCapture()
         self._round_observation = RoundObservation()
+        self._card_evidence = CardEvidence()
+        self._unread_positions = {}
         self.provider = ModelProvider.get()
         self.strategy = StrategyAdvisor()
         self.counter = CardCounter()
@@ -213,6 +216,10 @@ class DetectionEngine:
     def set_monitor(self, monitor):
         with self._lock:
             self.capture.set_monitor(monitor)
+            if self._unread_positions:
+                self._round_observation.count_uncertain = True
+            self._unread_positions.clear()
+            self._card_evidence = CardEvidence()
             self._pending_extra.clear()
             self._pending_positions.clear()
             self._prev_seat_thumbs.clear()
@@ -369,7 +376,7 @@ class DetectionEngine:
         return activity
 
     def _has_pending_detection(self):
-        return bool(self._pending_extra or self._pending_dealer or self._pending_cutting_card
+        return bool(self._unread_positions or self._pending_extra or self._pending_dealer or self._pending_cutting_card
                     or (self._dealer_history and not self.dealer_locked))
 
     def _frame_unchanged(self, frame) -> bool:
@@ -430,6 +437,7 @@ class DetectionEngine:
 
         player_preds, input_bounds = players_future.result()
         self._metrics["input_bounds"] = input_bounds
+        player_preds = self._card_evidence.observe(frame, player_preds)
         # The dealer area is watched for the whole round: before the lock to
         # find the up-card, after it to count the dealer's playout cards —
         # otherwise the shoe composition silently drifts every round.
@@ -483,6 +491,9 @@ class DetectionEngine:
             self._process_dealer(dealer_preds, cc_checked=cc_checked)
             self._process_players(player_preds)
             self._round_observation.observe(self, player_preds, dealer_preds)
+            if self._round_observation.empty >= constants.EMPTY_FRAMES_FOR_RESET and self._unread_positions:
+                self._round_observation.count_uncertain = True
+                self._unread_positions.clear()
             self._maybe_auto_new_round(player_preds)
 
     # --------------------------------------------------------------- dealer
@@ -511,11 +522,19 @@ class DetectionEngine:
         else:
             self._dealer_empty_frames += 1
 
+        good_cards = [p for p in cards_seen if not (p.get("ambiguous") or p.get("unstable"))]
+        for pred in cards_seen:
+            if pred.get("ambiguous") or pred.get("unstable"):
+                self._flag_unread(pred, -1)
+            elif self.dealer_locked and self._matches_dealer_card(pred, constants.SAME_CARD_DISTANCE_PX*self._dist_scale):
+                self._resolve_unread(pred, -1)
         if self.dealer_locked:
-            self._track_dealer_playout(cards_seen)
+            self._track_dealer_playout(good_cards)
             return
 
-        best = max(cards_seen, key=lambda p: p["confidence"], default=None)
+        if len(good_cards) != len(cards_seen):
+            self._dealer_history.clear()
+        best = max(good_cards, key=lambda p: p["confidence"], default=None)
         if best is None:
             # Tolerate brief occlusion — the dealer's hands cross the cards
             # constantly, and a hard clear on every single miss made the
@@ -528,10 +547,12 @@ class DetectionEngine:
             if self._dealer_miss_streak > constants.DEALER_PENDING_MISS_TOLERANCE:
                 self._dealer_history.clear()
             return
+        self._flag_unread(best, -1)
         self._dealer_miss_streak = 0
         self._dealer_history.append(best["rank"])
         recent = list(self._dealer_history)[-constants.DEALER_CONFIRM_FRAMES:]
         if len(recent) == constants.DEALER_CONFIRM_FRAMES and len(set(recent)) == 1:
+            self._resolve_unread(best, -1)
             self._dealer_pos = (best["cx"], best["cy"])
             self._set_dealer(recent[0], manual=False)
 
@@ -567,6 +588,7 @@ class DetectionEngine:
         for p in cards_seen:
             if self._matches_dealer_card(p, limit_same):
                 continue
+            self._flag_unread(p, -1)
             key = (p["rank"], round(p["cx"] / 50.0), round(p["cy"] / 50.0))
             if key not in self._pending_dealer:
                 # A detection box wobbling across a quantization boundary
@@ -584,6 +606,7 @@ class DetectionEngine:
             hits, _, _, _ = self._pending_dealer.get(key, (0, 0, None, None))
             hits += 1
             if hits >= constants.EXTRA_CARD_CONFIRM_CYCLES:
+                self._resolve_unread(p, -1)
                 self.dealer_extras.append({"rank": p["rank"], "cx": p["cx"], "cy": p["cy"]})
                 self.counter.count_card(p["rank"])
                 self._pending_dealer.pop(key, None)
@@ -684,6 +707,12 @@ class DetectionEngine:
             seat_idx = self._seat_for_point(p["cx"], p["cy"])
             if seat_idx is None:
                 continue
+            if p.get("ambiguous") or p.get("unstable"):
+                self._flag_unread(p, seat_idx)
+            elif any(c["name"] == name and c["cx"] is not None and
+                     (c["cx"]-p["cx"])**2+(c["cy"]-p["cy"])**2 < (max(4., min(p.get("width",30),p.get("height",30))*.35))**2
+                     for c in self.seats[seat_idx].cards):
+                self._resolve_unread(p, seat_idx)
             candidates.setdefault(seat_idx, []).append(p | {"name": name})
 
         seen_pending = set()
@@ -715,10 +744,16 @@ class DetectionEngine:
                     seat_idx, pred["name"], pred["cx"]/50., pred["cy"]/50.)
                 available.discard(key)  # a track consumes at most one box per frame
                 seen_pending.add(key)
+                self._flag_unread(pred, seat_idx)
+                if pred.get("ambiguous") or pred.get("unstable"):
+                    self._pending_extra[key] = 0
+                    self._pending_positions[key] = (pred["cx"], pred["cy"])
+                    continue
                 count = self._pending_extra.get(key, 0)+1
                 required = (1 if len(seat.cards)<2 and not constants.CONFIRM_INITIAL_CARDS_ENABLED
                             else constants.EXTRA_CARD_CONFIRM_CYCLES)
                 if count >= required:
+                    self._resolve_unread(pred, seat_idx)
                     self._lock_card(seat, pred)
                     self._pending_extra.pop(key, None)
                     self._pending_positions.pop(key, None)
@@ -732,6 +767,22 @@ class DetectionEngine:
                                      qx*50., qy*50., name, "lowconf")
             del self._pending_extra[key]
             self._pending_positions.pop(key, None)
+
+    def _flag_unread(self, pred, owner):
+        tolerance = max(4., min(pred.get("width", 30), pred.get("height", 30))*.35)
+        for key, (x, y, radius) in self._unread_positions.items():
+            if key[0] == owner and (x-pred["cx"])**2+(y-pred["cy"])**2 < max(tolerance,radius)**2:
+                self._unread_positions[key] = (pred["cx"], pred["cy"], tolerance)
+                return
+        if len(self._unread_positions) >= 64:
+            self._round_observation.count_uncertain = True
+            return
+        self._unread_positions[(owner, pred["cx"], pred["cy"])] = (pred["cx"], pred["cy"], tolerance)
+
+    def _resolve_unread(self, pred, owner):
+        for key, (x, y, radius) in list(self._unread_positions.items()):
+            if key[0] == owner and (x-pred["cx"])**2+(y-pred["cy"])**2 < radius**2:
+                del self._unread_positions[key]
 
     def _seat_for_point(self, x, y):
         for i, region in enumerate(self.regions):
@@ -883,6 +934,10 @@ class DetectionEngine:
         self._reset_round_state()
 
     def _reset_round_state(self):
+        if self._unread_positions or self._pending_extra:
+            self._round_observation.count_uncertain = True
+        self._unread_positions.clear()
+        self._card_evidence = CardEvidence()
         self._round_observation.reset_round()
         # Settle and persist the round that just ended (and the shoe state, so
         # a restart mid-shoe doesn't lose the count) before wiping the table.
@@ -945,6 +1000,11 @@ class DetectionEngine:
         with self._lock:
             self.counter.reset_shoe()
             self._round_observation.count_uncertain = False
+            self._round_observation.count_pending = False
+            self._unread_positions.clear()
+            self._pending_extra.clear()
+            self._pending_positions.clear()
+            self._card_evidence = CardEvidence()
             self.cutting_card_seen = False
             self._pending_cutting_card.clear()
             self._reshuffle_dismissed = False  # next confirmation shows a fresh badge

@@ -22,6 +22,7 @@ SETTINGS_PATH = constants.OUTPUT_DIR / "settings.json"
 _APP_ATTRS = {
     "TABLE_CROP_ENABLED": (int, 0, 1),
     "CONFIRM_INITIAL_CARDS_ENABLED": (int, 0, 1),
+    "CARD_EVIDENCE_ENABLED": (int, 0, 1),
     "EMPTY_FRAMES_FOR_RESET": (int, 3, 10),
     "CUTTING_CARD_CONFIRM_FRAMES": (int, 1, 5),
     "EV_ADVICE_TIMEOUT_S": (float, 1.0, 10.0),

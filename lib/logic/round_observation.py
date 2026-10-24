@@ -23,17 +23,22 @@ class RoundObservation:
         self.seats = {}
         self.dealer_ok = False
         self.count_uncertain = False
+        self.count_pending = False
 
     def reset_round(self):
         self.present, self.empty = False, 3
         self.seats = {}
         self.dealer_ok = False
         self.inferred_at = 0.0
+        self.count_pending = False
 
     def observe(self, engine, predictions, dealer_predictions):
         self.inferred_at = self.captured_at
         observed = {i: [] for i in range(len(engine.seats))}
         uncertain_seats = set()
+        low_score_seats = set()
+        unread = getattr(engine, "_unread_positions", {})
+        self.count_pending = bool(unread)
         for pred in predictions:
             name = PLAYER_CLASS_MAP.get(pred["class"])
             if name:
@@ -43,6 +48,8 @@ class RoundObservation:
                     # Conservative display gate only; detector/count thresholds
                     # stay untouched. A model score is not calibrated accuracy.
                     if pred.get("confidence", 0) < .75:
+                        low_score_seats.add(seat)
+                    if pred.get("confidence", 0) < .75 or pred.get("ambiguous") or pred.get("unstable"):
                         uncertain_seats.add(seat)
         dealer = [PLAYER_CLASS_MAP[p["class"]] for p in dealer_predictions
                   if p["class"] in PLAYER_CLASS_MAP]
@@ -55,11 +62,11 @@ class RoundObservation:
         self.seats = {}
         for seat in engine.seats:
             expected = [c["name"] for c in seat.cards]
-            pending = any(k[0] == seat.index for k in engine._pending_extra)
+            pending = any(k[0] == seat.index for k in engine._pending_extra) or any(k[0] == seat.index for k in unread)
             match = compare_ranks(expected, observed[seat.index])
             self.seats[seat.index] = bool(len(expected) >= 2 and match and not pending
                                           and seat.index not in uncertain_seats)
-            if expected and seat.index in uncertain_seats:
+            if expected and seat.index in low_score_seats:
                 self.count_uncertain = True
             # Contradictory complete rank sets can already have affected count.
             if expected and observed[seat.index] and len(expected) == len(observed[seat.index]) and not match:
@@ -69,6 +76,8 @@ class RoundObservation:
         self.dealer_ok = bool(engine.dealer_locked and expected_dealer
                               and compare_ranks(expected_dealer, dealer)
                               and not engine._pending_dealer
+                              and not any(k[0] == -1 for k in unread)
+                              and not any(p.get("ambiguous") or p.get("unstable") for p in dealer_predictions)
                               and all(p.get("confidence", 0) >= .75 for p in dealer_predictions
                                       if p["class"] in PLAYER_CLASS_MAP))
         if expected_dealer and any(p.get("confidence", 0) < .75 for p in dealer_predictions
@@ -81,7 +90,7 @@ class RoundObservation:
         return {"captured_at": self.captured_at, "inferred_at": self.inferred_at,
                 "present": self.present, "empty": self.empty,
                 "seats": dict(self.seats), "dealer_ok": self.dealer_ok,
-                "count_uncertain": self.count_uncertain}
+                "count_uncertain": self.count_uncertain, "count_pending": self.count_pending}
 
 
 ACTIONS = {"H": "Hit", "S": "Stand", "D": "Double", "P": "Split", "R": "Surrender",
@@ -94,7 +103,7 @@ def overlay_text(snap, running, now=None):
     snap = snap or {}
     q = snap.get("reading") or {}
     count = snap.get("count") or {}
-    marker = " ?" if q.get("count_uncertain") else ""
+    marker = " ?" if q.get("count_uncertain") or q.get("count_pending") else ""
     count_line = f"RC {count.get('running', 0):+d}   TC {count.get('true', 0):+.1f}{marker}"
     if not running:
         return "warning", count_line, "Detección detenida"
@@ -116,7 +125,7 @@ def overlay_text(snap, running, now=None):
             lines.append(prefix+"Lectura incompleta")
             continue
         # Count-dependent optimal advice is unsafe after a known count conflict.
-        action = (seat.get("book_action") if q.get("count_uncertain") else
+        action = (seat.get("book_action") if q.get("count_uncertain") or q.get("count_pending") else
                   seat.get("optimal_action") or seat.get("book_action"))
         if seat.get("split"):
             codes = action if isinstance(action, list) else []
@@ -127,4 +136,6 @@ def overlay_text(snap, running, now=None):
         lines.append(prefix+(text or "Lectura incompleta"))
     if q.get("count_uncertain"):
         lines.append("Conteo dudoso · consejo básico")
+    elif q.get("count_pending"):
+        lines.append("Conteo pendiente · consejo básico")
     return "active", count_line, "\n".join(lines)

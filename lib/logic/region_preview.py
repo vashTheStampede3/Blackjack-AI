@@ -44,9 +44,11 @@ def build_region_preview(engine, source=None) -> Image.Image:
         y1 = int(p["cy"] - p["height"] / 2)
         x2 = int(p["cx"] + p["width"] / 2)
         y2 = int(p["cy"] + p["height"] / 2)
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 0), 2)
-        cv2.putText(img, f"{name} {p['confidence']:.2f}", (x1, max(14, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
+        color = (0, 180, 255) if p.get("ambiguous") else (0, 200, 0)
+        label = name+("?" if p.get("ambiguous") else "")
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(img, f"{label} {p['confidence']:.2f}", (x1, max(14, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
     # Seat polygons (blue) with seat numbers.
     if regions:
