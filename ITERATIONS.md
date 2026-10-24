@@ -32,3 +32,15 @@ diagnostic ROIs using 640-native-pixel tiling, 25% overlap, 2x resampling and
 same-code pip grouping (140 px). All emitted zero >=0.5-confidence boxes.
 This is evidence about this clip/configuration, not a universal rejection of
 those models or a conclusion about the user's current table.
+
+## Counting iteration 1 — temporal confirmations (synthetic only)
+
+Measure: `python -m tools.simulate_shoe --seeds 30 --consensus .8`.
+Same seeded 8-deck shoes, 10 views per round; misses 10%, rank confusions 3%,
+duplicate boxes 15%, 0.8 px jitter. 780 rounds per condition.
+
+Hypothesis: three observations reject isolated rank noise better than one.
+End-round running accuracy: 18.846% -> 52.436%; mean absolute end-shoe drift:
+1.7 -> 0.9. Duplicate events: 0 in both. Keep three confirmations in candidate.
+Unknown origin/ambiguous tracks are flagged; a cutting-card sighting alone
+cannot reset the shoe. Three manual reset cycles passed. No live claim.

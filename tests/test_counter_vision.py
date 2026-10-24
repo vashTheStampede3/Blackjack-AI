@@ -81,6 +81,29 @@ def test_manual_shuffle_fallback_and_cut_card_not_reset():
     assert c.cards_seen==c.running==0 and c.shoe==1
 
 
+def test_three_shoes_manual_fallback_and_unknown_origin():
+    c=TemporalCounter()
+    assert not c.snapshot()["count_valid"]
+    for shoe in range(3):
+        c.reset_shoe("manual")
+        assert c.snapshot()["count_valid"]
+        for frame in range(3): c.observe(1,str(frame),[pred("A")])
+        assert c.running==-1 and c.cards_seen==1
+    assert c.shoe==3
+
+
+def test_occlusion_anchor_guard(tmp_path,monkeypatch):
+    import cv2
+    import tools.common as common
+    image=np.zeros((40,40,3),np.uint8)
+    image[10:30,10:30]=np.random.default_rng(3).integers(0,256,(20,20,3),dtype=np.uint8)
+    cv2.imwrite(str(tmp_path/"anchor.png"),image[10:30,10:30])
+    monkeypatch.setattr(common,"ROOT",tmp_path)
+    cfg={"anchors":[{"rect":[10,10,30,30],"image":"anchor.png"}]}
+    assert common.table_anchors_match(image,cfg)
+    assert not common.table_anchors_match(np.zeros_like(image),cfg)
+
+
 def test_full_eight_deck_shoe_and_capacity():
     c=TemporalCounter()
     deck=list(RANKS)*32

@@ -24,7 +24,7 @@ class Track:
 
 
 class TemporalCounter:
-    def __init__(self, decks=8, confirmations=3, consensus=.8, min_confidence=.5):
+    def __init__(self, decks=8, confirmations=3, consensus=.8, min_confidence=.5, origin_known=False):
         self.decks = decks
         self.confirmations = confirmations
         self.consensus = consensus
@@ -36,6 +36,7 @@ class TemporalCounter:
         self.tracks = []
         self._frames = set()
         self.shoe = 0
+        self.origin_known = origin_known
         self._round_tracks = {}
         self._round_frames = {}
         self._rank_seen = Counter()
@@ -51,6 +52,7 @@ class TemporalCounter:
             raise ValueError("A cutting card alone does not prove a shuffle occurred")
         self.running = self.cards_seen = 0
         self.shoe += 1
+        self.origin_known = True
         self.tracks = []
         self._frames = set()
         self.round_id = None
@@ -117,10 +119,12 @@ class TemporalCounter:
         return accepted
 
     def snapshot(self):
-        remaining = max(.5,self.decks-self.cards_seen/52)
+        remaining = max(0.,self.decks-self.cards_seen/52)
+        unknown = sum(t.committed is None or t.conflicting for t in self.tracks)
         return {"running":self.running,"cards_seen":self.cards_seen,
-                "decks_remaining":remaining,"true":self.running/remaining,
-                "unknown":sum(t.committed is None or t.conflicting for t in self.tracks)}
+                "decks_remaining":remaining,"true":self.running/remaining if remaining else None,
+                "unknown":unknown,"count_valid":self.origin_known and unknown==0,
+                "shoe_origin_known":self.origin_known}
 
     def replay(self, frames):
         for frame in sorted(frames,key=lambda f:(f["timestamp"],f["frame_id"])):
