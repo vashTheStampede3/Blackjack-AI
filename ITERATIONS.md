@@ -96,3 +96,11 @@ The previously recorded .70/.45 candidate emitted 124 boxes, p95 300 ms.
 These are separate named runs, neither with correctness labels. No silent
 threshold change and no accuracy claim. Sidecar/class-map/privacy/Hi-Lo/shoe/
 OCR/validation suite now reports 54 passing tests; live holdout remains absent.
+
+## Recorder verification checkpoint
+
+58 tests now pass. Added a fake-mss/clock recording lifecycle test: unchanged
+frames are skipped, only ROI coordinates are requested, masks precede return,
+occluded-anchor frames are not persisted, session names cannot escape data/,
+and the Windows keep-awake state is restored. No desktop data was used by
+these tests. Real recording remains blocked by an unapproved current ROI.

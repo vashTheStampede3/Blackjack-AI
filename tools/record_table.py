@@ -45,6 +45,8 @@ def record(args):
         with mss.MSS() as sct, (out / "frames.jsonl").open("w", encoding="utf-8") as log:
             while time.monotonic()-start < args.seconds:
                 time.sleep(max(0, next_capture-time.monotonic()))
+                if time.monotonic()-start>=args.seconds:
+                    break
                 image = capture_roi(sct, cfg)
                 attempts += 1
                 next_capture = max(next_capture+1/args.fps, time.monotonic())
