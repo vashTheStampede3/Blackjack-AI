@@ -1,0 +1,44 @@
+# Virtual environments
+venv/
+.venv/
+blackjackvenv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# IDE / editor state
+.idea/
+.vs/
+.claude/
+
+# Runtime artifacts (screenshots, predictions, caches, logs)
+output/
+logs/
+recommendation_cache.json
+
+# Local model weights (large binaries stay out of git)
+models/*.pt
+models/*.onnx
+models/*.engine
+
+# Images are ignored by default (datasets, screenshots)...
+*.png
+*.jpg
+# ...except the app's own assets
+!assets/**/*.png
+!assets/**/*.jpg
+# Captured control templates are per-user calibration, not shipped assets
+assets/controls/
+
+# Private measurements, recordings, weights and alternate Python environment.
+.venv312/
+.uv-cache/
+models/
+data/
+reports/
+.env
+.env.*
+# Historical exports may contain obsolete embedded third-party credentials.
+archive/
+AUDIT_*.md

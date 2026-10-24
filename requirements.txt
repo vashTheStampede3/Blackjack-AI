@@ -1,0 +1,25 @@
+numpy
+opencv-python
+pillow
+mss
+screeninfo
+requests
+roboflow
+winocr  # Windows-only: balance/bet/result OCR via the built-in Windows.Media.Ocr
+
+# Tests (python -m pytest tests):
+pytest
+
+# Optional: local inference instead of the Roboflow API.
+# Drop YOLO weights into models/player_cards.pt / models/dealer_cards.pt and:
+# ultralytics
+# Or export to ONNX (model.export(format="onnx")) for ~3x CPU speed, no torch:
+# onnxruntime
+
+# Optional: CDP click path for the assisted executor (frees the physical
+# cursor). OS SendInput via ctypes works without it. Start Chrome with
+# --remote-debugging-port=9222 and enable "Click via CDP" in Settings.
+# playwright
+
+# The Claude vision assist (calibration bootstrap + screen triage) uses the
+# plain REST API through `requests` — no extra dependency, just an API key.
