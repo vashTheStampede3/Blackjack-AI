@@ -98,6 +98,7 @@ DEALER_AREA_WIDTH, DEALER_AREA_HEIGHT = 1000, 800
 # so a quick playout doesn't outrun the confirmation.
 CYCLE_SLEEP_DEALING = 0.3
 TABLE_CROP_ENABLED = 1
+CONFIRM_INITIAL_CARDS_ENABLED = 1
 CYCLE_SLEEP_COMPLETE = 1.0
 CYCLE_SLEEP_WAITING = 1.2
 # Time-critical phases (bets open / your turn) sample faster — the betting

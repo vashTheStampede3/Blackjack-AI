@@ -129,6 +129,8 @@ class DetectionEngine:
         self._dist_scale = 1.0
 
         self._pool = ThreadPoolExecutor(max_workers=2)
+        self._pending_positions = {}
+        self._prev_seat_thumbs = {}
         self._pending_extra = {}   # (seat_idx, name, qx, qy) -> consecutive sightings
         self._prev_thumb = None
         self._prev_dealer_thumb = None
@@ -211,6 +213,10 @@ class DetectionEngine:
     def set_monitor(self, monitor):
         with self._lock:
             self.capture.set_monitor(monitor)
+            self._pending_extra.clear()
+            self._pending_positions.clear()
+            self._prev_seat_thumbs.clear()
+            self._prev_thumb = self._prev_dealer_thumb = None
             previous_doubt = self._round_observation.count_uncertain
             self._round_observation = RoundObservation()
             self._round_observation.count_uncertain = previous_doubt
@@ -315,7 +321,7 @@ class DetectionEngine:
             # while the dealer's hand sits static between cards.
             unchanged = self._frame_unchanged(frame)
             with self._lock:
-                force_detect = self._dealer_drawing()
+                force_detect = self._dealer_drawing() or self._has_pending_detection()
             if unchanged and not force_detect:
                 skipped = True
                 # Reuse the detector evidence for the frame the existing
@@ -354,13 +360,17 @@ class DetectionEngine:
             # cadence — playout draws land ~1 s apart and the slow
             # "complete" pace missed cards. (Only the pacing/status string
             # changes; _maybe_auto_new_round keeps using _activity().)
-            if activity == "complete" and self._dealer_drawing():
+            if self._has_pending_detection() or (activity == "complete" and self._dealer_drawing()):
                 activity = "dealing"
         self._last_activity = activity
         self._metrics["cycle_ms"] = (time.perf_counter() - t0) * 1000.0
         self._metrics["skipped"] = skipped
         self.publish_snapshot()
         return activity
+
+    def _has_pending_detection(self):
+        return bool(self._pending_extra or self._pending_dealer or self._pending_cutting_card
+                    or (self._dealer_history and not self.dealer_locked))
 
     def _frame_unchanged(self, frame) -> bool:
         thumb = cv2.cvtColor(cv2.resize(frame, (96, 54), interpolation=cv2.INTER_AREA),
@@ -381,6 +391,19 @@ class DetectionEngine:
                     cv2.COLOR_BGR2GRAY)
         dealer_prev = self._prev_dealer_thumb
         self._prev_dealer_thumb = dealer_thumb
+        seat_changed = False
+        current_seats = {}
+        for i, region in enumerate(self.regions or []):
+            l, t, r, b = [int(v) for v in region.bounds]
+            crop = frame[max(0,t):min(frame.shape[0],b), max(0,l):min(frame.shape[1],r)]
+            if not crop.size:
+                continue
+            thumb_seat = cv2.cvtColor(cv2.resize(crop, (48, 32), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+            old = self._prev_seat_thumbs.get(i)
+            current_seats[i] = thumb_seat
+            if old is None or float(cv2.absdiff(thumb_seat, old).mean()) >= constants.DEALER_FRAME_DIFF_THRESHOLD:
+                seat_changed = True
+        self._prev_seat_thumbs = current_seats
         if prev is None:
             return False
         diff = float(cv2.absdiff(thumb, prev).mean())
@@ -389,7 +412,7 @@ class DetectionEngine:
             and dealer_thumb.shape == dealer_prev.shape
             and float(cv2.absdiff(dealer_thumb, dealer_prev).mean())
             >= constants.DEALER_FRAME_DIFF_THRESHOLD)
-        if (diff < constants.FRAME_DIFF_THRESHOLD and not dealer_changed
+        if (diff < constants.FRAME_DIFF_THRESHOLD and not dealer_changed and not seat_changed
                 and self._skipped_cycles < constants.MAX_SKIPPED_CYCLES):
             self._skipped_cycles += 1
             return True
@@ -664,35 +687,51 @@ class DetectionEngine:
             candidates.setdefault(seat_idx, []).append(p | {"name": name})
 
         seen_pending = set()
+        available = set(self._pending_extra)
         for seat_idx, plist in candidates.items():
             seat = self.seats[seat_idx]
-            if len(seat.cards) >= constants.MAX_CARDS_PER_SEAT:
-                continue
             fresh = [p for p in plist if not self._matches_existing(seat, p)]
-            if not fresh:
-                continue
-            best = max(fresh, key=lambda p: p["confidence"])
-            if len(seat.cards) < 2:
-                self._lock_card(seat, best)
-            else:
-                # Hits need confirmation across consecutive cycles to avoid phantoms.
-                key = (seat_idx, best["name"],
-                       round(best["cx"] / 50.0), round(best["cy"] / 50.0))
+            fresh.sort(key=lambda p: p["confidence"], reverse=True)
+            if len(seat.cards) < 2 and not constants.CONFIRM_INITIAL_CARDS_ENABLED:
+                fresh = fresh[:1]  # explicit rollback to the original initial deal
+            accepted_positions = []
+            for pred in fresh:
+                if len(seat.cards) >= constants.MAX_CARDS_PER_SEAT:
+                    break
+                tolerance = max(4., min(pred.get("width", 30), pred.get("height", 30))*.35)
+                if any((pred["cx"]-x)**2+(pred["cy"]-y)**2 < tolerance**2
+                       for x,y in accepted_positions):
+                    continue  # duplicate boxes in one frame are one observation
+                accepted_positions.append((pred["cx"], pred["cy"]))
+                options = []
+                for key in available:
+                    if key[:2] != (seat_idx, pred["name"]):
+                        continue
+                    x, y = self._pending_positions.get(key, (key[2]*50, key[3]*50))
+                    distance = (pred["cx"]-x)**2+(pred["cy"]-y)**2
+                    if distance < tolerance**2:
+                        options.append((distance, key))
+                key = min(options)[1] if options else (
+                    seat_idx, pred["name"], pred["cx"]/50., pred["cy"]/50.)
+                available.discard(key)  # a track consumes at most one box per frame
                 seen_pending.add(key)
-                count = self._pending_extra.get(key, 0) + 1
-                if count >= constants.EXTRA_CARD_CONFIRM_CYCLES:
-                    self._lock_card(seat, best)
+                count = self._pending_extra.get(key, 0)+1
+                required = (1 if len(seat.cards)<2 and not constants.CONFIRM_INITIAL_CARDS_ENABLED
+                            else constants.EXTRA_CARD_CONFIRM_CYCLES)
+                if count >= required:
+                    self._lock_card(seat, pred)
                     self._pending_extra.pop(key, None)
+                    self._pending_positions.pop(key, None)
                 else:
                     self._pending_extra[key] = count
-        # Drop pending hits that were not seen this cycle — and save them as
-        # low-confidence training samples: they're the model's blind spots.
+                    self._pending_positions[key] = (pred["cx"], pred["cy"])
         for key in [k for k in self._pending_extra if k not in seen_pending]:
             _, name, qx, qy = key
             if self._last_frame is not None:
                 self._io_pool.submit(self.training.save_sample, self._last_frame,
-                                     qx * 50.0, qy * 50.0, name, "lowconf")
+                                     qx*50., qy*50., name, "lowconf")
             del self._pending_extra[key]
+            self._pending_positions.pop(key, None)
 
     def _seat_for_point(self, x, y):
         for i, region in enumerate(self.regions):
@@ -862,6 +901,7 @@ class DetectionEngine:
             seat.cards.clear()
             seat.split = False
         self._pending_extra.clear()
+        self._pending_positions.clear()
         self._dealer_history.clear()
         self._dealer_miss_streak = 0
         self._pending_dealer.clear()
