@@ -10,7 +10,7 @@ from tools.common import ROOT,write_json
 def main():
     reports=ROOT/"reports"; reports.mkdir(exist_ok=True)
     rows=[]
-    for name in ["baseline_original_players","baseline_original_ranks","diagnostic_lgd_tiled",
+    for name in ["baseline_original_players_legacy","baseline_original_players","baseline_original_ranks","diagnostic_lgd_tiled",
                  "diagnostic_bjg_tiled","diagnostic_github_tiled","diagnostic_original_ranks_int8",
                  "diagnostic_original_ranks_u8s8"]:
         path=reports/name/"metrics.json"
@@ -34,6 +34,7 @@ def main():
         "Esto verifica ejecución, mapeo y latencia; no sustituye la sesión actual de Betano ni mide exactitud sin ground truth.",
         "",*table,"", "Metadatos: el modelo de rangos exportó nombres numéricos; su CLASS_MAP autorizado fue aplicado desde el sidecar.",
         "El modelo de jugadores requiere Stretch to; el de rangos Fit within (fallback de Roboflow a borde negro).",
+        "La fila players_legacy reproduce confianza .70 y NMS IoU 1.0 (overlap=100). La fila players usa el NMS candidato fijo .45; no confundirlas.",
         "El modelo dealer v17 autorizado tiene 13 clases de rango y NO tiene cuttingcard. El reset manual debe mantenerse.",
         "", "La cuantización S8S8 empeoró la latencia y fue rechazada como candidata de velocidad. U8S8 reduced-range se conserva solo para validación de precisión.",
         "La variante U8S8 fue calibrada con el clip diagnóstico, que por eso no puede servir como evaluación de su precisión."]

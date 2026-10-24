@@ -52,10 +52,11 @@ def main(args):
             else: frame=letterbox(frame,size,color=(114,114,114) if resize=="letterbox" else (0,0,0))[0]
             return {input_name:np.ascontiguousarray(frame[:,:,::-1].transpose(2,0,1)[None],dtype=np.float32)/255}
     quantize_static(str(source),str(output),Reader(),quant_format=QuantFormat.QDQ,
-        per_channel=True,activation_type=QuantType.QInt8,weight_type=QuantType.QInt8,
+        per_channel=True,activation_type=QuantType.QUInt8 if args.u8 else QuantType.QInt8,weight_type=QuantType.QInt8,
+        reduce_range=args.u8,
         op_types_to_quantize=["Conv"],calibration_providers=["CPUExecutionProvider"])
     info=read_json(Path(str(source)+".json"))
-    info.update(quantized_from=source.name,quantization="QDQ S8S8 Conv per-channel",
+    info.update(quantized_from=source.name,quantization="QDQ U8S8 reduced range" if args.u8 else "QDQ S8S8 Conv per-channel",
                 calibration_sessions=[rows_path.parent.name],bytes=output.stat().st_size,
                 sha256=hashlib.sha256(output.read_bytes()).hexdigest())
     write_json(Path(str(output)+".json"),info)
@@ -66,4 +67,5 @@ def main(args):
 if __name__=="__main__":
     p=argparse.ArgumentParser(description=__doc__); p.add_argument("--weights",required=True)
     p.add_argument("--output",required=True); p.add_argument("--manifest",required=True)
+    p.add_argument("--u8",action="store_true",help="Use U8S8 reduced range for AVX2 CPUs")
     main(p.parse_args())

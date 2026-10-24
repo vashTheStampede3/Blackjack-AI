@@ -83,6 +83,7 @@ def evaluate(args):
     counter = TemporalCounter(min_confidence=args.confidence)
     gt_rounds = defaultdict(dict)
     temporal = {}
+    cross_reviewed = 0
     for row in rows[:args.limit or None]:
         if not row.get("redacted"):
             raise ValueError("Manifest lacks a verified redaction flag")
@@ -103,6 +104,7 @@ def evaluate(args):
         if not label or not label.get("reviewed"):
             continue
         truth = label["cards"]
+        cross_reviewed += bool(label.get("cross_reviewed"))
         scored.append((truth,preds))
         pairs,misses,extras = match(truth,preds)
         errors = len(misses)+len(extras)+sum(canonical_rank(truth[i]["rank"])!=preds[j].rank for i,j in pairs)
@@ -154,8 +156,7 @@ def evaluate(args):
         "live_cycle_p95_800ms":None,"live_app_cpu_35":None,"live_app_ram_1536mb":None,
         "shoe_origin_verified":bool(session_meta.get("shoe_origin_verified")),
         "model_training_provenance_verified":None,
-        "human_cross_review_10_percent":bool(scored) and
-            sum(bool(l.get("reviewed") and l.get("cross_reviewed")) for l in labels.values())>=len(scored)*.1}
+        "human_cross_review_10_percent":bool(scored) and cross_reviewed>=len(scored)*.1}
     metrics["accepted"] = all(v is True for v in metrics["acceptance"].values())
     write_json(out/"metrics.json",metrics)
     (out/"predictions.jsonl").write_text("".join(json.dumps(p)+"\n" for p in outputs),encoding="utf-8")

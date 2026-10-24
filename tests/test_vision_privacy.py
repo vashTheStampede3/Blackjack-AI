@@ -56,3 +56,25 @@ def test_onnx_decoder_maps_stretched_coordinates():
     pred=model._decode(output,.5,.5,(.5,1),0,0)[0]
     assert pred["cx"]==640 and pred["cy"]==320
     assert pred["width"]==128 and pred["height"]==64
+
+
+def test_artifact_sidecar_overrides_numeric_names_and_limits_threads(tmp_path,monkeypatch):
+    import sys
+    output=np.zeros((1,17,30),np.float32)
+    output[0,:4,0]=[320,320,64,64]; output[0,4,0]=.9
+    captured={}
+    class FakeSession:
+        def __init__(self,*a,**kw): captured.update(kw)
+        def get_inputs(self): return [SimpleNamespace(name="images",shape=[1,3,640,640])]
+        def get_modelmeta(self): return SimpleNamespace(custom_metadata_map={"names":"{0: '0'}"})
+        def run(self,*a,**kw): return [output]
+    backend=SimpleNamespace(SessionOptions=SimpleNamespace,InferenceSession=FakeSession,
+        ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"))
+    monkeypatch.setitem(sys.modules,"onnxruntime",backend)
+    weights=tmp_path/"rank.onnx"
+    write_json(str(weights)+".json",{"names":{"0":"10"},"preprocessing":{"resize":{"format":"Stretch to"}}})
+    model=OnnxModel(weights)
+    p=model.predict(np.zeros((100,200,3),np.uint8))[0]
+    assert p["class"]=="10" and p["cx"]==100 and p["cy"]==50
+    assert captured["providers"]==["CPUExecutionProvider"]
+    assert captured["sess_options"].intra_op_num_threads==2

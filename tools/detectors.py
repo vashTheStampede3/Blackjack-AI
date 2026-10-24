@@ -80,10 +80,13 @@ def starts(length, tile, overlap):
 
 
 class LocalDetector:
-    def __init__(self, weights, confidence=.5, tile=0, overlap=.25, upscale=1., pip_distance=0):
+    def __init__(self, weights, confidence=.5, tile=0, overlap=.25, upscale=1., pip_distance=0, nms_iou=.45):
+        if not (0<=confidence<=1 and tile>=0 and 0<=overlap<1 and 0<upscale<=4 and pip_distance>=0 and .05<=nms_iou<=1):
+            raise ValueError("Invalid detector confidence/tiling/upscale/NMS parameters")
         self.model = OnnxModel(ROOT/weights)
         self.confidence, self.tile, self.overlap = confidence, tile, overlap
         self.upscale, self.pip_distance = upscale, pip_distance
+        self.nms_iou = nms_iou
 
     def predict(self, frame):
         h,w = frame.shape[:2]
@@ -96,21 +99,22 @@ class LocalDetector:
                 if self.upscale != 1:
                     crop = cv2.resize(crop,None,fx=self.upscale,fy=self.upscale,interpolation=cv2.INTER_CUBIC)
                 sy,sx = crop.shape[0]/ch,crop.shape[1]/cw
-                for p in self.model.predict(crop,self.confidence*100,45):
+                for p in self.model.predict(crop,self.confidence*100,self.nms_iou*100):
                     cx,cy,bw,bh = p["cx"]/sx+x,p["cy"]/sy+y,p["width"]/sx,p["height"]/sy
                     if not (0<=cx<w and 0<=cy<h):
                         continue
                     items.append(Detection(canonical_rank(p["class"]),
                         [max(0,cx-bw/2),max(0,cy-bh/2),min(w,cx+bw/2),min(h,cy+bh/2)],
                         p["confidence"],p["class"]))
-        items = dedupe(items)
+        items = dedupe(items,self.nms_iou)
         return group_pips(items,self.pip_distance) if self.pip_distance else items
 
 
 class HostedDetector:
     """Only accepts explicitly redacted ROI frames from a recorded manifest."""
-    def __init__(self, model_id, confidence=.5):
+    def __init__(self, model_id, confidence=.5, nms_iou=.45):
         self.model_id, self.confidence = model_id, confidence
+        self.nms_iou = nms_iou
         self.key = os.environ.get("ROBOFLOW_API_KEY", "")
         if not self.key:
             raise ValueError("ROBOFLOW_API_KEY is missing")
@@ -121,7 +125,7 @@ class HostedDetector:
             raise ValueError("ROI encoding failed")
         try:
             response = requests.post("https://detect.roboflow.com/"+self.model_id,
-                params={"api_key":self.key,"confidence":int(self.confidence*100),"overlap":45},
+                params={"api_key":self.key,"confidence":int(self.confidence*100),"overlap":int(self.nms_iou*100)},
                 data=base64.b64encode(encoded).decode("ascii"),
                 headers={"Content-Type":"application/x-www-form-urlencoded"},
                 timeout=(5,20),allow_redirects=False)
@@ -136,8 +140,8 @@ class HostedDetector:
 
 def build(args):
     if args.hosted:
-        return HostedDetector(args.hosted,args.confidence)
-    return LocalDetector(args.weights,args.confidence,args.tile,args.overlap,args.upscale,args.pip_distance)
+        return HostedDetector(args.hosted,args.confidence,args.nms_iou)
+    return LocalDetector(args.weights,args.confidence,args.tile,args.overlap,args.upscale,args.pip_distance,args.nms_iou)
 
 
 def add_arguments(parser):
@@ -148,3 +152,4 @@ def add_arguments(parser):
     parser.add_argument("--overlap", type=float, default=.25)
     parser.add_argument("--upscale", type=float, default=1)
     parser.add_argument("--pip-distance", type=float, default=0)
+    parser.add_argument("--nms-iou",type=float,default=.45,help="1.0 reproduces original player overlap=100; .45 is the fixed candidate setting")

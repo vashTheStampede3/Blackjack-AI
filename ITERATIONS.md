@@ -69,3 +69,30 @@ confidence .55 and NMS .45. Size: 103.6 MB -> 26.5 MB.
 Detector p95: 1,302.87 -> 1,746.87 ms; worse. Raw boxes: 214 -> 212,
 whose correctness is unknown. Reject this variant as the speed candidate;
 retain its private artifact/evidence, do not activate it. Accuracy is unscored.
+
+## Detection/latency iteration 2 — AVX2 U8S8 reduced range
+
+Diagnosis: S8S8 conversion overhead on this CPU outweighed arithmetic savings.
+Hypothesis: U8S8 with reduced-range per-channel Conv quantization is a better
+AVX2 candidate. Rationale: the ONNX Runtime quantization documentation describes
+reduced range for AVX2/non-VNNI saturation handling; performance remains measured,
+not assumed: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+
+Same source/calibration and 30-frame replay, .55 confidence, .45 NMS. Initial
+bounded-calibration option hit ORT's `No data is collected` behavior; removed
+that option after inspecting the installed collector. An explicit 1.3 GB RSS
+guard remains, and all calibration/inference sessions are capped at 2 threads.
+
+Detector p95: FP32 1,302.87 -> U8S8 766.87 ms; CPU 16.30% of machine; peak
+sampled RSS 307.25 MB; artifact 26,531,567 bytes. Raw boxes 214 -> 215 does not
+establish recall. Keep U8S8 **only as a candidate awaiting accuracy labels**.
+The complete live-cycle p95, app memory/CPU and soak are not measured.
+
+## Baseline fidelity correction
+
+Expose NMS IoU explicitly. Original players `overlap=100` means IoU 1.0 and
+no suppression; its exact .70/1.0 run emitted 1,054 raw boxes, p95 299 ms.
+The previously recorded .70/.45 candidate emitted 124 boxes, p95 300 ms.
+These are separate named runs, neither with correctness labels. No silent
+threshold change and no accuracy claim. Sidecar/class-map/privacy/Hi-Lo/shoe/
+OCR/validation suite now reports 54 passing tests; live holdout remains absent.
