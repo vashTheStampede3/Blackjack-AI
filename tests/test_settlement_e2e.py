@@ -3,7 +3,7 @@ per-frame model predictions driven through the REAL ingest path
 (_process_dealer / _process_players / _maybe_auto_new_round), respecting every
 confirmation gate:
 
-  * initial deal locks immediately (one card per seat per cycle while < 2)
+  * initial cards confirm across distinct agreeing frames before counting
   * hits confirm across EXTRA_CARD_CONFIRM_CYCLES consecutive cycles
   * the dealer up-card confirms across DEALER_CONFIRM_FRAMES agreeing frames
   * dealer playout draws confirm like hits
@@ -25,6 +25,7 @@ import sqlite3
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from lib.common import constants
@@ -76,12 +77,18 @@ class SettlementE2E(unittest.TestCase):
         for cfg in constants.SIDE_BETS.values():
             cfg["enabled"] = False
 
-        self.entries = []    # (message, level) from the engine logger
-        self.eng = DetectionEngine(
-            log=lambda msg, level=None: self.entries.append((msg, level)))
+        self.entries = []
         tmp = Path(tempfile.mkdtemp(prefix="bjai_settlement_e2e_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        self.eng.store = SessionStore(tmp / "session.db")
+        with patch("lib.logic.engine.SessionStore", lambda: SessionStore(tmp / "session.db")):
+            self.eng = DetectionEngine(
+                log=lambda msg, level=None: self.entries.append((msg, level)))
+        self.eng._warm_advice_job = lambda *a: None
+        self.eng._optimal_advice = lambda *a, **k: ("", "white", None)
+        def stop_pools():
+            for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
+                getattr(self.eng, name).shutdown(wait=True, cancel_futures=True)
+        self.addCleanup(stop_pools)
         # Real region setup: at 2560x1440 this loads the calibrated profile
         # when one exists, else the scaled defaults — exactly like production.
         self.eng.set_monitor(
@@ -139,12 +146,13 @@ class SettlementE2E(unittest.TestCase):
         dealer up-card, until the up-card confirms."""
         eng = self.eng
         self.frame([up_pred], deal_preds)
-        # Initial deal locks immediately, but only one card per seat/cycle.
+        # Neither card enters the shoe on a single unconfirmed frame.
         for idx in (self.A, self.B):
-            self.assertEqual(len(eng.seats[idx].cards), 1)
+            self.assertEqual(len(eng.seats[idx].cards),
+                             0 if constants.CONFIRM_INITIAL_CARDS_ENABLED else 1)
         if constants.DEALER_CONFIRM_FRAMES > 1:
             self.assertFalse(eng.dealer_locked)
-        for _ in range(max(2, constants.DEALER_CONFIRM_FRAMES) - 1):
+        for _ in range(max(2, constants.EXTRA_CARD_CONFIRM_CYCLES, constants.DEALER_CONFIRM_FRAMES) - 1):
             self.frame([up_pred], deal_preds)
         for idx in (self.A, self.B):
             self.assertEqual(len(eng.seats[idx].cards), 2)

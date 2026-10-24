@@ -135,13 +135,15 @@ class DetectedRouting(SplitCase):
         self.deal_split_pair(0, "a8", "c8", 200, 400)
         self.eng.replace_card(0, 1, None)
         self.assertEqual(self.tags(0), [0])
-        self.feed([pred("d5", 500, 1000)])  # len<2 -> locks without window
+        # Removing a misread must not bypass the new confirmation gate when
+        # the replacement detection brings the seat back to two cards.
+        self.feed_hit_confirmed(0, pred("d5", 500, 1000))
         self.assertEqual(self.tags(0), [0, 1])
         # Mirror case: hand 0 empty, detection LEFT of hand 1's mean -> hand 0.
         self.deal_split_pair(1, "a9", "c9", 1200, 1400)
         self.eng.replace_card(1, 0, None)
         self.assertEqual(self.tags(1), [1])
-        self.feed([pred("d5", 1100, 1000)])
+        self.feed_hit_confirmed(1, pred("d5", 1100, 1000))
         self.assertEqual(self.tags(1), [1, 0])
 
     def test_no_positioned_cards_defaults_to_hand_zero(self):

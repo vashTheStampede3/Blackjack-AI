@@ -1076,8 +1076,19 @@ class DetectionEngine:
                     hand = hand_index
                 else:
                     hand = self._assign_hand(seat, None) if seat.split else 0
+                unread = [(key, value) for key, value in self._unread_positions.items()
+                          if key[0] == seat_idx]
+                cx = cy = None
+                if len(unread) == 1:
+                    key, (cx, cy, radius) = unread[0]
+                    del self._unread_positions[key]
+                    for candidate in list(self._pending_extra):
+                        x, y = self._pending_positions.get(candidate, (candidate[2]*50, candidate[3]*50))
+                        if candidate[0] == seat_idx and (x-cx)**2+(y-cy)**2 < radius**2:
+                            self._pending_extra.pop(candidate, None)
+                            self._pending_positions.pop(candidate, None)
                 seat.cards.append({"name": card_name, "confidence": 1.0,
-                                   "cx": None, "cy": None, "manual": True,
+                                   "cx": cx, "cy": cy, "manual": True,
                                    "counted": True, "hand": hand})
                 self.counter.count_card(card_name)
                 tag = f" (hand {hand + 1})" if seat.split else ""

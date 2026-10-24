@@ -14,7 +14,7 @@ class CardEvidence:
         available = set(range(len(self.previous)))
         for pred in predictions:
             x, y = pred["cx"], pred["cy"]
-            w, h = pred["width"], pred["height"]
+            w, h = pred.get("width", 30), pred.get("height", 40)
             l, t = max(0, round(x-w/2)), max(0, round(y-h/2))
             r, b = min(frame.shape[1], round(x+w/2)), min(frame.shape[0], round(y+h/2))
             crop = frame[t:b, l:r]

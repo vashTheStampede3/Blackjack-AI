@@ -190,3 +190,13 @@ def test_decode_preserves_runner_up_score_and_can_disable_abstention(monkeypatch
     assert result[0]["ambiguous"] and result[0]["class_margin"] == pytest.approx(.04)
     monkeypatch.setattr(constants, "CARD_EVIDENCE_ENABLED", 0)
     assert not model._decode(raw, .55, .45, 1, 0, 0)[0]["ambiguous"]
+
+
+def test_manual_add_resolves_one_unread_card_without_later_double_count(engine):
+    engine._process_players([pred("6") | {"ambiguous": True}])
+    engine.replace_card(0, 0, "6")
+    assert not engine._unread_positions and not engine._pending_extra
+    assert engine.counter.cards_seen == 1
+    for _ in range(3):
+        engine._process_players([pred("6")])
+    assert engine.counter.cards_seen == 1
