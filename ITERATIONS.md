@@ -44,3 +44,17 @@ End-round running accuracy: 18.846% -> 52.436%; mean absolute end-shoe drift:
 1.7 -> 0.9. Duplicate events: 0 in both. Keep three confirmations in candidate.
 Unknown origin/ambiguous tracks are flagged; a cutting-card sighting alone
 cannot reset the shoe. Three manual reset cycles passed. No live claim.
+
+## Counting iteration 2 — consensus fraction (synthetic only)
+
+Measure: same command/seeds with `--consensus .7`; confirmations remain 3.
+Diagnosis: candidate .8 leaves on average 1.8 cards uncommitted per 416-card
+shoe because a few noisy observations defeat the vote despite a correct
+majority. Hypothesis: .7 reduces those missed commitments while keeping the
+three-observation minimum and spatial duplicate guard.
+
+End-round running accuracy: 52.436% -> 90.000%; mean absolute final drift:
+0.9 -> 0.2. Mean cards short: 1.8 -> 0.233; duplicate events: 0.
+Keep .7 as experimental candidate. It still fails the 95% criterion even on
+this simulation. Do not lower it further to force approval; obtain real replay
+labels and diagnose unknowns/motion. Production engine has not been replaced.

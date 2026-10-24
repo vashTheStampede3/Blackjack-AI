@@ -24,7 +24,7 @@ class Track:
 
 
 class TemporalCounter:
-    def __init__(self, decks=8, confirmations=3, consensus=.8, min_confidence=.5, origin_known=False):
+    def __init__(self, decks=8, confirmations=3, consensus=.7, min_confidence=.5, origin_known=False):
         self.decks = decks
         self.confirmations = confirmations
         self.consensus = consensus
