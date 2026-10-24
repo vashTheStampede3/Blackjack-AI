@@ -19,6 +19,12 @@ def test_window_capture_tracks_client_while_moved_covered_and_resized():
     root.configure(bg="#20a060")
     tk.Frame(root, bg="#e04020", borderwidth=0).place(relx=.25, rely=.25, relwidth=.125, relheight=.125)
     root.update()
+    # PrintWindow can return an unpainted surface during the native opening
+    # transition. Wait for our fixture to finish painting before its baseline.
+    time.sleep(.2)
+    root.update()
+    import ctypes
+    ctypes.windll.dwmapi.DwmFlush()
     cover = None
     try:
         with patch("lib.logic.window_capture.os.getpid", return_value=-1):

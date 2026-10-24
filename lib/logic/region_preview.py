@@ -10,17 +10,21 @@ from PIL import Image
 
 from ..common import constants
 from ..common.card_mappings import PLAYER_CLASS_MAP
-from .monitor_utils import dealer_area_rect
+from .monitor_utils import dealer_area_rect, scaled_player_regions
 
 
-def build_region_preview(engine) -> Image.Image:
+def build_region_preview(engine, source=None) -> Image.Image:
     """Uses the engine's capture + models (shares the lazy singletons).
     Runs on a short-lived worker thread — releases its capture handle on exit."""
+    capture = source or engine.capture
     try:
-        frame = engine.capture.grab_bgr()
+        frame = capture.grab_bgr()
     finally:
-        engine.capture.close_local()
-    preds = engine.provider.players_model().predict(
+        capture.close_local()
+    model = engine.provider.players_model()
+    if getattr(model, "hosted", False):
+        raise ValueError("Preview requires a local model; images are not uploaded.")
+    preds = model.predict(
         frame, constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
 
     img = frame.copy()
@@ -37,8 +41,9 @@ def build_region_preview(engine) -> Image.Image:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2)
 
     # Seat polygons (blue) with seat numbers.
-    if engine.regions:
-        for i, region in enumerate(engine.regions):
+    regions = scaled_player_regions(capture.resolution) if source else engine.regions
+    if regions:
+        for i, region in enumerate(regions):
             pts = region.vertices.astype(np.int32).reshape((-1, 1, 2))
             cv2.polylines(img, [pts], isClosed=True, color=(255, 120, 0), thickness=2)
             cx, cy = region.vertices.mean(axis=0)
@@ -46,7 +51,7 @@ def build_region_preview(engine) -> Image.Image:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 120, 0), 2)
 
     # Dealer area (red).
-    left, top, right, bottom = dealer_area_rect(engine.capture.resolution)
+    left, top, right, bottom = dealer_area_rect(capture.resolution)
     cv2.rectangle(img, (left, top), (right, bottom), (0, 0, 220), 2)
     cv2.putText(img, "DEALER AREA", (left + 8, top + 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 220), 2)

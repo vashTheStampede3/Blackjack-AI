@@ -42,6 +42,7 @@ from .monitor_utils import (Polygon, ScreenCapture, dealer_area_rect,
                             load_custom_regions, scaled_player_regions,
                             scaling_factors)
 from .session_store import SessionStore
+from .round_observation import RoundObservation
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
 
@@ -76,6 +77,7 @@ class DetectionEngine:
     def __init__(self, log=print):
         self.log = _level_aware(log)
         self.capture = ScreenCapture()
+        self._round_observation = RoundObservation()
         self.provider = ModelProvider.get()
         self.strategy = StrategyAdvisor()
         self.counter = CardCounter()
@@ -208,6 +210,9 @@ class DetectionEngine:
     def set_monitor(self, monitor):
         with self._lock:
             self.capture.set_monitor(monitor)
+            previous_doubt = self._round_observation.count_uncertain
+            self._round_observation = RoundObservation()
+            self._round_observation.count_uncertain = previous_doubt
             res = self.capture.resolution
             self.regions = scaled_player_regions(res)
             self._dealer_rect = dealer_area_rect(res)
@@ -292,6 +297,7 @@ class DetectionEngine:
         skipped = False
         try:
             frame = self.capture.grab_bgr()
+            self._round_observation.captured_at = time.time()
             # OCR runs regardless of the frame diff: a balance/bet text
             # change in a small corner never trips the whole-frame
             # threshold, so a static table would defer reads ~10 s.
@@ -311,6 +317,14 @@ class DetectionEngine:
                 force_detect = self._dealer_drawing()
             if unchanged and not force_detect:
                 skipped = True
+                # Reuse the detector evidence for the frame the existing
+                # frame-diff gate considers unchanged; no second inference.
+                if self._round_observation.inferred_at:
+                    self._round_observation.inferred_at = self._round_observation.captured_at
+                    if self._round_observation.empty:
+                        self._round_observation.empty += 1
+                        if self._round_observation.empty >= 3:
+                            self._round_observation.present = False
                 if self._empty_frames > 0:
                     # Unchanged since an empty frame == still empty. The dealer
                     # area keeps its last observed state too: extend its empty
@@ -443,6 +457,7 @@ class DetectionEngine:
         with self._lock:
             self._process_dealer(dealer_preds, cc_checked=cc_checked)
             self._process_players(player_preds)
+            self._round_observation.observe(self, player_preds, dealer_preds)
             self._maybe_auto_new_round(player_preds)
 
     # --------------------------------------------------------------- dealer
@@ -827,6 +842,7 @@ class DetectionEngine:
         self._reset_round_state()
 
     def _reset_round_state(self):
+        self._round_observation.reset_round()
         # Settle and persist the round that just ended (and the shoe state, so
         # a restart mid-shoe doesn't lose the count) before wiping the table.
         snap = self.get_snapshot()
@@ -886,6 +902,7 @@ class DetectionEngine:
     def reset_shoe(self):
         with self._lock:
             self.counter.reset_shoe()
+            self._round_observation.count_uncertain = False
             self.cutting_card_seen = False
             self._pending_cutting_card.clear()
             self._reshuffle_dismissed = False  # next confirmation shows a fresh badge
@@ -2181,6 +2198,7 @@ class DetectionEngine:
                 "metrics": dict(self._metrics),
                 "backend": self.provider.backend_name,
                 "error": self.last_error,
+                "reading": self._round_observation.snapshot(),
                 "model_refresh_ts": self._model_refresh_ts,
             }
             # Publish while still holding the state lock so a snapshot built

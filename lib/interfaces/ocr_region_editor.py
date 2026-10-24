@@ -20,14 +20,15 @@ COLORS = {"balance": "#4dd2ff", "bet": "#ffd24d", "result": "#ff7eb6",
 
 class OcrRegionEditor(tk.Toplevel):
     def __init__(self, parent, capture, on_save=None):
+        frame_bgr = capture.grab_bgr()
         super().__init__(parent)
         self.title("OCR Regions — drag the corners over balance / bet / result")
         self.configure(bg=C["bg_primary"])
         self.on_save = on_save
         self.resolution = capture.resolution
 
-        frame_bgr = capture.grab_bgr()
         self._frame_bgr = frame_bgr
+        self._allow_remote = not getattr(capture, "offline", False)
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         max_w = min(1380, self.winfo_screenwidth() - 80)
         max_h = self.winfo_screenheight() - 180
@@ -76,7 +77,7 @@ class OcrRegionEditor(tk.Toplevel):
                       fg="white" if bg != C["warning"] else C["text_primary"],
                       relief="flat", padx=14, pady=6, font=constants.FONT_BODY,
                       cursor="hand2").pack(side=tk.RIGHT, padx=4)
-        if vision_assist.available():
+        if self._allow_remote and vision_assist.available():
             self._suggest_btn = tk.Button(
                 bar, text="✨ Suggest", command=self._suggest, bg=C["accent"],
                 fg="white", relief="flat", padx=14, pady=6,
@@ -88,6 +89,8 @@ class OcrRegionEditor(tk.Toplevel):
     def _suggest(self):
         """Pre-fill the rects from one Claude vision call (human reviews
         and saves — approximate boxes are fine here by design)."""
+        if not self._allow_remote:
+            return
         self._suggest_btn.config(state="disabled")
         frame = self._frame_bgr
 

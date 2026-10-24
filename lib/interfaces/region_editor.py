@@ -22,6 +22,7 @@ HANDLE = 5  # handle radius in canvas px
 
 class RegionEditor(tk.Toplevel):
     def __init__(self, parent, capture, on_save=None):
+        frame_bgr = capture.grab_bgr()
         super().__init__(parent)
         self.title("Calibrate Regions — drag the corner handles")
         self.configure(bg=C["bg_primary"])
@@ -29,7 +30,6 @@ class RegionEditor(tk.Toplevel):
         self.capture = capture
         self.resolution = capture.resolution
 
-        frame_bgr = capture.grab_bgr()
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         # Fit the screenshot into a workable window, remember the scale to
         # convert canvas coords back to native pixels on save.

@@ -471,7 +471,7 @@ class TableView:
 
     # ---------------------------------------------------------------- preview
 
-    def show_preview(self, pil_image, on_close):
+    def show_preview(self, pil_image, on_close, actions=None):
         """Show a region-debug screenshot over the table (hides seat widgets)."""
         self.clear_preview()
         w = max(self.canvas.winfo_width(), 200)
@@ -496,11 +496,16 @@ class TableView:
         if self.dealer_add is not None:
             self.dealer_add.place_forget()
         self._preview_item = self.canvas.create_image(w / 2, h / 2, image=self._preview_photo)
-        self._preview_close_btn = tk.Button(
-            self.canvas, text="Close preview", command=lambda: (self.clear_preview(), on_close()),
-            bg=C["danger"], fg="white", font=constants.FONT_BODY, relief="flat",
-            cursor="hand2", padx=14, pady=6)
-        self._preview_close_btn.place(relx=0.5, rely=1.0, y=-14, anchor="s")
+        self._preview_close_btn = tk.Frame(self.canvas, bg=C["bg_secondary"])
+        for text, command in (actions or []):
+            tk.Button(self._preview_close_btn, text=text, command=command,
+                      bg=C["bg_secondary"], fg=C["text_primary"], relief="flat",
+                      font=constants.FONT_SMALL, padx=6, pady=6).pack(side=tk.LEFT)
+        tk.Button(self._preview_close_btn, text="Close preview",
+                  command=lambda: (self.clear_preview(), on_close()),
+                  bg=C["danger"], fg="white", relief="flat",
+                  font=constants.FONT_SMALL, padx=6, pady=6).pack(side=tk.LEFT)
+        self._preview_close_btn.place(relx=.5, rely=1.0, y=-6, anchor="s")
 
     def clear_preview(self):
         if self._preview_item is not None:

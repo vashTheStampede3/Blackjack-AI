@@ -10,7 +10,7 @@ ever touched from the worker thread.
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import screeninfo
 
@@ -48,6 +48,11 @@ class ModernBlackjackGUI(tk.Tk):
         self.controller = DetectionController(
             log=log_manager.add_log if log_manager else print)
         self.monitor = None
+        self._preview_source = None
+        self.round_overlay = None
+        from .capture_guard import CaptureGuard
+        self._capture_guard = CaptureGuard(self, lambda: self.round_overlay)
+        self.controller.engine.capture.guard = self._capture_guard
         self._last_seq = -1
         self._preview_busy = False
 
@@ -289,6 +294,15 @@ class ModernBlackjackGUI(tk.Tk):
         self.monitor_status = tk.Label(section, text="No monitor confirmed", font=constants.FONT_SMALL,
                                        bg=C["bg_secondary"], fg=C["text_secondary"])
         self.monitor_status.pack(anchor="w", pady=(0, 4))
+        row = tk.Frame(section, bg=C["bg_secondary"])
+        row.pack(fill=tk.X, pady=(6, 0))
+        self.round_enabled = tk.BooleanVar(value=False)
+        tk.Checkbutton(row, text="Cartel de ronda", variable=self.round_enabled,
+                       command=self._toggle_round_overlay, bg=C["bg_secondary"],
+                       fg=C["text_primary"], selectcolor=C["bg_secondary"],
+                       font=constants.FONT_BODY).pack(side=tk.LEFT)
+        ttk.Button(row, text="Ajustes", command=self._round_overlay_options).pack(side=tk.RIGHT)
+
 
     def _build_controls_section(self, parent):
         section = self._section(parent, "Controls")
@@ -331,7 +345,7 @@ class ModernBlackjackGUI(tk.Tk):
             section, "⬚  Preview Regions", self._preview_regions, C["bg_canvas_soft"],
             tooltip="Capture the table and show the detected cards + seat regions")
         self.regions_btn.pack(fill=tk.X, pady=4)
-        self.regions_btn.config(state="disabled")
+        self.regions_btn.config(state="normal")
         self.calibrate_btn = self._button(
             section, "✥  Calibrate Regions", self._calibrate_regions, C["bg_canvas_soft"],
             tooltip="Drag the seat polygons and dealer area over a live screenshot")
@@ -713,7 +727,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.monitor_combo["values"] = labels
         self.monitor_combo.set("")
         self.monitor = None
-        for button in (self.start_btn, self.regions_btn, self.calibrate_btn,
+        for button in (self.start_btn, self.calibrate_btn,
                        self.ocr_btn, self.controls_btn, self.anchors_btn):
             button.config(state="disabled")
         self.monitor_status.config(text="Select a window" if self.source_kind.get() == "Window"
@@ -737,7 +751,7 @@ class ModernBlackjackGUI(tk.Tk):
                 selected = selected.ready_source()
             except RuntimeError as exc:
                 self.monitor = None
-                for button in (self.start_btn, self.regions_btn, self.calibrate_btn,
+                for button in (self.start_btn, self.calibrate_btn,
                                self.ocr_btn, self.controls_btn, self.anchors_btn):
                     button.config(state="disabled")
                 self.monitor_status.config(text=str(exc), fg=C["danger"])
@@ -889,15 +903,19 @@ class ModernBlackjackGUI(tk.Tk):
                        allow_remove=True)
 
     def _preview_regions(self):
-        if self._preview_busy or self.monitor is None:
+        if self._preview_busy:
+            return
+        if self._preview_source is None and self.monitor is None:
+            self._open_preview_image()
             return
         self._preview_busy = True
         self.regions_btn.config(state="disabled")
         self.set_status("Generating region preview...")
 
+        source = self._preview_source
         def work():
             try:
-                image = build_region_preview(self.controller.engine)
+                image = build_region_preview(self.controller.engine, source=source)
                 self.after(0, lambda: self._show_preview(image))
             except Exception as e:
                 self.after(0, lambda e=e: self._preview_failed(e))
@@ -907,8 +925,58 @@ class ModernBlackjackGUI(tk.Tk):
     def _show_preview(self, image):
         self._preview_busy = False
         self.regions_btn.config(state="normal")
-        self.table.show_preview(image, on_close=lambda: self.set_status("Preview closed."))
-        self.set_status("Region preview ready — cards and seat regions are outlined.")
+        self.table.show_preview(image, on_close=lambda: self.set_status("Preview closed."), actions=[
+            ("Abrir imagen", self._open_preview_image),
+            ("Volver a vivo", self._preview_live),
+            ("Calibrar regiones", self._calibrate_regions),
+            ("OCR Regions", self._calibrate_ocr),
+            ("Alinear imagen", self._align_preview_image),
+        ])
+        if self._preview_source:
+            w, h = self._preview_source.resolution
+            self.set_status(f"Image: {self._preview_source.name} · calibration {w}x{h} · does not change the count.")
+        else:
+            self.set_status("Live preview — cards and seat regions are outlined.")
+
+    def _open_preview_image(self):
+        if self._preview_busy:
+            return
+        path = filedialog.askopenfilename(parent=self, title="Abrir captura de la mesa",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            from ..logic.image_source import ImageSource
+            target = self.controller.engine.capture.resolution if self.monitor else None
+            source = ImageSource.open(path, target)
+            self._preview_source = source
+            try:
+                source.grab_bgr()
+            except ValueError:
+                self._align_preview_image()
+                return
+            self._preview_regions()
+        except Exception as exc:
+            self.set_status(f"Cannot open image: {exc}", error=True)
+
+    def _align_preview_image(self):
+        if self._preview_busy:
+            self.set_status("Wait for the preview to finish before aligning the image.")
+            return
+        if self._preview_source is None:
+            self.set_status("Open an image first.")
+            return
+        from .image_crop import ImageCrop
+        ImageCrop(self, self._preview_source, self._preview_regions)
+
+    def _preview_live(self):
+        if self._preview_busy:
+            return
+        if self.monitor is None:
+            self.set_status("Select a monitor or window to return to live capture.")
+            return
+        self._preview_source = None
+        self._preview_regions()
 
     def _preview_failed(self, error):
         self._preview_busy = False
@@ -933,6 +1001,8 @@ class ModernBlackjackGUI(tk.Tk):
             if snapshot is not None and snapshot["seq"] != self._last_seq:
                 self._last_seq = snapshot["seq"]
                 self._render(snapshot)
+            if self.round_overlay is not None:
+                self.round_overlay.update_from_snapshot(snapshot, self.controller.running)
             # The executor ticks EVERY poll, not just on new snapshots —
             # its staleness disarm and verification deadlines must keep
             # running when the worker stalls and snapshots stop flowing.
@@ -1154,6 +1224,50 @@ class ModernBlackjackGUI(tk.Tk):
         BankrollWindow(self, self.controller.engine.store,
                        engine=self.controller.engine)
 
+    def _toggle_round_overlay(self):
+        if self.round_enabled.get():
+            if self.round_overlay is None:
+                from .round_overlay import RoundOverlay
+                self.round_overlay = RoundOverlay(self)
+        elif self.round_overlay is not None:
+            self.round_overlay.close()
+            self.round_overlay = None
+
+    def _round_overlay_options(self):
+        existing = getattr(self, "_round_options", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        top = self._round_options = tk.Toplevel(self)
+        top.title("Cartel de ronda")
+        tk.Checkbutton(top, text="Mostrar cartel", variable=self.round_enabled,
+                       command=self._toggle_round_overlay).pack(anchor="w", padx=12, pady=8)
+        opacity = tk.DoubleVar(value=float(constants.UI.get("round_opacity", .85))*100)
+        def set_opacity(value):
+            constants.UI["round_opacity"] = float(value)/100
+            if self.round_overlay:
+                self.round_overlay.set_opacity(float(value)/100)
+        tk.Label(top, text="Opacidad").pack(anchor="w", padx=12)
+        tk.Scale(top, from_=25, to=100, variable=opacity, orient="horizontal",
+                 command=set_opacity, length=260).pack(padx=12)
+        editing = tk.BooleanVar(value=bool(self.round_overlay and self.round_overlay.editing))
+        def set_editing():
+            if editing.get() and not self.round_enabled.get():
+                self.round_enabled.set(True)
+                self._toggle_round_overlay()
+            if self.round_overlay:
+                self.round_overlay.set_editing(editing.get())
+        tk.Checkbutton(top, text="Ajustar posici?n (desmarcar para bloquear)",
+                       variable=editing, command=set_editing).pack(padx=12, pady=8)
+        def finish():
+            if self.round_overlay:
+                self.round_overlay.set_editing(False)
+                self.round_overlay.remember_position()
+            self.controller.engine.persist_settings_async()
+            top.destroy()
+        tk.Button(top, text="Bloquear y guardar", command=finish).pack(pady=10)
+        top.protocol("WM_DELETE_WINDOW", finish)
+
     def _toggle_hud(self):
         hud = getattr(self, "hud", None)
         if hud is not None and hud.winfo_exists():
@@ -1256,7 +1370,11 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status(f"Bankroll set to €{value:g} — bet ramp updated.")
 
     def _calibrate_regions(self):
-        if self.monitor is None:
+        if self.controller.running:
+            self.set_status("Stop Detection before changing calibration.")
+            return
+        capture = self._preview_source or self.controller.engine.capture
+        if self.monitor is None and self._preview_source is None:
             return
         from .region_editor import RegionEditor
 
@@ -1264,7 +1382,8 @@ class ModernBlackjackGUI(tk.Tk):
             # _confirm_monitor reloads all regions AND refreshes the
             # sidebar's "OCR not calibrated" hint (a save into a NEW
             # profile has no OCR rects yet).
-            self._confirm_monitor()
+            if self.monitor is not None:
+                self._confirm_monitor()
             self._refresh_profiles()  # a new/updated profile (and its date)
             from ..logic import region_profiles
             name = region_profiles.active_name()
@@ -1276,7 +1395,11 @@ class ModernBlackjackGUI(tk.Tk):
                                 " — using the shipped default layout.")
 
         try:
-            RegionEditor(self, self.controller.engine.capture, on_save=reload_regions)
+            def saved_regions(saved=True):
+                reload_regions(saved)
+                if self._preview_source is not None:
+                    self._preview_regions()
+            RegionEditor(self, capture, on_save=saved_regions)
         except Exception as e:
             self.set_status(f"Calibration failed: {e}", error=True)
 
@@ -1318,27 +1441,40 @@ class ModernBlackjackGUI(tk.Tk):
                      on_save=reload_anchors)
 
     def _calibrate_ocr(self):
-        if self.monitor is None:
+        if self.controller.running:
+            self.set_status("Stop Detection before changing calibration.")
+            return
+        capture = self._preview_source or self.controller.engine.capture
+        if self.monitor is None and self._preview_source is None:
             return
         from ..logic.ocr import OCR_AVAILABLE
-        if not OCR_AVAILABLE:
+        if not OCR_AVAILABLE and self._preview_source is None:
             self.set_status("OCR needs the winocr package: pip install winocr",
                             error=True)
             return
         from .ocr_region_editor import OcrRegionEditor
 
         def reload_regions():
-            self._confirm_monitor()   # reload + refresh the OCR hint
+            if self.monitor is not None:
+                self._confirm_monitor()   # reload + refresh the OCR hint
             self._refresh_profiles()  # OCR saves restamp the profile date
             self.set_status("OCR regions saved — balance/bet/result now read "
                             "from the screen.")
 
         try:
-            OcrRegionEditor(self, self.controller.engine.capture, on_save=reload_regions)
+            def saved_ocr():
+                reload_regions()
+                if self._preview_source is not None:
+                    self._preview_regions()
+            OcrRegionEditor(self, capture, on_save=saved_ocr)
         except Exception as e:
             self.set_status(f"OCR calibration failed: {e}", error=True)
 
     def _on_close(self):
+        if self.round_overlay is not None:
+            self.round_overlay.close()
+            self.round_overlay = None
+        self._capture_guard.close()
         self._stop_hotkeys()
         self.executor.disarm("app closing")
         self.controller.stop()
@@ -1355,4 +1491,8 @@ class ModernBlackjackGUI(tk.Tk):
                 pool.shutdown(wait=False,cancel_futures=True)
         from ..logic import ev_offload
         ev_offload.shutdown()
+        # Cancel this Tk interpreter's timers before destroying their commands.
+        # Includes the regular snapshot poll and overlay/calibration callbacks.
+        for job in self.tk.call("after", "info"):
+            self.after_cancel(job)
         self.destroy()

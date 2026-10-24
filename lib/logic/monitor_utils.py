@@ -9,6 +9,7 @@ resolution.
 """
 
 import threading
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -56,6 +57,7 @@ class ScreenCapture:
     def __init__(self):
         self.monitor = None  # screeninfo monitor object
         self._local = threading.local()
+        self.guard = None
 
     def set_monitor(self, monitor):
         if monitor is None:
@@ -87,6 +89,10 @@ class ScreenCapture:
                 pass
 
     def grab_bgr(self) -> np.ndarray:
+        with self.guard.capture() if self.guard else nullcontext():
+            return self._grab_bgr()
+
+    def _grab_bgr(self) -> np.ndarray:
         """Full-monitor frame as a BGR numpy array (what cv2/models expect)."""
         if self.monitor is None:
             raise ValueError("Monitor not set. Select a monitor before capturing.")
