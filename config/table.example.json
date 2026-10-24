@@ -1,0 +1,14 @@
+{
+  "table": "UNVERIFIED",
+  "provider": "UNVERIFIED",
+  "table_kind": "unknown",
+  "monitor": 1,
+  "host_resolution": [1920, 1200],
+  "roi": null,
+  "masks": [],
+  "geometry_verified": false,
+  "privacy_reviewed": false,
+  "index_height_px": null,
+  "deck_count_verified": null,
+  "penetration_observed": null
+}
