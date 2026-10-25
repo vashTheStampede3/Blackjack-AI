@@ -7,10 +7,12 @@ import numpy as np
 import pytest
 
 from lib.logic.models import ModelError, OnnxModel, RoboflowModel
+from lib.common import constants
 from tools.common import write_json
 
 
 def test_no_configuration_means_no_upload(tmp_path,monkeypatch):
+    monkeypatch.setattr(constants,"LOCAL_ONLY_INFERENCE",False)
     monkeypatch.setenv("ROBOFLOW_API_KEY","test-only-not-a-real-key")
     monkeypatch.setenv("BJ_TABLE_CONFIG",str(tmp_path/"missing.json"))
     monkeypatch.setattr("requests.post",lambda *a,**k:pytest.fail("Unmasked image upload"))
@@ -19,6 +21,7 @@ def test_no_configuration_means_no_upload(tmp_path,monkeypatch):
 
 
 def test_remote_receives_only_masked_roi_and_coords_restore(tmp_path,monkeypatch):
+    monkeypatch.setattr(constants,"LOCAL_ONLY_INFERENCE",False)
     monkeypatch.setenv("ROBOFLOW_API_KEY","test-only-not-a-real-key")
     cfg=tmp_path/"table.json"
     write_json(cfg,{"host_resolution":[100,100],"roi":[20,20,80,80],
@@ -37,6 +40,7 @@ def test_remote_receives_only_masked_roi_and_coords_restore(tmp_path,monkeypatch
 
 
 def test_secret_never_appears_in_authentication_error(tmp_path,monkeypatch):
+    monkeypatch.setattr(constants,"LOCAL_ONLY_INFERENCE",False)
     secret="test-only-not-a-real-key"
     monkeypatch.setenv("ROBOFLOW_API_KEY",secret)
     cfg=tmp_path/"table.json"

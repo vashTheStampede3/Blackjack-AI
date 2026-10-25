@@ -38,8 +38,11 @@ class Gating(unittest.TestCase):
     def setUp(self):
         self._vision = dict(constants.VISION)
         self._env = os.environ.pop("ANTHROPIC_API_KEY", None)
+        self._local_only = constants.LOCAL_ONLY_INFERENCE
+        constants.LOCAL_ONLY_INFERENCE = False
 
     def tearDown(self):
+        constants.LOCAL_ONLY_INFERENCE = self._local_only
         constants.VISION.clear()
         constants.VISION.update(self._vision)
         if self._env is not None:

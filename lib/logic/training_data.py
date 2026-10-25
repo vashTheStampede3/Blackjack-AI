@@ -112,6 +112,8 @@ def upload_batch(project_id=None, batch_name=None, root=None) -> int:
     dependency). Call manually, e.g.:
         .venv\\Scripts\\python -c "from lib.logic.training_data import upload_batch; upload_batch()"
     """
+    if constants.LOCAL_ONLY_INFERENCE:
+        raise RuntimeError("Training upload disabled in local-only mode")
     from roboflow import Roboflow
     root = Path(root) if root else constants.OUTPUT_DIR / "training_data"
     if not root.exists():

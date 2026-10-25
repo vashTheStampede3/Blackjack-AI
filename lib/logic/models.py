@@ -247,6 +247,8 @@ class RoboflowModel:
         self._model_id = f"{project_id}/{int(model_version)}"
 
     def predict(self, image_bgr: np.ndarray, confidence=50, overlap=45):
+        if constants.LOCAL_ONLY_INFERENCE:
+            raise ModelError("Remote inference disabled in local-only mode")
         import base64
         import requests
         from .table_privacy import private_table_frame

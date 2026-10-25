@@ -377,3 +377,13 @@ y≈163–240, disjoint in profile coordinates. The assistant did not inspect an
 video image, so the location of physical dealer cards relative to Mesa is not
 confirmed. The user-label gate is still 37 cards and final RC 0; it failed.
 Do not switch live detection to the registry or proceed with overlay changes.
+
+## Local-only boundary for remaining image services
+
+The active model provider was already local-only, but direct Roboflow inference,
+Anthropic vision assist, and manual training upload still had network paths.
+Three focused tests failed before the guard. All three now refuse to run while
+`LOCAL_ONLY_INFERENCE` is true, before requests or optional SDK imports. Hosted
+privacy tests explicitly disable that flag while mocking HTTP; they do not send
+real requests. Nineteen focused tests passed. The video recognition gate remains
+34/37 and RC +3 versus the labeled RC 0.

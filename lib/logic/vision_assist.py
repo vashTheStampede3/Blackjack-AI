@@ -48,7 +48,8 @@ def api_key() -> str:
 def available() -> bool:
     """Vision assist is opt-in AND needs a key — without either, every
     caller silently skips (the app stays a pure local advisor)."""
-    return bool(constants.VISION.get("enabled")) and bool(api_key())
+    return (not constants.LOCAL_ONLY_INFERENCE
+            and bool(constants.VISION.get("enabled")) and bool(api_key()))
 
 
 # ---------------------------------------------------------- image sizing
@@ -112,6 +113,8 @@ def _encode_frame(frame_bgr, max_edge, max_tokens):
 def _post(image_b64, prompt, max_tokens=1024, timeout=45) -> str:
     """One image-then-text message -> the response text. Raises
     RuntimeError with the API's message on any failure."""
+    if constants.LOCAL_ONLY_INFERENCE:
+        raise RuntimeError("Remote vision disabled in local-only mode")
     import requests
     payload = {
         "model": str(constants.VISION.get("model") or "claude-opus-4-8"),
