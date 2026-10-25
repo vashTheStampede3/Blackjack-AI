@@ -1,6 +1,8 @@
 """Hi-Lo card counting across a shoe. Thread-safe; no Tkinter."""
 
 import threading
+from copy import deepcopy
+import uuid
 
 from ..common import constants
 from . import cards
@@ -17,10 +19,9 @@ def counter_key(card_name: str) -> str:
 class CardCounter:
     """Tracks running count, per-rank seen counts, and shoe penetration.
 
-    Counts accumulate across rounds (a shoe spans many rounds) and reset only
-    on `reset_shoe`. Every mutation is identity-based: the detection engine
-    counts each physical card exactly once and can retract it when the user
-    manually corrects a misread card.
+    Counts accumulate across rounds and reset on `reset_shoe`. Identity and
+    confirmation belong to the engine/card memory; this class owns the Hi-Lo
+    arithmetic, composition totals and persisted shoe uncertainty.
     """
 
     def __init__(self, deck_count=constants.DECK_COUNT):
@@ -35,6 +36,21 @@ class CardCounter:
         # the 10-bucket level and lives only in per_rank.
         self.suit_seen = {}        # "8 of Diamonds" -> count
         self.rank_seen_nosuit = {} # "King" -> count
+        self.shoe_id = uuid.uuid4().hex
+        self.uncertainties = {}
+
+    @property
+    def count_uncertain(self):
+        with self._lock:
+            return bool(self.uncertainties)
+
+    def mark_uncertainty(self, key, detail):
+        with self._lock:
+            self.uncertainties[key] = deepcopy(detail)
+
+    def clear_uncertainty(self, key):
+        with self._lock:
+            self.uncertainties.pop(key, None)
 
     def _track_identity(self, card_name: str, delta: int):
         if " of " in card_name:
@@ -78,6 +94,8 @@ class CardCounter:
             self.per_rank = {k: 0 for k in COUNTER_KEYS}
             self.suit_seen = {}
             self.rank_seen_nosuit = {}
+            self.shoe_id = uuid.uuid4().hex
+            self.uncertainties = {}
 
     def get_state(self) -> dict:
         """Serializable shoe state for persistence (Feature 8)."""
@@ -89,6 +107,9 @@ class CardCounter:
                 "per_rank": dict(self.per_rank),
                 "suit_seen": dict(self.suit_seen),
                 "rank_seen_nosuit": dict(self.rank_seen_nosuit),
+                "shoe_id": self.shoe_id,
+                "uncertainties": deepcopy(self.uncertainties),
+                "count_uncertain": bool(self.uncertainties),
             }
 
     def apply_state(self, state: dict):
@@ -101,6 +122,10 @@ class CardCounter:
             self.per_rank = {k: int(per_rank.get(k, 0)) for k in COUNTER_KEYS}
             self.suit_seen = dict(state.get("suit_seen", {}))
             self.rank_seen_nosuit = dict(state.get("rank_seen_nosuit", {}))
+            self.shoe_id = state.get("shoe_id") or uuid.uuid4().hex
+            self.uncertainties = deepcopy(state.get("uncertainties", {}))
+            if state.get("count_uncertain") and not self.uncertainties:
+                self.uncertainties["restored_uncertainty"] = {"reason": "Conteo guardado como incierto"}
 
     @property
     def decks_remaining(self) -> float:
@@ -116,6 +141,7 @@ class CardCounter:
             decks = max(0.5, self.deck_count - self.cards_seen / 52.0)
             return {
                 "running": self.running_count,
+                "count_uncertain": bool(self.uncertainties),
                 "true": self.running_count / decks,
                 "decks_remaining": decks,
                 "cards_seen": self.cards_seen,

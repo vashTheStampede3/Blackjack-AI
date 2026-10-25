@@ -212,7 +212,7 @@ class SessionStore:
                 (time.time(), round_number, int(cutting_card_seen), json.dumps(state)))
 
     def load_recent_shoe_state(self, max_age_s: float = 2 * 3600):
-        """The persisted shoe state if it is recent and non-empty, else None.
+        """The recent shoe state when cards OR unresolved uncertainty exist.
         Returns {"state", "round_number", "cutting_card_seen", "age_s"}."""
         with self._conn() as con:
             row = con.execute("SELECT ts, round_number, cutting_card_seen, state"
@@ -222,7 +222,8 @@ class SessionStore:
         ts, round_number, cutting, state_json = row
         age = time.time() - ts
         state = json.loads(state_json)
-        if age > max_age_s or not state.get("cards_seen"):
+        if age > max_age_s or not (state.get("cards_seen") or state.get("count_uncertain")
+                                  or state.get("uncertainties")):
             return None
         return {"state": state, "round_number": round_number,
                 "cutting_card_seen": bool(cutting), "age_s": age}

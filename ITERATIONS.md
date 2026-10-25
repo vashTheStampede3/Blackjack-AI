@@ -242,3 +242,12 @@ Twenty-three focused plumbing/crop/regression tests passed in 2.52 seconds.
 The replay now handles only a genuinely final undecodable frame as EOF, preserves
 earlier decoder failures, blocks DNS and supports identical recorded frame schedules.
 Real-video measurements are stored separately and are not test accuracy claims.
+
+## Shoe uncertainty is persisted even with zero confirmed cards
+
+CardCounter now retains structured unresolved issues and a shoe identity in its
+serialized state. SessionStore must not discard a recent zero-card state when it
+contains uncertainty. Two engine/SQLite checks failed before fixing the missing
+zero-card save/load paths. A clean empty shoe is still ignored as before.
+This does not change local recognition thresholds or the measured replay counts;
+the video measurements disable all session persistence.
