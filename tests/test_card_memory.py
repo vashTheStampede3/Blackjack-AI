@@ -139,3 +139,37 @@ def test_occluded_counted_card_reappears_without_being_counted_twice():
     ledger.observe([card("5", 80)], 4.)
     assert counter.cards_seen == 1 and counter.running_count == 1
     assert not counter.count_uncertain
+
+
+def test_rotated_extra_card_counts_once_when_rank_is_read():
+    counter, ledger = memory()
+    hand = [card("6", 80, "mine"), card("9", 120, "mine")]
+    ledger.observe(hand, 1.)
+    ledger.observe(hand, 2.)
+    rotated_extra = card("5", 165, "mine", width=35., height=15.)
+    ledger.observe(hand + [rotated_extra], 3.)
+    ledger.observe(hand + [rotated_extra], 4.)
+    ledger.observe(hand + [rotated_extra], 5.)
+    assert counter.cards_seen == 3 and counter.running_count == 2
+    assert not counter.count_uncertain
+
+
+def test_unread_rotated_extra_keeps_shoe_uncertain_after_clear():
+    counter, ledger = memory()
+    hand = [card("6", 80, "mine"), card("9", 120, "mine")]
+    ledger.observe(hand, 1.)
+    ledger.observe(hand, 2.)
+    ledger.observe(hand + [card(None, 165, "mine", width=35., height=15.)], 3.)
+    assert counter.cards_seen == 2 and counter.count_uncertain
+    ledger.clear_round()
+    assert counter.count_uncertain
+
+
+def test_crossing_same_rank_between_owners_blocks_advice_without_recount():
+    counter, ledger = memory()
+    initial = [card("8", 80, "mine"), card("8", 140, "other")]
+    ledger.observe(initial, 1.)
+    ledger.observe(initial, 2.)
+    ledger.observe([card("8", 80, "other"), card("8", 140, "mine")], 3.)
+    assert counter.cards_seen == 2 and counter.running_count == 0
+    assert ledger.advice_pending

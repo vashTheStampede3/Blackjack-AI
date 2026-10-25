@@ -337,3 +337,12 @@ cannot change from Off, arm or confirm; the mode selector is disabled. Local
 ONNX and optional local PT weights are unchanged. Thirty-eight focused policy,
 executor and refresh checks passed in 2.11 seconds with fake dispatchers and
 temporary output. No network, browser, casino, capture or model inference ran.
+
+## Additional card-memory simulations
+
+Thirteen focused logic checks passed. When an extra card is reported with a
+rank and a rotated bounding box, it is counted once. An unread extra leaves
+shoe uncertainty after round clear. Two equal ranks crossing between ownership
+zones leave Hi-Lo unchanged and withhold advice. Split-like movement still
+remains ambiguous. These are invented detections; they do not establish that
+the local model recognizes rotated or physical cards.
