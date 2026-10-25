@@ -1,7 +1,22 @@
 """Marshal fallback overlay hiding to Tk without worker-thread widget calls."""
 from contextlib import contextmanager
 import queue
+import sys
 import threading
+
+
+def apply_capture_guard(hwnd):
+    """Ask Windows to exclude an overlay HWND from supported screen captures."""
+    if sys.platform != "win32" or not hwnd:
+        return False
+    import ctypes
+    try:
+        fn = ctypes.windll.user32.SetWindowDisplayAffinity
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        fn.restype = ctypes.c_bool
+        return bool(fn(hwnd, 0x11))  # WDA_EXCLUDEFROMCAPTURE
+    except (AttributeError, OSError):
+        return False
 
 
 class CaptureGuard:
@@ -54,7 +69,10 @@ class CaptureGuard:
         try:
             def hide():
                 overlay = self.overlay_fn()
-                if overlay and (self.force_hide or not overlay.affinity_ok):
+                # WDA_EXCLUDEFROMCAPTURE is not honored by every capture API
+                # used by this app (notably MSS/PrintWindow). Hide for the
+                # capture window even when the native affinity call succeeded.
+                if overlay:
                     overlay.set_capture_hidden(True)
                     return True
                 return False

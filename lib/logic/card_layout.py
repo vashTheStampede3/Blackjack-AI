@@ -145,3 +145,173 @@ class CardLayout:
         if _contains(self.mine, (x, y)):
             return "mine"
         return "other"
+
+
+@dataclass
+class PlayerSeatGroup:
+    """A presentation/advice group; it never owns shoe-count decisions."""
+    seat_id: str
+    anchor_x: float
+    anchor_y: float
+    avg_scale: float
+    cards: list = None
+    is_hero: bool = False
+    is_ambiguous: bool = False
+    has_split: bool = False
+    closed_by_double: bool = False
+    first_seen: float = 0.
+    last_seen: float = 0.
+
+    def __post_init__(self):
+        if self.cards is None:
+            self.cards = []
+
+    @property
+    def display_label(self):
+        label = f"{self.seat_id} (Vos)" if self.is_hero else self.seat_id
+        return f"{label} · asiento dudoso" if self.is_ambiguous else label
+
+
+class TableGroupTracker:
+    """Group table cards by position while keeping assignments fixed per round.
+
+    A close call is exposed as ambiguous. Groups are display labels, not a
+    source of card identity or count events.
+    """
+    def __init__(self, max_seats=7, cluster_radius_scales=2.1,
+                 ambiguity_margin=0.28):
+        self.max_seats = max_seats
+        self.cluster_radius_scales = cluster_radius_scales
+        self.ambiguity_margin = ambiguity_margin
+        self._groups = {}
+        self._hero_seat_id = None
+
+    @staticmethod
+    def _scale(card):
+        return max(1., math.sqrt(max(1., card.width) * max(1., card.height)))
+
+    def reset_for_round(self, hero_seat_id=None):
+        self._groups.clear()
+        self._hero_seat_id = hero_seat_id
+
+    def update_groups(self, cards):
+        active = [c for c in cards if c.state not in ("rejected", "retired")
+                  and c.owner != "dealer"]
+        self._now = max((c.last_seen for c in active), default=0.)
+        for group in self._groups.values():
+            group.cards = []
+            group.is_ambiguous = False
+
+        pending = []
+        for card in sorted(active, key=lambda c: (c.first_seen, -c.cx)):
+            target = getattr(card, "manual_seat_override", None)
+            if target and target not in self._groups:
+                self._groups[target] = PlayerSeatGroup(target, card.cx, card.cy,
+                                                       self._scale(card))
+            target = target or card.seat_id
+            if target in self._groups:
+                self._put(self._groups[target], card)
+            else:
+                pending.append(card)
+
+        # First sightings in the same frame seed groups right-to-left.
+        for card in pending:
+            if card.observed_owner == "mine" and not card.manual_seat_override:
+                hero = next((group for group in self._groups.values()
+                             if any(existing.observed_owner == "mine"
+                                    for existing in group.cards)), None)
+                if hero is not None:
+                    self._put(hero, card)
+                    continue
+                if len(self._groups) < self.max_seats:
+                    group = PlayerSeatGroup(f"TMP_{len(self._groups)+1}",
+                                            card.cx, card.cy, self._scale(card))
+                    self._groups[group.seat_id] = group
+                    self._put(group, card)
+                    continue
+            scored = sorted(((self._cost(card, group), group)
+                             for group in self._groups.values()),
+                            key=lambda pair: pair[0])
+            if not scored or scored[0][0] > self.cluster_radius_scales:
+                if len(self._groups) >= self.max_seats:
+                    card.ambiguous_seat = True
+                    continue
+                group = PlayerSeatGroup(f"TMP_{len(self._groups)+1}", card.cx,
+                                        card.cy, self._scale(card))
+                self._groups[group.seat_id] = group
+                self._put(group, card)
+                continue
+            best_cost, group = scored[0]
+            ambiguous = (len(scored) > 1 and
+                         scored[1][0] - best_cost < self.ambiguity_margin)
+            card.ambiguous_seat = ambiguous
+            if ambiguous:
+                group.is_ambiguous = True
+                self._groups[scored[1][1].seat_id].is_ambiguous = True
+            self._put(group, card)
+
+        # Give temporary groups stable right-to-left labels once per creation.
+        temporary = sorted((g for g in self._groups.values()
+                            if g.seat_id.startswith("TMP_")),
+                           key=lambda g: -g.anchor_x)
+        for group in temporary:
+            index = 1
+            while f"J{index}" in self._groups:
+                index += 1
+            old = group.seat_id
+            group.seat_id = f"J{index}"
+            self._groups.pop(old)
+            self._groups[group.seat_id] = group
+            for card in group.cards:
+                card.seat_id = group.seat_id
+        for group in self._groups.values():
+            group.is_hero = group.seat_id == self._hero_seat_id or any(
+                card.observed_owner == "mine" for card in group.cards)
+            if len(group.cards) >= 2:
+                xs = [card.cx for card in group.cards]
+                group.has_split = max(xs) - min(xs) > 1.45 * group.avg_scale
+                newest = max(group.cards, key=lambda card: card.first_seen)
+                group.closed_by_double = (len(group.cards) >= 3
+                                          and newest.is_rotated_double)
+            for card in group.cards:
+                card.ambiguous_seat = bool(card.ambiguous_seat or group.is_ambiguous)
+        ordered = sorted(self._groups.values(), key=lambda group: -group.anchor_x)
+        for index, first in enumerate(ordered):
+            for second in ordered[index+1:]:
+                scale = (first.avg_scale + second.avg_scale) / 2
+                if math.hypot(first.anchor_x-second.anchor_x,
+                              first.anchor_y-second.anchor_y) < .85*scale:
+                    first.is_ambiguous = second.is_ambiguous = True
+                    for card in first.cards + second.cards:
+                        card.ambiguous_seat = True
+        return sorted(self._groups.values(), key=lambda group: -group.anchor_x)
+
+    def _put(self, group, card):
+        group.cards.append(card)
+        card.seat_id = group.seat_id
+        card.ambiguous_seat = bool(getattr(card, "ambiguous_seat", False))
+        group.is_ambiguous = group.is_ambiguous or card.ambiguous_seat
+        n = len(group.cards)
+        group.anchor_x += (card.cx - group.anchor_x) / n
+        group.anchor_y += (card.cy - group.anchor_y) / n
+        group.avg_scale += (self._scale(card) - group.avg_scale) / n
+        group.first_seen = (card.first_seen if n == 1 else
+                            min(group.first_seen, card.first_seen))
+        group.last_seen = max(group.last_seen, card.last_seen)
+
+    def _cost(self, card, group):
+        vx, vy = card.vx, card.vy
+        px, py = card.cx + vx * .08, card.cy + vy * .08
+        scale = max(12., (self._scale(card) + group.avg_scale) / 2)
+        distance = math.hypot((px-group.anchor_x)/scale, .85*(py-group.anchor_y)/scale)
+        scale_cost = .35 * abs(self._scale(card)-group.avg_scale)/scale
+        temporal_cost = .10 * min(1., abs(card.first_seen-group.last_seen)/.75)
+        return distance + scale_cost + temporal_cost
+
+    def set_hero_seat(self, seat_id):
+        self._hero_seat_id = seat_id
+        for group in self._groups.values():
+            group.is_hero = group.seat_id == seat_id
+
+    def ordered_groups(self):
+        return sorted(self._groups.values(), key=lambda group: -group.anchor_x)

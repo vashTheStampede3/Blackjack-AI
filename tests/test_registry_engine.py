@@ -5,6 +5,7 @@ import pytest
 
 from lib.common import constants
 from lib.logic.card_layout import CardLayout
+from lib.logic import region_profiles
 from lib.logic.monitor_utils import Polygon
 from tools.replay_video import ReplayEngine
 
@@ -115,6 +116,38 @@ def test_zero_count_uncertainty_is_actually_saved_on_round_clear(engine, tmp_pat
     engine.counter.reset_shoe()
     engine.apply_shoe_state(info)
     assert engine.counter.count_uncertain and engine._round_observation.count_uncertain
+
+
+def test_card_id_corrections_change_the_shoe_once_and_reject_old_round(engine):
+    observe(engine, [observation("unread-card", 300)], 1.)
+    identity = next(iter(engine.card_registry.cards))
+    assert engine.counter.cards_seen == 0 and engine.counter.count_uncertain
+    first = engine.apply_correction(identity, 1, "set_rank", new_rank="10")
+    assert first.ok and first.rc_delta == -1
+    assert engine.counter.cards_seen == 1 and engine.counter.running_count == -1
+    assert engine.counter.seen_counts_by_rank()["10"] == 1
+    second = engine.apply_correction(identity, 1, "set_rank", new_rank="5")
+    assert second.ok and second.rc_delta == 2
+    assert engine.counter.cards_seen == 1 and engine.counter.running_count == 1
+    counts = engine.counter.seen_counts_by_rank()
+    assert counts["10"] == 0 and counts["5"] == 1
+    engine.correct_tracked_card(identity, action="not_a_card", expected_round=1)
+    assert engine.counter.cards_seen == 0 and engine.counter.running_count == 0
+    assert engine.card_registry.cards[identity].status == "not_a_card"
+    state = engine.counter.get_state()
+    engine.new_round()
+    stale = engine.apply_correction(identity, 1, "set_rank", new_rank="6")
+    assert not stale.ok and stale.reason == "round_changed"
+    assert engine.counter.get_state() == state
+
+
+def test_live_monitor_activates_saved_table_layout_and_registry(engine):
+    zones = engine.card_layout
+    region_profiles.set_card_layout(zones, profile=region_profiles.DEFAULT_NAME)
+    engine.set_monitor(SimpleNamespace(width=640, height=480, timestamp=0.))
+    assert engine.card_layout == zones
+    assert engine._memory_mode == "registry"
+    assert engine.card_registry is not None
 
 
 def test_store_keeps_uncertainty_even_when_no_card_was_counted(engine, tmp_path):

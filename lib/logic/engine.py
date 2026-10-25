@@ -46,7 +46,7 @@ from .session_store import SessionStore
 from .round_observation import RoundObservation
 from .table_inference import predict_table, predict_layout
 from .card_evidence import CardEvidence
-from .card_memory import CardMemory
+from .card_memory import CardMemory, CorrectionResult
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
 
@@ -221,6 +221,14 @@ class DetectionEngine:
     def set_monitor(self, monitor, *, profile=None):
         resolution = (monitor.width, monitor.height)
         selected_profile = profile or region_profiles.active_name()
+        from .card_layout import SEVEN_SEATS
+        selected_mode = region_profiles.layout_mode(resolution, profile=selected_profile)
+        selected_layout = (region_profiles.get_card_layout(
+            resolution, selected_mode, profile=selected_profile)
+            if selected_mode != SEVEN_SEATS else None)
+        if selected_mode != SEVEN_SEATS and selected_layout is None:
+            raise ValueError(f'Profile "{selected_profile}" has no saved card zones at '
+                             f'{monitor.width}x{monitor.height}. Calibrate this mode first.')
         custom = load_custom_regions(resolution, profile=selected_profile)
         if custom is None:
             if profile is not None or selected_profile != region_profiles.DEFAULT_NAME:
@@ -247,9 +255,24 @@ class DetectionEngine:
             self._round_observation = RoundObservation()
             self._round_observation.count_uncertain = previous_doubt
             res = self.capture.resolution
-            self.regions = ([Polygon(p) for p in custom["players"]] if custom
-                            else scaled_player_regions(res))
-            self._dealer_rect = tuple(custom["dealer"]) if custom else dealer_area_rect(res)
+            if selected_layout is not None:
+                self.card_layout = selected_layout
+                self._memory_mode = "registry"
+                self.card_registry = CardMemory(
+                    self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
+                    empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
+                self.card_registry.round_number = self.round_number
+                self.regions = []  # the selected table polygon is the sole counting boundary
+                xs, ys = zip(*selected_layout.dealer)
+                self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+                self.my_seats = {0}
+            else:
+                self.card_layout = None
+                self.card_registry = None
+                self._memory_mode = "legacy"
+                self.regions = ([Polygon(p) for p in custom["players"]] if custom
+                                else scaled_player_regions(res))
+                self._dealer_rect = tuple(custom["dealer"]) if custom else dealer_area_rect(res)
             sx, _ = scaling_factors(res)
             self._dist_scale = sx
             self._ocr_regions = ocr.load_regions(res)
@@ -599,15 +622,35 @@ class DetectionEngine:
         self._dealer_pos = (dealer[0].cx, dealer[0].cy) if dealer else None
         self.dealer_extras = [{"rank": c.rank, "cx": c.cx, "cy": c.cy, "id": c.id} for c in dealer[1:]]
 
-    def correct_tracked_card(self, identity, name, *, expected_round=None):
+    def correct_tracked_card(self, identity, name=None, *, expected_round=None,
+                             action=None, new_suit=None, new_seat_id=None):
+        action = action or ("not_a_card" if name is None else "set_rank")
+        result = self.apply_correction(
+            identity, self.card_registry.round_number if expected_round is None
+            and self.card_registry is not None else expected_round,
+            action, new_rank=name, new_suit=new_suit, new_seat_id=new_seat_id)
+        if not result.ok:
+            reason = ("La ronda cambió; revisá la corrección"
+                      if result.reason == "round_changed"
+                      else f"No se pudo corregir la carta: {result.reason}")
+            raise ValueError(reason)
+        return result
+
+    def apply_correction(self, card_id, expected_round_id, action, *,
+                         new_rank=None, new_suit=None, new_seat_id=None):
         with self._lock:
             if self.card_registry is None:
-                raise ValueError("No hay registro común activo")
-            self.card_registry.correct(identity, name, expected_round=expected_round)
+                return CorrectionResult(False, "registry_inactive")
+            result = self.card_registry.apply_correction(
+                card_id, expected_round_id, action, new_rank=new_rank,
+                new_suit=new_suit, new_seat_id=new_seat_id)
+            if not result.ok:
+                return result
             self._sync_registry_cards()
             self._round_observation.count_uncertain = self.counter.count_uncertain
             self._round_observation.count_pending = self.card_registry.pending
         self.publish_snapshot()
+        return result
 
     # --------------------------------------------------------------- dealer
 
@@ -2522,6 +2565,33 @@ class DetectionEngine:
                 "error": self.last_error,
                 "reading": self._round_observation.snapshot(),
                 "card_registry": self.card_registry.snapshot() if self.card_registry is not None else None,
+                "seen_by_rank": self.counter.seen_counts_by_rank(),
+                "card_groups": ([{
+                    "seat_id": group.seat_id,
+                    "is_hero": group.is_hero,
+                    "is_ambiguous": group.is_ambiguous,
+                    "has_split": group.has_split,
+                    "closed_by_double": group.closed_by_double,
+                    "cards": [{
+                        "card_id": card.id,
+                        "rank": card.rank if card.counted and not card.reason else None,
+                        "suit": card.suit,
+                        "ambiguous_seat": card.ambiguous_seat,
+                        "state": card.state,
+                        "reason": card.reason,
+                        "hand": card.hand,
+                    } for card in group.cards],
+                } for group in self.card_registry.group_tracker.ordered_groups()]
+                    if self.card_registry is not None else []),
+                "dealer_cards": ([{
+                    "card_id": card.id,
+                    "rank": card.rank if card.counted and not card.reason else None,
+                    "suit": card.suit,
+                    "state": card.state,
+                    "reason": card.reason,
+                } for card in self.card_registry.cards.values()
+                    if card.owner == "dealer" and card.status == "active"]
+                    if self.card_registry is not None else []),
                 "model_refresh_ts": self._model_refresh_ts,
             }
             if self.card_registry is not None:
@@ -2529,8 +2599,10 @@ class DetectionEngine:
                 if self.card_registry.advice_pending:
                     for seat in snapshot["seats"]:
                         if seat["mine"]:
-                            seat.update(advice="Carta sin leer / dudosa", book_action=None,
-                                        optimal="", optimal_action=None)
+                            seat.update(advice=None,
+                                        advice_withdrawn_reason="Lectura dudosa (? o asiento dudoso)",
+                                        book_action=None, optimal="",
+                                        optimal_action=None, index_advice="")
             # Publish while still holding the state lock so a snapshot built
             # from older state can never be stored with a newer seq.
             with self._snapshot_lock:

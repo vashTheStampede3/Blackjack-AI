@@ -6,6 +6,7 @@ Run:  .venv\\Scripts\\python -m unittest tests.test_hud -v
 import unittest
 
 from lib.interfaces.hud import format_hud_lines
+from lib.interfaces.round_overlay import MiniTableOverlay, RoundOverlay
 
 
 def snap(**over):
@@ -77,6 +78,12 @@ class FormatHudLines(unittest.TestCase):
         self.assertEqual(lines["seats"], [])
         self.assertEqual(lines["sidebets"], "")
         self.assertEqual(lines["pnl"], "")
+
+    def test_round_overlay_name_resolves_to_the_single_mini_table_surface(self):
+        self.assertIs(RoundOverlay, MiniTableOverlay)
+        self.assertEqual(MiniTableOverlay._advice_text({
+            "count": {"count_uncertain": True}, "seats": []}),
+            "SIN CONSEJO · lectura dudosa")
 
 
 if __name__ == "__main__":

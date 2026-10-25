@@ -8,6 +8,14 @@ from dataclasses import asdict, dataclass, field
 import math
 
 from .cards import card_value
+from .card_layout import TableGroupTracker
+
+
+@dataclass(frozen=True)
+class CorrectionResult:
+    ok: bool
+    reason: str
+    rc_delta: int = 0
 
 
 @dataclass
@@ -32,6 +40,55 @@ class RememberedCard:
     vy: float = 0.
     hand: int | None = 0
     initial_cx: float = 0.
+    round_id: int = 1
+    suit: str | None = None
+    counted_rank: str | None = None
+    counted_name: str | None = None
+    trajectory: list = field(default_factory=list)
+    seat_id: str | None = None
+    manual_seat_override: str | None = None
+    ambiguous_seat: bool = False
+    status: str = "active"
+
+    @property
+    def card_id(self):
+        return self.id
+
+    @property
+    def bbox(self):
+        return (self.cx-self.width/2, self.cy-self.height/2,
+                self.cx+self.width/2, self.cy+self.height/2)
+
+    @property
+    def center(self):
+        return (self.cx, self.cy)
+
+    @property
+    def first_seen_ts(self):
+        return self.first_seen
+
+    @property
+    def last_seen_ts(self):
+        return self.last_seen
+
+    @property
+    def counted_in_shoe(self):
+        return self.counted
+
+    @property
+    def velocity(self):
+        return (self.vx, self.vy)
+
+    @property
+    def char_scale(self):
+        return math.sqrt(max(1., self.width) * max(1., self.height))
+
+    @property
+    def is_rotated_double(self):
+        return self.width / max(1., self.height) > 1.15
+
+
+TrackedCard = RememberedCard
 
 
 class CardMemory:
@@ -47,11 +104,28 @@ class CardMemory:
         self.had_cards = False
         self.split_roots = []
         self.now = 0.
+        self.group_tracker = TableGroupTracker()
 
     def _issue(self, card, reason):
         card.reason, card.state = reason, "doubtful"
         self.counter.mark_uncertainty(card.id, {"reason": reason, "rank": card.rank,
                                                "counted": card.counted, "round": self.round_number})
+
+    @staticmethod
+    def _normalize(pred):
+        pred = dict(pred)
+        name = pred.get("name")
+        if isinstance(name, str) and " of " in name:
+            rank, _of, suit = name.partition(" of ")
+            pred["name"] = rank
+            pred.setdefault("suit", {"Spades": "S", "Hearts": "H",
+                                     "Diamonds": "D", "Clubs": "C"}.get(suit))
+        return pred
+
+    @staticmethod
+    def _shoe_name(card):
+        suit_name = {"S": "Spades", "H": "Hearts", "D": "Diamonds", "C": "Clubs"}.get(card.suit)
+        return f"{card.rank} of {suit_name}" if suit_name else card.rank
 
     def _new(self, pred, now, reason=None, possible_ids=()):
         if len(self.cards) >= 256:
@@ -59,9 +133,11 @@ class CardMemory:
             return None
         self.serial += 1
         key = f"{self.counter.shoe_id}:{self.round_number}:{self.serial}"
+        pred = self._normalize(pred)
         card = RememberedCard(key, pred.get("name"), pred["cx"], pred["cy"],
             pred.get("width", 30), pred.get("height", 40), now, now,
-            pred["owner"], pred["owner"], possible_ids=list(possible_ids), initial_cx=pred["cx"])
+            pred["owner"], pred["owner"], possible_ids=list(possible_ids), initial_cx=pred["cx"],
+            round_id=self.round_number, suit=pred.get("suit"))
         self.cards[key] = card
         self.counter.mark_uncertainty(key, {"reason": reason or "Carta sin leer / pendiente",
                                            "rank": card.rank, "counted": False, "round": self.round_number})
@@ -71,12 +147,18 @@ class CardMemory:
         return card
 
     def _update(self, card, pred, now):
+        pred = self._normalize(pred)
         dt = now-card.last_seen
         if dt > 0:
             card.vx, card.vy = (pred["cx"]-card.cx)/dt, (pred["cy"]-card.cy)/dt
         card.cx, card.cy = pred["cx"], pred["cy"]
         card.width, card.height = pred.get("width", 30), pred.get("height", 40)
         card.last_seen, card.observed_owner = now, pred["owner"]
+        card.trajectory.append((now, card.cx, card.cy))
+        if len(card.trajectory) > 12:
+            del card.trajectory[:-12]
+        if card.suit is None and pred.get("suit"):
+            card.suit = pred["suit"]
         if card.state in ("rejected", "retired"):
             return
         if card.manual:
@@ -101,7 +183,9 @@ class CardMemory:
             card.state = "confirmed"
         elif card.hits >= self.confirmations:
             card.counted, card.state = True, "confirmed"
-            self.counter.count_card(card.rank)
+            card.counted_rank = card.rank
+            card.counted_name = self._shoe_name(card)
+            self.counter.count_card(card.counted_name)
             self.counter.clear_uncertainty(card.id)
 
     @staticmethod
@@ -114,7 +198,8 @@ class CardMemory:
         self.now = now
         # One box per location per frame is one observation, never two votes.
         unique = []
-        for pred in sorted(predictions, key=lambda p: p.get("confidence", 0), reverse=True):
+        for raw_pred in sorted(predictions, key=lambda p: p.get("confidence", 0), reverse=True):
+            pred = self._normalize(raw_pred)
             if pred.get("owner") not in ("mine", "dealer", "other"):
                 continue
             if pred.get("class") in ("back", "cardback", "cuttingcard"):
@@ -229,10 +314,13 @@ class CardMemory:
 
     @property
     def advice_pending(self):
-        return self.counter.count_uncertain or any(c.observed_owner != c.owner or c.hand is None
-            for c in self.cards.values() if c.owner == "mine" or c.observed_owner == "mine")
+        return self.counter.count_uncertain or any(
+            c.observed_owner != c.owner or c.hand is None or c.ambiguous_seat
+            for c in self.cards.values()
+            if c.owner == "mine" or c.observed_owner == "mine" or c.ambiguous_seat)
 
     def _group_hands(self):
+        self.group_tracker.update_groups(list(self.cards.values()))
         own = sorted((c for c in self.cards.values() if c.owner == "mine" and c.counted),
                      key=lambda c: (c.first_seen, c.id))
         if not self.split_roots and len(own) >= 2:
@@ -251,8 +339,12 @@ class CardMemory:
             card.hand = None if abs(distances[0]-distances[1]) < max(3.,card.width*.35) else distances.index(min(distances))
 
     def correct(self, identity, rank, *, expected_round=None):
+        suit_code = None
         if rank is not None:
             card_value(rank)  # validate before retracting a previously counted card
+            parsed = self._normalize({"name": rank})
+            suit_code = parsed.get("suit")
+            rank = parsed.get("name")
         if not identity.startswith(self.counter.shoe_id+":"):
             raise ValueError("La carta pertenece a otro shoe")
         if expected_round is not None and expected_round != self.round_number:
@@ -269,15 +361,71 @@ class CardMemory:
             self.counter.clear_uncertainty(identity)
             return
         if card.counted:
-            self.counter.uncount_card(card.rank)
+            self.counter.uncount_card(card.counted_name or card.counted_rank or card.rank)
         if rank is None:
-            card.counted, card.manual, card.rank = False, True, None
+            card.counted, card.counted_rank, card.counted_name = False, None, None
+            card.manual, card.rank = True, None
             card.state, card.reason = "rejected", None
+            card.status = "not_a_card"
         else:
             card.rank, card.manual, card.counted = rank, True, True
+            card.suit = suit_code or card.suit
+            card.counted_rank = card.rank
+            card.counted_name = self._shoe_name(card)
+            card.status = "active"
             card.state, card.reason, card.possible_ids = "confirmed", None, []
-            self.counter.count_card(rank)
+            self.counter.count_card(card.counted_name)
         self.counter.clear_uncertainty(identity)
+
+    def apply_correction(self, identity, expected_round_id, action, *,
+                         new_rank=None, new_suit=None, new_seat_id=None):
+        """Apply one card correction; a stale overlay click cannot touch shoe state."""
+        if expected_round_id != self.round_number:
+            return CorrectionResult(False, "round_changed")
+        if not identity.startswith(self.counter.shoe_id + ":"):
+            return CorrectionResult(False, "shoe_changed")
+        card = self.cards.get(identity)
+        if card is None or card.round_id != self.round_number:
+            return CorrectionResult(False, "card_not_found")
+        if action == "change_seat":
+            if new_seat_id not in {f"J{i}" for i in range(1, 8)}:
+                return CorrectionResult(False, "invalid_seat")
+            card.manual_seat_override = new_seat_id
+            card.seat_id = new_seat_id
+            card.ambiguous_seat = False
+            self._group_hands()
+            return CorrectionResult(True, "seat_changed")
+        if action == "not_a_card":
+            if card.status == "not_a_card":
+                return CorrectionResult(False, "already_discarded")
+            self.correct(identity, None, expected_round=expected_round_id)
+            return CorrectionResult(True, "discarded")
+        if action != "set_rank" or new_rank is None:
+            return CorrectionResult(False, "invalid_action")
+        aliases = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}
+        rank = aliases.get(new_rank, new_rank)
+        try:
+            card_value(rank)
+        except (TypeError, ValueError):
+            return CorrectionResult(False, "invalid_rank")
+        suit_aliases = {"♠": "S", "♥": "H", "♦": "D", "♣": "C"}
+        new_suit = suit_aliases.get(new_suit, new_suit)
+        if new_suit is not None and new_suit not in {"S", "H", "D", "C"}:
+            return CorrectionResult(False, "invalid_suit")
+        before = self.counter.running_count
+        old_counted = card.counted_name or card.counted_rank or (card.rank if card.counted else None)
+        if old_counted:
+            self.counter.uncount_card(old_counted)
+        card.rank = rank
+        card.suit = new_suit or card.suit
+        card.counted_rank = rank
+        card.counted_name = self._shoe_name(card)
+        card.counted, card.manual, card.status = True, True, "active"
+        card.state, card.reason, card.possible_ids = "confirmed", None, []
+        self.counter.count_card(card.counted_name)
+        self.counter.clear_uncertainty(identity)
+        self._group_hands()
+        return CorrectionResult(True, "rank_updated", self.counter.running_count-before)
 
     def detach_shoe(self):
         for card in self.cards.values():
@@ -290,6 +438,7 @@ class CardMemory:
         self.split_roots.clear()
         self.empty_frames, self.empty_since, self.had_cards = 0, None, False
         self.round_number += 1
+        self.group_tracker.reset_for_round()
 
     def snapshot(self):
         return [asdict(card) for card in self.cards.values()]
@@ -299,7 +448,9 @@ class CardMemory:
                 "cards": self.snapshot(), "split_roots": list(self.split_roots)}
 
     def apply_state(self, state):
-        restored = [RememberedCard(**row) for row in state.get("cards", [])]
+        allowed = RememberedCard.__dataclass_fields__
+        restored = [RememberedCard(**{k: v for k, v in row.items() if k in allowed})
+                    for row in state.get("cards", [])]
         if any(not c.id.startswith(self.counter.shoe_id+":") and c.state != "retired" for c in restored):
             raise ValueError("La memoria guardada pertenece a otro shoe")
         self.cards = {c.id: c for c in restored}
@@ -307,3 +458,5 @@ class CardMemory:
         self.serial = int(state.get("serial", 0))
         self.split_roots = [key for key in state.get("split_roots", []) if key in self.cards]
         self.had_cards = bool(self.cards)
+        self.group_tracker = TableGroupTracker()
+        self._group_hands()

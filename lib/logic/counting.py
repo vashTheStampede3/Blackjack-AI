@@ -66,6 +66,25 @@ class CardCounter:
             self.per_rank[counter_key(card_name)] += 1
             self._track_identity(card_name, +1)
 
+    def seen_counts_by_rank(self) -> dict:
+        """Return observed rank counts where rank identity is actually known.
+
+        Manual ten-bucket adjustments cannot be split into 10/J/Q/K, so they
+        are deliberately not guessed into this view.
+        """
+        names = ("Ace", "2", "3", "4", "5", "6", "7", "8", "9",
+                 "10", "Jack", "Queen", "King")
+        with self._lock:
+            counts = {name: 0 for name in names}
+            for card_name, count in self.suit_seen.items():
+                rank, _, _suit = card_name.partition(" of ")
+                if rank in counts:
+                    counts[rank] += count
+            for rank, count in self.rank_seen_nosuit.items():
+                if rank in counts:
+                    counts[rank] += count
+            return counts
+
     def uncount_card(self, card_name: str):
         """Retract a previously counted card (manual correction of a misread)."""
         with self._lock:

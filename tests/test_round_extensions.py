@@ -147,7 +147,10 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         assert np.allclose(baseline[10:-10, 10:-10], [101, 163, 39], atol=1), "Fixture must fully cover capture"
         overlay = RoundOverlay(root)
         overlay.geometry(f"+{source.x+30}+{source.y+40}")
-        overlay.update_from_snapshot(sample(time.time()), True)
+        state = sample(time.time())
+        state["card_groups"] = [{"seat_id": "J7", "is_hero": True,
+            "cards": [{"card_id": "fixture-card", "rank": "8", "suit": "D"}]}]
+        overlay.update_from_snapshot(state, True)
         root.update()
         time.sleep(.15)
         root.update()
@@ -162,13 +165,15 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         root.update()
         assert u.GetForegroundWindow() == previous_focus, "Overlay stole focus"
         assert u.GetFocus() == previous_keyboard, "Overlay took keyboard focus"
-        point = W.POINT(source.x+60, source.y+65)
+        # Empty keyed pixels pass through, while a rendered card receives input.
+        background_point = W.POINT(source.x+60, source.y+250)
+        hit = u.WindowFromPoint(background_point)
+        assert u.GetAncestor(hit, 2) == root_hwnd, "Transparent overlay background intercepts input"
+        point = W.POINT(source.x+72, source.y+150)
         hit = u.WindowFromPoint(point)
-        assert u.GetAncestor(hit, 2) == root_hwnd, "Overlay intercepts mouse hit testing"
+        assert u.GetAncestor(hit, 2) == overlay.hwnd, "Rendered card does not receive input"
         overlay.set_editing(True)
         root.update()
-        hit = u.WindowFromPoint(point)
-        assert u.GetAncestor(hit, 2) == overlay.hwnd
         overlay._drag_start(SimpleNamespace(x_root=source.x+60, y_root=source.y+65))
         old_position = (overlay.winfo_x(), overlay.winfo_y())
         overlay._drag_move(SimpleNamespace(x_root=source.x+70, y_root=source.y+75))
@@ -179,22 +184,21 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         overlay.set_editing(False)
         assert overlay.affinity_ok, "Capture exclusion unsupported on this Windows"
         # This screenshot is confined to an opaque test fixture and stays in RAM.
+        guard = CaptureGuard(root, lambda: overlay)
+        guard.force_hide = True
+        capture.guard = guard
         ctypes.windll.dwmapi.DwmFlush()
         excluded = capture.grab_bgr()
         assert np.array_equal(baseline, excluded), "Overlay or black hole entered monitor capture"
         target = WindowSource(int(root_hwnd), root.title(), os.getpid(), 700, 450)
         assert np.array_equal(target.grab_bgr()[20:-20, 20:-20], baseline[20:-20, 20:-20])
-        guard = CaptureGuard(root, lambda: overlay)
-        guard.force_hide = True
-        capture.guard = guard
         assert np.array_equal(baseline, capture.grab_bgr()), "Fallback hiding contaminated capture"
         assert u.IsWindowVisible(overlay.hwnd)
         assert u.GetForegroundWindow() == previous_focus
         overlay.set_opacity(.65)
         assert abs(overlay.attributes("-alpha")-.65) < .02
-        capture.guard = None
         ctypes.windll.dwmapi.DwmFlush()
-        assert np.array_equal(baseline, capture.grab_bgr()), "Changing opacity broke exclusion"
+        assert np.array_equal(baseline, capture.grab_bgr()), "Changing opacity contaminated guarded capture"
         capture.guard = guard
         # Exercise the worker->UI fallback path; no Tk calls on that worker.
         import threading
@@ -215,7 +219,8 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         overlay._show_noactivate()
         root.update()
         assert u.IsWindowVisible(overlay.hwnd)
-        assert u.GetAncestor(u.WindowFromPoint(point), 2) == root_hwnd
+        assert u.GetAncestor(u.WindowFromPoint(point), 2) == overlay.hwnd
+        assert u.GetAncestor(u.WindowFromPoint(background_point), 2) == root_hwnd
         overlay.set_editing(True)
         root.update()
         assert u.GetAncestor(u.WindowFromPoint(point), 2) == overlay.hwnd
@@ -315,7 +320,7 @@ def test_simulated_round_through_existing_engine_without_casino_or_store(monkeyp
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Tk Windows integration")
-def test_main_gui_offline_preview_calibration_and_independent_panels(monkeypatch):
+def test_main_gui_offline_preview_calibration_and_single_overlay(monkeypatch):
     import tkinter as tk
     import traceback
     from lib.common import constants, settings
@@ -414,13 +419,13 @@ def test_main_gui_offline_preview_calibration_and_independent_panels(monkeypatch
             assert engine.counter.cards_seen == before_count
             app.round_enabled.set(True)
             app._toggle_round_overlay()
-            app._toggle_hud()
             pump(.1)
-            assert app.round_overlay.winfo_exists() and app.hud.winfo_exists()
+            assert app.round_overlay is app.hud and app.round_overlay.winfo_exists()
             app.round_enabled.set(False)
             app._toggle_round_overlay()
-            assert app.round_overlay is None and app.hud.winfo_exists() and app.winfo_exists()
+            assert app.round_overlay is None and app.hud is None and app.winfo_exists()
             app._toggle_hud()
+            assert app.round_overlay is app.hud and app.round_overlay.winfo_exists()
             assert app.executor.mode == "off" and not app.executor.armed
             assert not errors
         except Exception:

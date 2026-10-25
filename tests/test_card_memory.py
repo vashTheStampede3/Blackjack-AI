@@ -1,4 +1,5 @@
 """Card-ledger rules with invented detections: logic, not real recognition."""
+import math
 import pytest
 
 from lib.logic.card_memory import CardMemory
@@ -224,3 +225,51 @@ def test_noisy_read_of_already_confirmed_card_does_not_taint_shoe():
     ledger.observe([card("5")], 4.)
     assert counter.cards_seen == 1 and counter.running_count == 1
     assert not counter.count_uncertain
+
+
+def test_rotated_third_card_closes_group_as_double_without_changing_scale():
+    counter, ledger = memory()
+    pair = [card("6", 80, "mine"), card("9", 100, "mine")]
+    ledger.observe(pair, 1.)
+    ledger.observe(pair, 2.)
+    extra = card("5", 125, "mine", width=64., height=44.)
+    assert extra["width"] / extra["height"] > 1.15
+    for now in (3., 4.):
+        ledger.observe(pair + [extra], now)
+    group = next(g for g in ledger.group_tracker.ordered_groups() if g.is_hero)
+    assert counter.cards_seen == 3
+    assert group.closed_by_double
+    tracked = next(c for c in ledger.cards.values() if c.rank == "5")
+    assert tracked.is_rotated_double
+    assert math.isclose(tracked.char_scale, math.sqrt(64.*44.))
+    assert math.isclose(tracked.char_scale, math.sqrt(44.*64.))
+
+
+def test_split_like_motion_keeps_one_seat_and_midpoint_hit_stays_ambiguous():
+    counter, ledger = memory()
+    pair = [card("8", 80, "mine"), card("8", 140, "mine")]
+    ledger.observe(pair, 1.)
+    ledger.observe(pair, 2.)
+    split = [card("8", 55, "mine"), card("8", 165, "mine")]
+    ledger.observe(split, 3.)
+    ledger.observe(split, 4.)
+    group = next(g for g in ledger.group_tracker.ordered_groups() if g.is_hero)
+    assert group.has_split
+    hit = card("7", 110, "mine")
+    ledger.observe(split + [hit], 5.)
+    ledger.observe(split + [hit], 6.)
+    assert any(c.rank == "7" and c.counted for c in ledger.cards.values())
+    assert ledger.advice_pending
+    assert counter.cards_seen <= 3  # uncertain moved/new identities never inflate RC
+
+
+def test_rank_and_suit_are_kept_separately_but_counted_as_one_card():
+    counter, ledger = memory()
+    for now in (1., 2.):
+        ledger.observe([card("8 of Diamonds")], now)
+    tracked = next(iter(ledger.cards.values()))
+    assert tracked.rank == "8" and tracked.suit == "D"
+    assert tracked.counted_rank == "8"
+    assert tracked.counted_name == "8 of Diamonds"
+    assert counter.cards_seen == 1
+    assert counter.seen_counts_by_rank()["8"] == 1

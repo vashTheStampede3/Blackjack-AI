@@ -80,6 +80,11 @@ class SettlementE2E(unittest.TestCase):
         self.entries = []
         tmp = Path(tempfile.mkdtemp(prefix="bjai_settlement_e2e_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # set_monitor now selects the saved profile for the exact resolution.
+        # Keep this synthetic replay isolated from the user's real profiles.
+        previous_output_dir = constants.OUTPUT_DIR
+        constants.OUTPUT_DIR = tmp / "output"
+        self.addCleanup(setattr, constants, "OUTPUT_DIR", previous_output_dir)
         with patch("lib.logic.engine.SessionStore", lambda: SessionStore(tmp / "session.db")):
             self.eng = DetectionEngine(
                 log=lambda msg, level=None: self.entries.append((msg, level)))

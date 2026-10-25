@@ -50,6 +50,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.monitor = None
         self._preview_source = None
         self.round_overlay = None
+        self.hud = None  # compatibility alias for the same Mini Mesa window
         from .capture_guard import CaptureGuard
         self._capture_guard = CaptureGuard(self, lambda: self.round_overlay)
         self.controller.engine.capture.guard = self._capture_guard
@@ -153,8 +154,8 @@ class ModernBlackjackGUI(tk.Tk):
              "Risk of ruin, Kelly risk table, Monte Carlo simulation"),
             ("🎓  Trainer", self._open_trainer,
              "Deck countdown, deviation flashcards, replay drills"),
-            ("🎯  HUD", self._toggle_hud,
-             "Compact always-on-top panel to park next to the stream"),
+            ("🎯  Mini Mesa", self._toggle_hud,
+             "Mostrar u ocultar el único cartel sobre la mesa"),
             ("⚙  Settings", self._open_settings,
              "Table rules, deck count, side-bet paytables"),
         ]):
@@ -512,17 +513,9 @@ class ModernBlackjackGUI(tk.Tk):
                            f"{session['fired']} fired, "
                            f"{session['verified']} verified")
             self.exec_status_var.set(status)
-        marker = state.get("marker")
-        if (marker is not None and self.monitor is not None
-                and self.controller.running):
-            if self.ghost_marker is None or not self.ghost_marker.winfo_exists():
-                from .ghost_overlay import GhostMarker
-                self.ghost_marker = GhostMarker(self)
-            self.ghost_marker.show(self.monitor.x + marker["x"],
-                                   self.monitor.y + marker["y"],
-                                   marker["text"], marker["color"])
-        else:
-            self._hide_marker()
+        # The executor stays disabled. Its former marker would create a
+        # second floating surface over the VM.
+        self._hide_marker()
 
     def _build_counters_section(self, parent):
         section = self._section(parent, "Cards Seen (this shoe)")
@@ -1245,9 +1238,12 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _toggle_round_overlay(self):
         if self.round_enabled.get():
-            if self.round_overlay is None:
-                from .round_overlay import RoundOverlay
-                self.round_overlay = RoundOverlay(self)
+            if (self.round_overlay is None or
+                    not self.round_overlay.winfo_exists()):
+                from .round_overlay import MiniTableOverlay
+                self.round_overlay = MiniTableOverlay(
+                    self, self._correct_overlay_card, on_close=self._on_hud_closed)
+            self.hud = self.round_overlay
             self.round_overlay.update_from_snapshot(
                 self.controller.engine.get_snapshot(), self.controller.running)
             self.round_overlay.ensure_on_screen()
@@ -1255,6 +1251,11 @@ class ModernBlackjackGUI(tk.Tk):
         elif self.round_overlay is not None:
             self.round_overlay.close()
             self.round_overlay = None
+            self.hud = None
+            self.controller.engine.persist_settings_async()
+        if hasattr(self, "hud_nav_btn"):
+            self.hud_nav_btn.config(fg=(C["accent"] if self.round_enabled.get()
+                                        else C["text_primary"]))
 
     def _round_overlay_options(self):
         existing = getattr(self, "_round_options", None)
@@ -1292,21 +1293,27 @@ class ModernBlackjackGUI(tk.Tk):
         top.protocol("WM_DELETE_WINDOW", finish)
 
     def _toggle_hud(self):
-        hud = getattr(self, "hud", None)
-        if hud is not None and hud.winfo_exists():
-            hud.close()
-            return
-        from .hud import OverlayHUD
-        self.hud = OverlayHUD(self, on_close=self._on_hud_closed)
-        self.hud_nav_btn.config(fg=C["accent"])
-        snap = self.controller.engine.get_snapshot()
-        if snap:
-            self.hud.update_from_snapshot(snap)
+        self.round_enabled.set(not self.round_enabled.get())
+        self._toggle_round_overlay()
+
+    def _correct_overlay_card(self, card_id, round_id, action,
+                              new_rank=None, new_suit=None, new_seat_id=None):
+        try:
+            self.controller.engine.correct_tracked_card(
+                card_id, new_rank, expected_round=round_id, action=action,
+                new_suit=new_suit, new_seat_id=new_seat_id)
+            self.set_status("Carta corregida.")
+        except (ValueError, RuntimeError) as error:
+            self.set_status(f"No se corrigió la carta: {error}", error=True)
 
     def _on_hud_closed(self):
-        """Runs however the HUD goes away — drop the ref and the active tint."""
+        """The close control hides the one overlay and clears both references."""
         self.hud = None
-        self.hud_nav_btn.config(fg=C["text_primary"])
+        self.round_overlay = None
+        if hasattr(self, "round_enabled"):
+            self.round_enabled.set(False)
+        if hasattr(self, "hud_nav_btn"):
+            self.hud_nav_btn.config(fg=C["text_primary"])
 
     def _open_trainer(self, deck=None):
         existing = getattr(self, "trainer_window", None)

@@ -97,7 +97,8 @@ def main():
         from unittest.mock import patch
         from lib.logic.window_capture import WindowSource
         source = WindowSource(0, "Test window", 123, 640, 480)
-        with patch("lib.logic.window_capture.list_windows", return_value=[source]):
+        with (patch("lib.logic.window_capture.list_windows", return_value=[source]),
+              patch.object(WindowSource, "ready_source", return_value=source)):
             app.source_combo.set("Window")
             app.source_combo.event_generate("<<ComboboxSelected>>")
             pump()
@@ -154,7 +155,9 @@ def main():
         deadline=time.monotonic()+12
         while app._preview_busy and time.monotonic()<deadline:pump(.1)
         assert app.table._preview_item is not None,"Preview did not render"
-        app.table._preview_close_btn.invoke();pump()
+        close_button=next(w for w in app.table._preview_close_btn.winfo_children()
+                          if isinstance(w,tk.Button) and "Close preview" in str(w.cget("text")))
+        close_button.invoke();pump()
         assert app.table._preview_item is None
 
     def detection():
@@ -210,7 +213,9 @@ def main():
                 dialog.rects[key]=[[20+i*45,30],[50+i*45,60]]
         if hasattr(dialog,"include"):
             for var in dialog.include.values():var.set(True)
-        click("Save",dialog)
+        save_label=("Save" if any(isinstance(w,tk.Button) and "Save" in str(w.cget("text"))
+                                  for w in widgets(dialog)) else "Guardar")
+        click(save_label,dialog)
         assert not dialog.winfo_exists(),f"{label} did not save/close"
         assert (isolated/"region_profiles.json").exists()
         close_tops()
@@ -225,7 +230,7 @@ def main():
             check("stats refresh and CSV export",stats_export)
             check("bankroll Monte Carlo, bounded 100 rounds",bankroll_simulation)
             check("trainer starts a 52-card practice deck",trainer_deal)
-            check("HUD on/off",lambda:(click("HUD"),click("HUD")))
+            check("Mini Mesa on/off",lambda:(click("Mini Mesa"),click("Mini Mesa")))
             for label in ["Calibrate Regions","OCR Regions","Capture Controls","Capture Anchors"]:
                 check(f"{label}: open/cancel",lambda label=label:open_window(label))
             check("manual cards, dealer and split",manual_cards)
@@ -244,7 +249,9 @@ def main():
             with mss.MSS() as capture:
                 image=capture.grab({"left":app.winfo_rootx(),"top":app.winfo_rooty(),
                     "width":app.winfo_width(),"height":app.winfo_height()})
-                Image.frombytes("RGB",(image.width,image.height),image.rgb).save(ROOT/"reports/gui_smoke.png")
+                screenshot_path=ROOT/"reports/gui_smoke.png"
+                screenshot_path.parent.mkdir(parents=True,exist_ok=True)
+                Image.frombytes("RGB",(image.width,image.height),image.rgb).save(screenshot_path)
         except Exception:
             callback_errors.append(traceback.format_exc())
         finally:

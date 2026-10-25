@@ -6,6 +6,7 @@ import pytest
 from lib.common import constants
 from lib.logic import region_profiles
 from lib.logic.card_layout import SEVEN_SEATS, SINGLE_SEAT, TABLE, CardLayout
+from lib.logic.card_layout import TableGroupTracker
 
 
 def rect(left, top, right, bottom):
@@ -126,3 +127,41 @@ def test_malformed_mode_storage_is_rejected_without_falling_back(store):
     with pytest.raises(ValueError, match="formato inválido"):
         region_profiles.layout_mode((320, 180), profile="Keep")
     assert path.read_bytes() == before
+
+
+def test_table_groups_are_numbered_right_to_left_then_keep_identity():
+    from types import SimpleNamespace
+    tracker = TableGroupTracker()
+    cards = [SimpleNamespace(seat_id=None, manual_seat_override=None,
+        state="confirmed", owner="other", observed_owner="other",
+        first_seen=1., last_seen=1., cx=x, cy=100., width=20., height=30.,
+        vx=0., vy=0., ambiguous_seat=False, is_rotated_double=False)
+        for x in (190., 400., 610., 820.)]
+    groups = tracker.update_groups(cards)
+    assert [(group.seat_id, group.anchor_x) for group in groups] == [
+        ("J1", 820.), ("J2", 610.), ("J3", 400.), ("J4", 190.)]
+    extra = SimpleNamespace(seat_id=None, manual_seat_override=None,
+        state="confirmed", owner="other", observed_owner="other",
+        first_seen=2., last_seen=2., cx=405., cy=101., width=20., height=30.,
+        vx=0., vy=0., ambiguous_seat=False, is_rotated_double=False)
+    groups = tracker.update_groups(cards + [extra])
+    assert extra.seat_id == "J3"
+    assert [group.seat_id for group in groups] == ["J1", "J2", "J3", "J4"]
+
+
+def test_equal_cost_seat_assignment_is_explicitly_ambiguous():
+    from types import SimpleNamespace
+    tracker = TableGroupTracker()
+    cards = [SimpleNamespace(seat_id=None, manual_seat_override=None,
+        state="confirmed", owner="other", observed_owner="other",
+        first_seen=1., last_seen=1., cx=x, cy=100., width=20., height=30.,
+        vx=0., vy=0., ambiguous_seat=False, is_rotated_double=False)
+        for x in (210., 290.)]
+    tracker.update_groups(cards)
+    candidate = SimpleNamespace(seat_id=None, manual_seat_override=None,
+        state="confirmed", owner="other", observed_owner="other",
+        first_seen=2., last_seen=2., cx=250., cy=100., width=20., height=30.,
+        vx=0., vy=0., ambiguous_seat=False, is_rotated_double=False)
+    groups = tracker.update_groups(cards + [candidate])
+    assert candidate.ambiguous_seat
+    assert any("asiento dudoso" in group.display_label for group in groups)

@@ -30,7 +30,11 @@ class CardEvidence:
                                 or (old is not None and signature is not None
                                     and self._changed((l, t, r, b, signature), old)))
             current.append((x, y, (l, t, r, b, signature) if signature is not None else None))
-            result.append(pred | {"unstable": bool(unstable and constants.CARD_EVIDENCE_ENABLED),
+            result.append(pred | {
+                "bbox": (x-w/2, y-h/2, x+w/2, y+h/2),
+                "char_scale": math.sqrt(max(1., w) * max(1., h)),
+                "is_rotated_double": w / max(1., h) > 1.15,
+                "unstable": bool(unstable and constants.CARD_EVIDENCE_ENABLED),
                 "ambiguous": bool(constants.CARD_EVIDENCE_ENABLED and
                                   pred.get("class_margin", 1.) < .10)})
         self.previous = current
