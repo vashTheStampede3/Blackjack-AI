@@ -114,6 +114,10 @@ class TraceCounter(CardCounter):
         super().count_card(name)
         owner, x, y, identity = None, None, None, None
         candidates = []
+        if self.engine.card_registry is not None:
+            for card in self.engine.card_registry.cards.values():
+                if card.counted:
+                    candidates.append((card.id, card.owner, card.rank, card.cx, card.cy))
         for seat in self.engine.seats:
             for i, card in enumerate(seat.cards):
                 candidates.append(((self.engine.round_number, seat.index, i), seat.index,
@@ -201,6 +205,7 @@ def run(args):
         audited = AuditedModel(OnnxModel(model_path))
         engine = ReplayEngine(log=lambda *a, **k: None, provider=LocalProvider(audited), persist=False)
         engine.set_monitor(source, profile=args.profile)
+        engine.counter = TraceCounter(engine, source)
         if args.layout_profile:
             layout = region_profiles.get_card_layout(reader.resolution, "table", profile=args.layout_profile)
             if layout is None:
@@ -209,7 +214,6 @@ def run(args):
             if reference.get("path") and Path(reference["path"]).resolve() != Path(labels["video_path"]).resolve():
                 raise ValueError("The table profile was calibrated on a different video; review it first")
             engine.use_card_layout(layout, memory=args.memory)
-        engine.counter = TraceCounter(engine, source)
         records = []
         target.mkdir(parents=True)
         metadata = {"profile": args.profile, "layout_profile": args.layout_profile,
@@ -283,7 +287,7 @@ def main():
     parser.add_argument("--labels", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--layout-profile", help="Optional three-zone profile; seven-seat profile remains the legacy-memory reference")
-    parser.add_argument("--memory", choices=["legacy"], default="legacy")
+    parser.add_argument("--memory", choices=["legacy", "registry"], default="legacy")
     parser.add_argument("--model", default=str(constants.MODELS_DIR / "player_cards.onnx"))
     parser.add_argument("--output", required=True)
     parser.add_argument("--schedule", help="Existing replay cycles: compare the exact same frames at their original times")

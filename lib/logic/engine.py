@@ -45,6 +45,7 @@ from .session_store import SessionStore
 from .round_observation import RoundObservation
 from .table_inference import predict_table, predict_layout
 from .card_evidence import CardEvidence
+from .card_memory import CardMemory
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
 
@@ -131,6 +132,7 @@ class DetectionEngine:
         self._dealer_rect = None
         self._dist_scale = 1.0
         self.card_layout = None
+        self.card_registry = None
         self._memory_mode = "legacy"
 
         self._pool = ThreadPoolExecutor(max_workers=2)
@@ -267,13 +269,18 @@ class DetectionEngine:
         Legacy mode intentionally keeps the old seven-seat memory for the
         controlled zones-only comparison. It is not the new global memory.
         """
-        if memory != "legacy":
+        if memory not in ("legacy", "registry"):
             raise ValueError("Unsupported card memory")
         if tuple(layout.resolution) != tuple(self.capture.resolution):
             raise ValueError("Layout and source resolutions differ")
         if self.counter.cards_seen or any(s.cards for s in self.seats) or self.dealer_card:
             raise ValueError("Choose the layout before cards are processed")
         self.card_layout, self._memory_mode = layout, memory
+        self.card_registry = (CardMemory(self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
+                                         empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
+                              if memory == "registry" else None)
+        if self.card_registry:
+            self.card_registry.round_number = self.round_number
         xs, ys = zip(*layout.dealer)
         self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
         mx = sum(x for x, _ in layout.mine) / len(layout.mine)
@@ -404,7 +411,9 @@ class DetectionEngine:
         return activity
 
     def _has_pending_detection(self):
-        return bool(self._unread_positions or self._pending_extra or self._pending_dealer or self._pending_cutting_card
+        return bool((self.card_registry is not None and (self.card_registry.pending or
+                    (self.card_registry.had_cards and self.card_registry.empty_frames > 0)))
+                    or self._unread_positions or self._pending_extra or self._pending_dealer or self._pending_cutting_card
                     or (self._dealer_history and not self.dealer_locked))
 
     def _frame_unchanged(self, frame) -> bool:
@@ -428,7 +437,10 @@ class DetectionEngine:
         self._prev_dealer_thumb = dealer_thumb
         seat_changed = False
         current_seats = {}
-        for i, region in enumerate(self.regions or []):
+        watched = list(self.regions or [])
+        if self.card_layout is not None:
+            watched.append(Polygon(self.card_layout.table))
+        for i, region in enumerate(watched):
             l, t, r, b = [int(v) for v in region.bounds]
             crop = frame[max(0,t):min(frame.shape[0],b), max(0,l):min(frame.shape[1],r)]
             if not crop.size:
@@ -521,6 +533,9 @@ class DetectionEngine:
         self.last_error = None
 
         with self._lock:
+            if self.card_registry is not None:
+                self._observe_registry(player_preds)
+                return
             self._process_dealer(dealer_preds, cc_checked=cc_checked)
             self._process_players(player_preds)
             self._round_observation.observe(self, player_preds, dealer_preds)
@@ -528,6 +543,61 @@ class DetectionEngine:
                 self._round_observation.count_uncertain = True
                 self._unread_positions.clear()
             self._maybe_auto_new_round(player_preds)
+
+    def _observe_registry(self, predictions):
+        now = getattr(self.capture.monitor, "timestamp", time.monotonic())
+        observations = [p | {"name": PLAYER_CLASS_MAP.get(p["class"])} for p in predictions]
+        self.card_registry.observe(observations, now)
+        self._sync_registry_cards()
+        q = self._round_observation
+        q.inferred_at = q.captured_at
+        q.empty = self.card_registry.empty_frames
+        q.present = bool(self.card_registry.cards and not self.card_registry.clear_ready)
+        q.count_pending = self.card_registry.pending
+        q.count_uncertain = self.counter.count_uncertain
+        q.seats = {s.index: bool(len(s.cards) >= 2 and not self.card_registry.advice_pending
+                                 and all(c.get("state") == "confirmed" for c in s.cards))
+                   for s in self.seats}
+        q.dealer_ok = bool(self.dealer_locked and not any(c.owner == "dealer" and
+            (not c.counted or c.reason or c.state != "confirmed") for c in self.card_registry.cards.values()))
+        if self.card_registry.clear_ready:
+            self._reset_round_state()
+
+    def _sync_registry_cards(self):
+        """Projection for existing snapshots; it never increments the counter."""
+        for seat in self.seats:
+            seat.cards.clear()
+            seat.split = False
+        dealer = []
+        mine = next(iter(self.my_seats), 0)
+        for card in sorted(self.card_registry.cards.values(), key=lambda c: (c.first_seen, c.id)):
+            if not card.counted or card.rank is None:
+                continue
+            if card.owner == "dealer":
+                dealer.append(card)
+                continue
+            index = mine if card.owner == "mine" else self._seat_for_point(card.cx, card.cy)
+            if index is None:
+                continue  # still visible/correctable by ID in snapshot.card_registry
+            self.seats[index].cards.append({"name": card.rank, "confidence": 1. if card.manual else None,
+                "cx": card.cx, "cy": card.cy, "manual": card.manual, "counted": card.counted,
+                "hand": card.hand if card.hand is not None else 0, "id": card.id, "state": card.state})
+            self.seats[index].split = card.owner == "mine" and bool(self.card_registry.split_roots)
+        self.dealer_card = dealer[0].rank if dealer else None
+        self.dealer_locked = bool(dealer)
+        self._dealer_counted = bool(dealer)
+        self._dealer_pos = (dealer[0].cx, dealer[0].cy) if dealer else None
+        self.dealer_extras = [{"rank": c.rank, "cx": c.cx, "cy": c.cy, "id": c.id} for c in dealer[1:]]
+
+    def correct_tracked_card(self, identity, name, *, expected_round=None):
+        with self._lock:
+            if self.card_registry is None:
+                raise ValueError("No hay registro común activo")
+            self.card_registry.correct(identity, name, expected_round=expected_round)
+            self._sync_registry_cards()
+            self._round_observation.count_uncertain = self.counter.count_uncertain
+            self._round_observation.count_pending = self.card_registry.pending
+        self.publish_snapshot()
 
     # --------------------------------------------------------------- dealer
 
@@ -895,6 +965,10 @@ class DetectionEngine:
     # ----------------------------------------------------------- round flow
 
     def _activity(self):
+        if self.card_registry is not None:
+            if not self.card_registry.cards:
+                return "waiting"
+            return "dealing" if self.card_registry.pending or not self.dealer_locked else "complete"
         active = [s for s in self.seats if s.cards]
         if not active:
             return "waiting"
@@ -967,6 +1041,9 @@ class DetectionEngine:
         self._reset_round_state()
 
     def _reset_round_state(self):
+        if self.card_registry is not None:
+            self.card_registry.clear_round()
+            self._round_observation.count_uncertain = self.counter.count_uncertain
         if self._unread_positions or self._pending_extra:
             self._round_observation.count_uncertain = True
         self._unread_positions.clear()
@@ -982,9 +1059,13 @@ class DetectionEngine:
             snap = {**snap, "settlement": settle, "bet_placed": self.bet_placed}
             if self.store is not None:
                 self._io_pool.submit(
-                    self._persist_round_job, snap, self.counter.get_state(),
+                    self._persist_round_job, snap, self._shoe_state(),
                     self.round_number, self.cutting_card_seen,
                     self._shoe_paytable_hash)
+        elif self.store is not None and (self.counter.count_uncertain or self._round_observation.count_uncertain):
+            # An unread-only round has no confirmed table snapshot, but its
+            # unresolved shoe history must still survive clear and restart.
+            self._io_pool.submit(self._save_state_job)
         for seat in self.seats:
             seat.cards.clear()
             seat.split = False
@@ -1032,6 +1113,8 @@ class DetectionEngine:
     def reset_shoe(self):
         with self._lock:
             self.counter.reset_shoe()
+            if self.card_registry is not None:
+                self.card_registry.detach_shoe()
             self._round_observation.count_uncertain = False
             self._round_observation.count_pending = False
             self._unread_positions.clear()
@@ -1075,6 +1158,12 @@ class DetectionEngine:
         nearest-hand routing. Replacing keeps the card's existing hand tag.
         """
         with self._lock:
+            if self.card_registry is not None:
+                seat = self.seats[seat_idx]
+                if slot >= len(seat.cards):
+                    raise ValueError("Corregí una carta pendiente por su identificador; no se inventa una posición")
+                self.correct_tracked_card(seat.cards[slot]["id"], card_name, expected_round=expected_round)
+                return
             if expected_round is not None and expected_round != self.round_number:
                 self.log("Correction discarded — the round changed while the picker was open.")
                 return
@@ -1133,6 +1222,19 @@ class DetectionEngine:
         """Split a seat's pair into two hands (or undo). Card 1 seeds hand 1,
         card 2 seeds hand 2; later cards route to the nearer hand by position."""
         with self._lock:
+            if self.card_registry is not None:
+                owned = [c for c in self.card_registry.cards.values() if c.owner == "mine" and c.counted]
+                if seat_idx not in self.my_seats or len(owned) < 2:
+                    return
+                self.card_registry.split_roots = [c.id for c in owned[:2]] if on else []
+                if on:
+                    self.card_registry._group_hands()
+                else:
+                    for card in owned:
+                        card.hand = 0
+                self._sync_registry_cards()
+                self.publish_snapshot()
+                return
             seat = self.seats[seat_idx]
             if on:
                 if seat.split or len(seat.cards) < 2 or not cards.is_pair(
@@ -1157,6 +1259,13 @@ class DetectionEngine:
         """Manual dealer correction; card_name is a full name, rank, or None.
         Full names are kept — the suit refines the 52-cell composition."""
         with self._lock:
+            if self.card_registry is not None:
+                dealer = sorted((c for c in self.card_registry.cards.values() if c.owner == "dealer" and c.counted),
+                                key=lambda c: (c.first_seen, c.id))
+                if not dealer:
+                    raise ValueError("Elegí el identificador de la carta del crupier pendiente")
+                self.correct_tracked_card(dealer[0].id, card_name, expected_round=self.round_number)
+                return
             if card_name and " of " in str(card_name):
                 rank = card_name
             else:
@@ -1174,6 +1283,13 @@ class DetectionEngine:
         guards a picker left open across an auto round reset — a stale pick
         must not plant a phantom draw in the NEXT round's dealer hand."""
         with self._lock:
+            if self.card_registry is not None:
+                candidates = [c for c in self.card_registry.cards.values() if c.owner == "dealer" and not c.counted
+                              and c.state not in ("rejected", "retired")]
+                if len(candidates) != 1:
+                    raise ValueError("Elegí el identificador de la carta pendiente del crupier")
+                self.correct_tracked_card(candidates[0].id, card_name, expected_round=expected_round)
+                return
             if expected_round is not None and expected_round != self.round_number:
                 self.log("Correction discarded — the round changed while the picker was open.")
                 return
@@ -1187,6 +1303,10 @@ class DetectionEngine:
     def replace_dealer_extra(self, idx, card_name, expected_round=None):
         """Correct a tracked dealer draw (card_name=None removes it)."""
         with self._lock:
+            if self.card_registry is not None:
+                if 0 <= idx < len(self.dealer_extras):
+                    self.correct_tracked_card(self.dealer_extras[idx]["id"], card_name, expected_round=expected_round)
+                return
             if expected_round is not None and expected_round != self.round_number:
                 self.log("Correction discarded — the round changed while the picker was open.")
                 return
@@ -1377,17 +1497,31 @@ class DetectionEngine:
 
     def _save_state_job(self):
         try:
-            self.store.save_shoe_state(self.counter.get_state(),
+            self.store.save_shoe_state(self._shoe_state(),
                                        self.round_number, self.cutting_card_seen)
         except Exception:
             pass
+
+    def _shoe_state(self):
+        with self._lock:
+            state = self.counter.get_state()
+            if self._round_observation.count_uncertain or self._round_observation.count_pending:
+                state["count_uncertain"] = True
+            if self.card_registry is not None:
+                state["card_memory"] = self.card_registry.get_state()
+            return state
 
     def apply_shoe_state(self, info):
         """Restore a persisted shoe (counter state + round + cutting card)."""
         with self._lock:
             self.counter.apply_state(info["state"])
+            self._round_observation.count_uncertain = self.counter.count_uncertain
             self.round_number = max(1, int(info.get("round_number") or 1))
             self.cutting_card_seen = bool(info.get("cutting_card_seen"))
+            if self.card_registry is not None and info["state"].get("card_memory"):
+                self.card_registry.apply_state(info["state"]["card_memory"])
+                self.round_number = self.card_registry.round_number
+                self._sync_registry_cards()
         self.log(f"Shoe restored — round {self.round_number}, "
                  f"{self.counter.cards_seen} cards seen, "
                  f"running count {self.counter.running_count:+d}.")
@@ -2345,8 +2479,16 @@ class DetectionEngine:
                 "backend": self.provider.backend_name,
                 "error": self.last_error,
                 "reading": self._round_observation.snapshot(),
+                "card_registry": self.card_registry.snapshot() if self.card_registry is not None else None,
                 "model_refresh_ts": self._model_refresh_ts,
             }
+            if self.card_registry is not None:
+                snapshot["count"]["count_uncertain"] = self.counter.count_uncertain
+                if self.card_registry.advice_pending:
+                    for seat in snapshot["seats"]:
+                        if seat["mine"]:
+                            seat.update(advice="Carta sin leer / dudosa", book_action=None,
+                                        optimal="", optimal_action=None)
             # Publish while still holding the state lock so a snapshot built
             # from older state can never be stored with a newer seq.
             with self._snapshot_lock:

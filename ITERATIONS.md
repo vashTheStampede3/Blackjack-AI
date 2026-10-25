@@ -251,3 +251,34 @@ contains uncertainty. Two engine/SQLite checks failed before fixing the missing
 zero-card save/load paths. A clean empty shoe is still ignored as before.
 This does not change local recognition thresholds or the measured replay counts;
 the video measurements disable all session persistence.
+
+## User video — controlled three-mode comparison
+
+Using saved profile `real2` at its exact 1280×720 video size, the marked seat
+maps to J4/P4: the model counted 3/3 compatible ranks in round 1 and no cards
+in J4 in round 2. Crupier uses the user's separate card graphic (1/4 to 2/4
+compatible dealer ranks); the physical dealer cards were not compared. Typical
+player detection boxes at model input grew from about 43×25 to 66×39 pixels,
+without lowering the 55 confidence setting. The two new-zone runs each made
+111 real model calls, returned identical detections and used the same 113 frames.
+Capture lag beyond inference took at most 0.018 seconds. This verifies larger
+input boxes, not sustained recognition accuracy.
+
+Results: seven seats 17/22 (+3), then 9/15 (RC change 0); new zones with legacy
+memory 19/22 (+4), then 12/15 (−1); new zones with the registry 21/22 (+5),
+then 13/15 (−2). All ended RC +3 instead of 0. The registry produced 33 rank
+and reference-seat occurrences compatible with labels, 4 missing occurrences,
+and one extra 2 at J2. This is not an identity-verified score or a pass. Exact
+first-visibility times remain unset. The extra 2 and missing 7 are in the same
+seat; without inspecting the image, a rank error and a duplicate remain distinct
+possibilities. The new trial reports uncertainty and cannot give clean advice.
+Divisions, doubles, crossings, manual correction of an unprojected other seat,
+stable false-positive sources, physical dealer recognition and live use remain
+unverified. Simulated detections verify logic, not real-card reading.
+
+The first incomplete replay was excluded: the decoder stopped at the video tail
+and the result had incorrectly said `completed=true`; that end-of-stream record
+was fixed. Final verification: 49 selected logic, layout, replay and SQLite
+checks passed in an isolated temporary directory. User profiles, settings,
+labels and session database bytes were unchanged. Passing software tests do not
+establish card recognition accuracy.

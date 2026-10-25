@@ -6,6 +6,7 @@ Run:  .venv\\Scripts\\python -m unittest tests.test_session_store -v
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from lib.logic.counting import CardCounter
@@ -148,7 +149,10 @@ class ShoeStatePersistence(unittest.TestCase):
         self.assertIsNone(self.store.load_recent_shoe_state())
         c.count_card("King")
         self.store.save_shoe_state(c.get_state(), 1, False)
-        self.assertIsNone(self.store.load_recent_shoe_state(max_age_s=0.0))
+        # Windows may return the same time value immediately after saving.
+        # Advance the test clock explicitly instead of relying on wall time.
+        with patch("lib.logic.session_store.time.time", return_value=time.time()+1):
+            self.assertIsNone(self.store.load_recent_shoe_state(max_age_s=0.0))
         self.assertIsNotNone(self.store.load_recent_shoe_state(max_age_s=60))
 
     def test_engine_records_round_on_reset(self):
