@@ -180,3 +180,7 @@ VirtualBox Manager correctly marked minimized. Keep this targeted change.
 ## Local video calibration ? frame reader
 
 Added a local-only frame reader with two decoder threads, native-size frozen frames, and named profile source references. No recognition, model settings, casino capture or remote calls. Verified 28 selected reader/profile checks using generated video and temporary profile stores. This is a calibration utility change, not a recognition accuracy result.
+
+## Local video calibration ? user-chosen frame and regions
+
+Reused RegionEditor and the profile store in a local video-frame picker. The user chooses the timestamp and draws seven seat regions plus dealer; frozen native-size geometry and frame reference are saved, without image files or inference. Verified 32 selected reader/editor/profile tests with generated video, isolated stores and network calls forbidden in UI tests. No screenshots were viewed for this verification. Existing user profiles, model parameters, executor settings and recognition logic were not changed.

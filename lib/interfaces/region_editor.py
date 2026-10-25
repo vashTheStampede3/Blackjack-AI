@@ -8,7 +8,7 @@ active; the engine then reloads its regions.
 """
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 import cv2
 from PIL import Image, ImageTk
@@ -21,7 +21,7 @@ HANDLE = 5  # handle radius in canvas px
 
 
 class RegionEditor(tk.Toplevel):
-    def __init__(self, parent, capture, on_save=None):
+    def __init__(self, parent, capture, on_save=None, profile=None):
         frame_bgr = capture.grab_bgr()
         super().__init__(parent)
         self.title("Calibrate Regions — drag the corner handles")
@@ -29,11 +29,12 @@ class RegionEditor(tk.Toplevel):
         self.on_save = on_save
         self.capture = capture
         self.resolution = capture.resolution
+        self._frame_bgr = frame_bgr
 
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         # Fit the screenshot into a workable window, remember the scale to
         # convert canvas coords back to native pixels on save.
-        max_w, max_h = min(1380, self.winfo_screenwidth() - 80), self.winfo_screenheight() - 180
+        max_w, max_h = min(1380, self.winfo_screenwidth() - 80), self.winfo_screenheight() - 270
         self.scale = min(max_w / img.width, max_h / img.height, 1.0)
         view = img.resize((int(img.width * self.scale), int(img.height * self.scale)),
                           Image.LANCZOS)
@@ -44,7 +45,7 @@ class RegionEditor(tk.Toplevel):
         self.canvas.pack(padx=10, pady=(10, 6))
         self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
 
-        custom = monitor_utils.load_custom_regions(self.resolution)
+        custom = monitor_utils.load_custom_regions(self.resolution, profile=profile)
         if custom is not None:
             players = custom["players"]
             dealer = custom["dealer"]
@@ -64,25 +65,42 @@ class RegionEditor(tk.Toplevel):
                        [right * self.scale, bottom * self.scale]]
 
         self._drag = None  # ("poly", i, j) or ("dealer", i)
+        self._draw_start = None
+        self.draw_mode = tk.BooleanVar(value=False)
+        controls = tk.Frame(self, bg=C["bg_primary"])
+        controls.pack(fill=tk.X, padx=10, pady=3)
+        tk.Label(controls, text="Zona:", bg=C["bg_primary"]).pack(side=tk.LEFT)
+        self.zone_combo = ttk.Combobox(controls, state="readonly", width=13,
+            values=[f"P{i + 1}" for i in range(constants.NUM_SEATS)] + ["Crupier"])
+        self.zone_combo.current(0)
+        self.zone_combo.pack(side=tk.LEFT, padx=6)
+        tk.Checkbutton(controls, text="Dibujar rectángulo (arrastrar sobre la mesa)",
+            variable=self.draw_mode, bg=C["bg_primary"]).pack(side=tk.LEFT)
+        w, h = self.resolution
+        tk.Label(self, text=f"{capture.name if hasattr(capture, 'name') else 'Captura'} · {w}×{h} · "
+            "P1 izquierda / P7 derecha. Desmarcá Dibujar para ajustar vértices.",
+            bg=C["bg_primary"], fg=C["text_secondary"]).pack(fill=tk.X, padx=10)
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._move)
-        self.canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
+        self.canvas.bind("<ButtonRelease-1>", self._release)
 
         bar = tk.Frame(self, bg=C["bg_primary"])
         bar.pack(fill=tk.X, padx=10, pady=(0, 10))
         tk.Label(bar, text="Orange: seat regions · Red: dealer area",
                  bg=C["bg_primary"], fg=C["text_secondary"],
                  font=constants.FONT_SMALL).pack(side=tk.LEFT)
-        for text, cmd, bg in (("Save", self._save, C["success"]),
-                              ("Reset to defaults", self._reset, C["warning"]),
-                              ("Cancel", self.destroy, C["text_secondary"])):
+        actions = [("Save", self._save, C["success"])]
+        if profile is None:
+            actions.append(("Reset to defaults", self._reset, C["warning"]))
+        actions.append(("Cancel", self.destroy, C["text_secondary"]))
+        for text, cmd, bg in actions:
             tk.Button(bar, text=text, command=cmd, bg=bg,
                       fg="white" if bg != C["warning"] else C["text_primary"],
                       relief="flat", padx=14, pady=6, font=constants.FONT_BODY,
                       cursor="hand2").pack(side=tk.RIGHT, padx=4)
         # Save target: a table profile by name. Prefilled with the active
         # profile; typing a new name creates it (and makes it active).
-        self.profile_var = tk.StringVar(value=region_profiles.active_name())
+        self.profile_var = tk.StringVar(value=profile or region_profiles.active_name())
         entry = tk.Entry(bar, textvariable=self.profile_var, width=18,
                          font=constants.FONT_BODY)
         entry.pack(side=tk.RIGHT, padx=(12, 2))
@@ -123,6 +141,10 @@ class RegionEditor(tk.Toplevel):
     # ------------------------------------------------------------- dragging
 
     def _press(self, event):
+        if self.draw_mode.get():
+            self._draw_start = self._point(event)
+            self._drag = None
+            return
         best, best_d = None, (HANDLE * 3) ** 2
         for i, pts in enumerate(self.polys):
             for j, (x, y) in enumerate(pts):
@@ -136,16 +158,38 @@ class RegionEditor(tk.Toplevel):
         self._drag = best
 
     def _move(self, event):
+        if self.draw_mode.get() and self._draw_start is not None:
+            x1, y1 = self._draw_start
+            x2, y2 = self._point(event)
+            left, right = sorted((x1, x2))
+            top, bottom = sorted((y1, y2))
+            if right - left < 2 or bottom - top < 2:
+                return
+            zone = self.zone_combo.current()
+            if zone == constants.NUM_SEATS:
+                self.dealer = [[left, top], [right, bottom]]
+            else:
+                self.polys[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
+            self._redraw()
+            return
         if self._drag is None:
             return
-        x = min(max(event.x, 0), self.canvas.winfo_width())
-        y = min(max(event.y, 0), self.canvas.winfo_height())
+        x, y = self._point(event)
         kind, i, j = self._drag
         if kind == "poly":
             self.polys[i][j] = [x, y]
         else:
             self.dealer[i] = [x, y]
         self._redraw()
+
+    def _point(self, event):
+        return (min(max(event.x, 0), self._photo.width()),
+                min(max(event.y, 0), self._photo.height()))
+
+    def _release(self, event):
+        if self._draw_start is not None:
+            self._move(event)
+        self._draw_start = self._drag = None
 
     # --------------------------------------------------------------- save
 
@@ -159,8 +203,20 @@ class RegionEditor(tk.Toplevel):
         (x1, y1), (x2, y2) = self.dealer
         dealer = [int(min(x1, x2) / self.scale), int(min(y1, y2) / self.scale),
                   int(max(x1, x2) / self.scale), int(max(y1, y2) / self.scale)]
-        monitor_utils.save_custom_regions(self.resolution, players, dealer,
-                                          profile=self.profile_var.get())
+        options = {"profile": self.profile_var.get()}
+        context = getattr(self.capture, "calibration_context", None)
+        if context is not None:
+            options["source_context"] = context
+        try:
+            monitor_utils.save_custom_regions(self.resolution, players, dealer, **options)
+            if context is not None:
+                saved = region_profiles.get_regions(self.resolution, profile=self.profile_var.get().strip())
+                if (not saved or saved.get("players") != players or saved.get("dealer") != dealer
+                        or saved.get("reference_source") != context):
+                    raise ValueError("No se pudo comprobar el guardado. Las zonas siguen abiertas para reintentar.")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
+            return
         if self.on_save:
             self.on_save()
         self.destroy()
