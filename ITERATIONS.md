@@ -425,3 +425,9 @@ passed. The same 113-frame replay (`table_registry_07`) retained exactly the
 37 counted events and RC 0 from `table_registry_06`; current-round doubtful or
 pending cards fell from 10 to 5. The shoe remains uncertain because movement
 ambiguities and the round-one 2/4 rank mismatch are unresolved.
+
+A further attempt to preserve an extra pending candidate on every reliable
+rank conflict was rejected. It exposed the missing 4 as pending, but also
+blocked a later 9 in the same crowded hand. `table_registry_08` fell to
+21/22 then 15/15, 36/37 overall; RC happened to stay 0. The code and its
+synthetic-only test were reverted. The retained result is `table_registry_07`.
