@@ -230,3 +230,15 @@ for this measurement; socket connections are blocked. Labels only delimit scorin
 never detection or round transitions. Only numeric traces are saved, no frames.
 Nineteen focused replay/engine tests passed in 2.22 seconds with generated frames;
 these verify plumbing, not recognition. The first real seven-seat run is separate.
+
+## Separate table/dealer crops, same legacy memory
+
+Added one local prediction over two native-pixel masked patches, compactly packed
+without resizing them first. Dealer pixels are removed from the table patch when
+the zones overlap, and mapped once to the original frame. The gap/account UI is
+excluded. The controlled zones-only run retains the original seven-seat memory;
+it intentionally does not claim that old seat limits have become global tracking.
+Twenty-three focused plumbing/crop/regression tests passed in 2.52 seconds.
+The replay now handles only a genuinely final undecodable frame as EOF, preserves
+earlier decoder failures, blocks DNS and supports identical recorded frame schedules.
+Real-video measurements are stored separately and are not test accuracy claims.

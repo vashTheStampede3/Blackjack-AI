@@ -15,6 +15,7 @@ import time
 import cv2
 
 from lib.common import constants, settings
+from lib.logic import region_profiles
 from lib.logic.card_layout import SEVEN_SEATS
 from lib.logic.counting import CardCounter
 from lib.logic.engine import DetectionEngine
@@ -25,14 +26,14 @@ from lib.logic.video_source import VideoFile
 @contextmanager
 def no_network():
     """Fail closed even if an optional imported component tries to connect."""
-    previous = socket.socket.connect, socket.socket.connect_ex, socket.create_connection
+    previous = socket.socket.connect, socket.socket.connect_ex, socket.create_connection, socket.getaddrinfo
     def denied(*args, **kwargs):
         raise RuntimeError("Network is forbidden during local replay")
-    socket.socket.connect = socket.socket.connect_ex = socket.create_connection = denied
+    socket.socket.connect = socket.socket.connect_ex = socket.create_connection = socket.getaddrinfo = denied
     try:
         yield
     finally:
-        socket.socket.connect, socket.socket.connect_ex, socket.create_connection = previous
+        socket.socket.connect, socket.socket.connect_ex, socket.create_connection, socket.getaddrinfo = previous
 
 
 class ReplaySource:
@@ -43,16 +44,29 @@ class ReplaySource:
         self.origin = None
         self.timestamp = start
         self.frame_index = 0
+        self.ended = False
+        self.target_frame = None
 
     def begin(self):
         self.origin = self.clock()
 
     def grab_bgr(self):
-        seconds = self.start + self.clock() - self.origin
+        seconds = (self.target_frame / self.reader.fps if self.target_frame is not None
+                   else self.start + self.clock() - self.origin)
         if seconds >= self.end:
             raise EOFError("End of replay")
-        source = self.reader.frame_at(seconds)
+        try:
+            source = self.reader.frame_at(seconds)
+        except ValueError:
+            # Some files report one final frame which the decoder cannot return.
+            # An earlier decoding error remains an error, never a successful run.
+            if seconds >= self.reader.last_frame_seconds - 1 / self.reader.fps:
+                self.ended = True
+                raise EOFError("End of decodable video") from None
+            raise
         self.timestamp, self.frame_index = source.timestamp_seconds, source.frame_index
+        if self.target_frame is not None and self.frame_index != self.target_frame:
+            raise ValueError("Decoder did not return the exact scheduled frame")
         return source.grab_bgr()
 
 
@@ -170,6 +184,8 @@ def run(args):
     labels = json.loads(labels_bytes)
     validate_labels(labels)
     scope = labels["evaluation_scope"]
+    schedule = ([json.loads(line) for line in Path(args.schedule).read_text(encoding="utf-8").splitlines()]
+                if args.schedule else None)
     model_path = Path(args.model)
     target = Path(args.output)
     if target.exists():
@@ -185,13 +201,25 @@ def run(args):
         audited = AuditedModel(OnnxModel(model_path))
         engine = ReplayEngine(log=lambda *a, **k: None, provider=LocalProvider(audited), persist=False)
         engine.set_monitor(source, profile=args.profile)
+        if args.layout_profile:
+            layout = region_profiles.get_card_layout(reader.resolution, "table", profile=args.layout_profile)
+            if layout is None:
+                raise ValueError("The selected table profile has no exact-resolution layout")
+            reference = layout.reference_source or {}
+            if reference.get("path") and Path(reference["path"]).resolve() != Path(labels["video_path"]).resolve():
+                raise ValueError("The table profile was calibrated on a different video; review it first")
+            engine.use_card_layout(layout, memory=args.memory)
         engine.counter = TraceCounter(engine, source)
         records = []
         target.mkdir(parents=True)
-        metadata = {"profile": args.profile, "layout_mode": SEVEN_SEATS, "memory": "legacy",
+        metadata = {"profile": args.profile, "layout_profile": args.layout_profile,
+                    "layout_mode": engine.card_layout.mode if engine.card_layout else SEVEN_SEATS, "memory": args.memory,
                     "video_resolution": list(reader.resolution), "fps": reader.fps,
                     "model_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+                    "source_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in
+                                      (Path(__file__), Path("lib/logic/engine.py"), Path("lib/logic/table_inference.py"))},
                     "labels_sha256": hashlib.sha256(labels_bytes).hexdigest(),
+                    "schedule": args.schedule, "exact_comparison_frames": bool(schedule),
                     "scope": scope, "network": False, "inference_threads": 2,
                     "threshold": constants.PREDICTION_CONFIDENCE_PLAYERS,
                     "exact_visibility_times": False, "recognition": "real local ONNX",
@@ -199,13 +227,27 @@ def run(args):
         (target / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         source.begin()
         next_progress = source.start
+        schedule_index = 0
+        completed = False
+        failure = None
         try:
             with (target / "cycles.jsonl").open("w", encoding="utf-8") as trace:
-                while source.start + time.monotonic() - source.origin < source.end:
+                while schedule_index < len(schedule) if schedule is not None else source.start + time.monotonic() - source.origin < source.end:
+                    if schedule is not None:
+                        target_frame = schedule[schedule_index]
+                        delay = target_frame["seconds"]-source.start-(time.monotonic()-source.origin)
+                        if delay > 0:
+                            time.sleep(delay)
+                        source.target_frame = target_frame["frame"]
+                        schedule_index += 1
                     activity = engine.run_cycle()
                     if engine.last_error:
+                        if source.ended:
+                            completed = True
+                            break
                         raise RuntimeError(engine.last_error)
                     record = {"seconds": source.timestamp, "frame": source.frame_index,
+                              "wall_lag_seconds": max(0., source.start+time.monotonic()-source.origin-source.timestamp),
                               "snapshot": engine.get_snapshot(), "model_calls": audited.calls}
                     audited.calls = []
                     trace.write(json.dumps(record) + "\n")
@@ -217,14 +259,20 @@ def run(args):
                     delay = {"dealing": constants.CYCLE_SLEEP_DEALING,
                              "complete": constants.CYCLE_SLEEP_COMPLETE,
                              "waiting": constants.CYCLE_SLEEP_WAITING}[activity]
-                    time.sleep(min(delay, max(0., source.end-source.start-(time.monotonic()-source.origin))))
+                    if schedule is None:
+                        time.sleep(min(delay, max(0., source.end-source.start-(time.monotonic()-source.origin))))
+                else:
+                    completed = True
+        except Exception as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
                 getattr(engine, name).shutdown(wait=True, cancel_futures=True)
             events = engine.counter.events
             result = {"rounds": summarize(events, labels), "events": events,
                       "final_count": engine.counter.snapshot(), "cycles": len(records),
-                      "completed": source.start+time.monotonic()-source.origin >= source.end,
+                      "completed": completed, "error": failure,
                       "reading": engine._round_observation.snapshot()}
             (target / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
         print(json.dumps({k: v for k, v in result.items() if k in ("rounds", "cycles", "completed")}), flush=True)
@@ -234,8 +282,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", required=True)
     parser.add_argument("--profile", required=True)
+    parser.add_argument("--layout-profile", help="Optional three-zone profile; seven-seat profile remains the legacy-memory reference")
+    parser.add_argument("--memory", choices=["legacy"], default="legacy")
     parser.add_argument("--model", default=str(constants.MODELS_DIR / "player_cards.onnx"))
     parser.add_argument("--output", required=True)
+    parser.add_argument("--schedule", help="Existing replay cycles: compare the exact same frames at their original times")
     args = parser.parse_args()
     run(args)
 

@@ -35,6 +35,23 @@ def test_network_is_blocked_and_restored():
     assert socket.socket.connect is original
 
 
+def test_only_last_undecodable_frame_is_treated_as_end():
+    def fail(seconds):
+        raise ValueError("decode failed")
+    reader = SimpleNamespace(resolution=(320, 180), last_frame_seconds=.9, fps=10, frame_at=fail)
+    clock = [0.]
+    source = ReplaySource(reader, 0., 1., clock=lambda: clock[0])
+    source.begin()
+    clock[0] = .4
+    with pytest.raises(ValueError, match="decode failed"):
+        source.grab_bgr()
+    assert not source.ended
+    clock[0] = .89
+    with pytest.raises(EOFError):
+        source.grab_bgr()
+    assert source.ended
+
+
 def test_explicit_profile_and_injected_model_use_production_counting_without_db(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "OUTPUT_DIR", tmp_path)
     for cfg in (constants.OCR, constants.PHASE, constants.ANCHORS, constants.TRAINING):

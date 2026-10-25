@@ -43,7 +43,7 @@ from .monitor_utils import (Polygon, ScreenCapture, dealer_area_rect,
                             scaling_factors)
 from .session_store import SessionStore
 from .round_observation import RoundObservation
-from .table_inference import predict_table
+from .table_inference import predict_table, predict_layout
 from .card_evidence import CardEvidence
 from .strategy import StrategyAdvisor
 from .training_data import TrainingDataCollector
@@ -130,6 +130,8 @@ class DetectionEngine:
         self.regions = None
         self._dealer_rect = None
         self._dist_scale = 1.0
+        self.card_layout = None
+        self._memory_mode = "legacy"
 
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._pending_positions = {}
@@ -258,6 +260,26 @@ class DetectionEngine:
     def ocr_calibrated(self) -> bool:
         """OCR regions exist for the current capture resolution."""
         return self._ocr_regions is not None
+
+    def use_card_layout(self, layout, *, memory="legacy"):
+        """Apply an exact-resolution table layout before beginning a replay/round.
+
+        Legacy mode intentionally keeps the old seven-seat memory for the
+        controlled zones-only comparison. It is not the new global memory.
+        """
+        if memory != "legacy":
+            raise ValueError("Unsupported card memory")
+        if tuple(layout.resolution) != tuple(self.capture.resolution):
+            raise ValueError("Layout and source resolutions differ")
+        if self.counter.cards_seen or any(s.cards for s in self.seats) or self.dealer_card:
+            raise ValueError("Choose the layout before cards are processed")
+        self.card_layout, self._memory_mode = layout, memory
+        xs, ys = zip(*layout.dealer)
+        self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+        mx = sum(x for x, _ in layout.mine) / len(layout.mine)
+        my = sum(y for _, y in layout.mine) / len(layout.mine)
+        owner = self._seat_for_point(mx, my)
+        self.my_seats = {owner} if owner is not None else set()
 
     def warm_up(self):
         """Initialize models (network handshake for the hosted API). Call from
@@ -434,9 +456,14 @@ class DetectionEngine:
 
     def _detect(self, frame):
         t0 = time.perf_counter()
-        players_future = self._pool.submit(
-            predict_table, self.provider.players_model(), frame, self.regions, self._dealer_rect,
-            constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
+        if self.card_layout is None:
+            players_future = self._pool.submit(
+                predict_table, self.provider.players_model(), frame, self.regions, self._dealer_rect,
+                constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
+        else:
+            players_future = self._pool.submit(
+                predict_layout, self.provider.players_model(), frame, self.card_layout,
+                constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
 
         self._last_frame = frame  # retained for training-data crops
         left, top, right, bottom = self._dealer_rect
@@ -465,16 +492,16 @@ class DetectionEngine:
         # this read needs no lock; _seat_for_point is a pure point-in-polygon.
         pad_x = max(right - left, int(200 * self._dist_scale))
         lo_x, hi_x = left - pad_x, right + pad_x
-        dealer_preds = [p for p in player_preds
+        dealer_preds = ([p for p in player_preds if p.get("owner") == "dealer"] if self.card_layout else [p for p in player_preds
                         if top <= p["cy"] < bottom
                         and lo_x <= p["cx"] < hi_x
-                        and self._seat_for_point(p["cx"], p["cy"]) is None]
+                        and self._seat_for_point(p["cx"], p["cy"]) is None])
         # The cutting card only exists in the rank model — poll it on the
         # dealer crop every Nth cycle, but EVERY cycle once a sighting is
         # pending so the confirmation run is not stretched across poll gaps.
         self._cc_cycle += 1
         cc_checked = False
-        if (not self.cutting_card_seen
+        if (self.card_layout is None and not self.cutting_card_seen
                 and (self._pending_cutting_card
                      or self._cc_cycle % constants.CUTTING_CARD_CHECK_EVERY == 0)):
             try:
