@@ -152,7 +152,21 @@ class CardMemory:
                 matched[index] = key
                 used.add(key)
         for index, key in matched.items():
-            self._update(self.cards[key], unique[index], now)
+            card, pred = self.cards[key], unique[index]
+            shift = math.hypot(card.cx-pred["cx"], card.cy-pred["cy"])
+            stable_same_rank = pred.get("name") == card.rank and card.rank is not None
+            jitter = max(4., min(card.width, card.height,
+                                 pred.get("width", 30), pred.get("height", 40))*.35)
+            if (stable_same_rank and (card.counted or card.hits)
+                    and shift > jitter and not card.reason):
+                # A single displaced same-rank box may be a moved card or a
+                # second physical card after the first was occluded. Keep both
+                # identities unresolved; position/rank alone cannot prove it.
+                reason = "Puede ser carta movida o nueva"
+                self._issue(card, reason)
+                self._new(pred, now, reason, [key])
+            else:
+                self._update(card, pred, now)
         for index, pred in enumerate(unique):
             if index in matched:
                 continue

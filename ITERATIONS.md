@@ -298,3 +298,16 @@ two sequential cycles and a maximum overlap of one. No app, casino, remote API,
 image or model was used. Recognition quality and the full GUI callback flow
 remain unverified. Keep these targeted guards; revert the individual commit if
 a later lifecycle test shows a regression.
+
+## Same-rank displacement — hold uncertain identity
+
+A new synthetic regression failed: after a counted 8 disappeared and another
+8 appeared 20 pixels away, rank and position matching silently reused the old
+identity. The registry now marks the old and new candidates uncertain when a
+same-rank box shifts beyond 35% of the smaller box dimension. This avoids a
+clean wrong count but can create a manual-review case from genuine movement or
+unusual detector jitter. Simulated crossing 8s kept the Hi-Lo count unchanged;
+split-like movement remained uncertain; an occluded card reappeared without a
+second count. Thirteen focused checks passed. These invented detections verify
+state logic only. A card missed entirely by the detector still cannot be
+flagged by memory, and the registry remains outside the normal live path.

@@ -94,3 +94,48 @@ def test_manual_false_positive_rejection_does_not_return_as_a_new_count():
     for now in range(2, 6):
         ledger.observe([card("5")], float(now))
     assert counter.cards_seen == 0 and not counter.count_uncertain
+
+
+def test_shifted_same_rank_without_old_position_stays_ambiguous():
+    counter, ledger = memory()
+    ledger.observe([card("8", 80)], 1.)
+    ledger.observe([card("8", 80)], 2.)
+    assert counter.cards_seen == 1 and not counter.count_uncertain
+
+    # Could be the counted card moved, or a second 8 appeared after the first
+    # became occluded. Position and rank alone cannot prove which.
+    ledger.observe([card("8", 100)], 3.)
+    ledger.observe([card("8", 100)], 4.)
+    assert counter.cards_seen == 1
+    assert counter.count_uncertain
+    assert len(ledger.cards) == 2
+
+
+def test_two_same_rank_cards_cross_without_changing_hilo_count():
+    counter, ledger = memory()
+    initial = [card("8", 80), card("8", 140)]
+    ledger.observe(initial, 1.)
+    ledger.observe(initial, 2.)
+    ledger.observe([card("8", 140), card("8", 80)], 3.)
+    assert counter.cards_seen == 2 and counter.running_count == 0
+    assert not counter.count_uncertain  # identity swap cannot alter Hi-Lo
+
+
+def test_split_like_pair_motion_marks_shoe_uncertain_instead_of_guessing():
+    counter, ledger = memory()
+    pair = [card("8", 80, "mine"), card("8", 140, "mine")]
+    ledger.observe(pair, 1.)
+    ledger.observe(pair, 2.)
+    ledger.observe([card("8", 55, "mine"), card("8", 165, "mine")], 3.)
+    assert counter.cards_seen == 2
+    assert counter.count_uncertain
+
+
+def test_occluded_counted_card_reappears_without_being_counted_twice():
+    counter, ledger = memory()
+    for now in (1., 2.):
+        ledger.observe([card("5", 80)], now)
+    ledger.observe([], 3.)
+    ledger.observe([card("5", 80)], 4.)
+    assert counter.cards_seen == 1 and counter.running_count == 1
+    assert not counter.count_uncertain
