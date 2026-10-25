@@ -157,11 +157,11 @@ class CardMemory:
             stable_same_rank = pred.get("name") == card.rank and card.rank is not None
             jitter = max(4., min(card.width, card.height,
                                  pred.get("width", 30), pred.get("height", 40))*.35)
-            if (stable_same_rank and (card.counted or card.hits)
+            if (stable_same_rank and card.counted
                     and shift > jitter and not card.reason):
-                # A single displaced same-rank box may be a moved card or a
-                # second physical card after the first was occluded. Keep both
-                # identities unresolved; position/rank alone cannot prove it.
+                # Once counted, a displaced same-rank box may be a moved card
+                # or a second card after occlusion. A one-frame candidate is
+                # still provisional: let it settle before assigning identity.
                 reason = "Puede ser carta movida o nueva"
                 self._issue(card, reason)
                 self._new(pred, now, reason, [key])
@@ -172,7 +172,20 @@ class CardMemory:
                 continue
             possible = ambiguous.get(index, [])
             if not possible:
-                possible = [key for key in original_ids-used if self.cards[key].rank == pred.get("name")]
+                possible = []
+                for key in original_ids-used:
+                    card = self.cards[key]
+                    if card.rank != pred.get("name"):
+                        continue
+                    # A dealer HUD graphic cannot physically become a player
+                    # card. Distant equal ranks on an eight-deck table are
+                    # distinct unless their motion is spatially plausible.
+                    if (card.owner == "dealer") != (pred["owner"] == "dealer"):
+                        continue
+                    scale = max(card.width, card.height,
+                                pred.get("width", 30), pred.get("height", 40))
+                    if self._distance(card, pred, now) <= scale*2.5:
+                        possible.append(key)
             if possible:
                 for key in possible:
                     self._issue(self.cards[key], "Puede ser carta movida o nueva")

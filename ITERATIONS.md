@@ -358,3 +358,22 @@ and Start disabled. Default's scaled fallback logs a warning. Four profile/UI
 checks and sixteen card-memory checks passed with temporary stores. This does
 not activate the new layout in live detection; its recorded-video count gate
 still fails.
+
+## Local-video memory diagnosis after the ambiguity guard
+
+Same exact 113 scheduled frames and 111 local ONNX calls; all prediction lists
+were identical to the earlier `table_registry_01` run. An overly broad guard
+made `table_registry_02` count 32/37, RC +2. Treating one-frame candidates as
+provisional gave `table_registry_03` 33/37, RC +2. Numeric trace review then
+found a dealer-HUD 7 at (1177,190) being considered the same physical card as
+a table 7 at (773,580). Restricting possible movement by source and distance
+gave `table_registry_04` 34/37, RC +3. Its counted-event list exactly matches
+the earlier 34/37 result. Sixteen card-memory checks pass, including distant
+same ranks, rotated extras when a rank is supplied, unread extras, crossing and
+occlusion. None of these software checks demonstrate real recognition.
+
+The `real2` saved Mesa occupies y≈545–709 and the selected dealer HUD occupies
+y≈163–240, disjoint in profile coordinates. The assistant did not inspect any
+video image, so the location of physical dealer cards relative to Mesa is not
+confirmed. The user-label gate is still 37 cards and final RC 0; it failed.
+Do not switch live detection to the registry or proceed with overlay changes.

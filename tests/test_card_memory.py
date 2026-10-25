@@ -111,6 +111,14 @@ def test_shifted_same_rank_without_old_position_stays_ambiguous():
     assert len(ledger.cards) == 2
 
 
+def test_one_frame_candidate_may_settle_at_new_position_before_confirmation():
+    counter, ledger = memory()
+    ledger.observe([card("8", 80)], 1.)
+    ledger.observe([card("8", 94)], 2.)
+    ledger.observe([card("8", 94)], 3.)
+    assert counter.cards_seen == 1 and not counter.count_uncertain
+
+
 def test_two_same_rank_cards_cross_without_changing_hilo_count():
     counter, ledger = memory()
     initial = [card("8", 80), card("8", 140)]
@@ -173,3 +181,23 @@ def test_crossing_same_rank_between_owners_blocks_advice_without_recount():
     ledger.observe([card("8", 80, "other"), card("8", 140, "mine")], 3.)
     assert counter.cards_seen == 2 and counter.running_count == 0
     assert ledger.advice_pending
+
+
+def test_hidden_dealer_hud_and_new_player_same_rank_are_distinct():
+    counter, ledger = memory()
+    dealer = card("7", 400, "dealer") | {"cy": 35.}
+    player = card("7", 80, "other")
+    ledger.observe([dealer], 1.)
+    ledger.observe([dealer], 2.)
+    ledger.observe([player], 3.)
+    ledger.observe([player], 4.)
+    assert counter.cards_seen == 2 and not counter.count_uncertain
+
+
+def test_distant_same_rank_players_are_not_assumed_to_be_one_card():
+    counter, ledger = memory()
+    ledger.observe([card("8", 80)], 1.)
+    ledger.observe([card("8", 80)], 2.)
+    ledger.observe([card("8", 500)], 3.)
+    ledger.observe([card("8", 500)], 4.)
+    assert counter.cards_seen == 2 and not counter.count_uncertain
