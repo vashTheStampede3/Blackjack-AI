@@ -32,6 +32,7 @@ import threading
 from datetime import datetime
 
 from ..common import constants
+from .card_layout import SEVEN_SEATS, SINGLE_SEAT, TABLE, CardLayout
 
 DEFAULT_NAME = "Default"
 
@@ -53,7 +54,7 @@ def _res_key(resolution):
 
 def _new_profile():
     return {"saved": None, "regions": {}, "ocr": {}, "controls": {},
-            "anchors": {}}
+            "anchors": {}, "layouts": {}}
 
 
 def _empty():
@@ -73,7 +74,7 @@ def _load():
                 raise ValueError("no profiles")
             for prof in profiles.values():
                 prof.setdefault("saved", None)
-                for kind in ("regions", "ocr", "controls", "anchors"):
+                for kind in ("regions", "ocr", "controls", "anchors", "layouts"):
                     # setdefault alone lets an existing null/list through,
                     # which would crash every _get/_set downstream.
                     if not isinstance(prof.get(kind), dict):
@@ -192,7 +193,7 @@ def _get(kind, resolution, profile=None):
     return prof[kind].get(_res_key(resolution)) if prof else None
 
 
-def _set(kind, resolution, payload, profile):
+def _set(kind, resolution, payload, profile, layout_mode=None):
     with _LOCK:
         data = _load()
         if data.pop("_locked", False):
@@ -202,6 +203,8 @@ def _set(kind, resolution, payload, profile):
         name = (profile or data["active"]).strip() or data["active"]
         prof = data["profiles"].setdefault(name, _new_profile())
         prof[kind][_res_key(resolution)] = payload
+        if layout_mode is not None:
+            prof["layouts"].setdefault(_res_key(resolution), {})["selected_mode"] = layout_mode
         prof["saved"] = datetime.now().isoformat(timespec="seconds")
         data["active"] = name  # saving into a profile selects it
         _write(data)
@@ -222,11 +225,52 @@ def get_regions(resolution, profile=None):
 
 
 def set_regions(resolution, payload, profile=None):
-    _set("regions", resolution, payload, profile)
+    _set("regions", resolution, payload, profile, layout_mode=SEVEN_SEATS)
 
 
 def delete_regions(resolution):
     _delete("regions", resolution)
+
+
+def layout_mode(resolution, profile=None):
+    """Saved selection for this exact resolution; old profiles remain seven-seat."""
+    saved = _layout_modes(resolution, profile)
+    mode = saved.get("selected_mode", SEVEN_SEATS)
+    if mode not in (SEVEN_SEATS, TABLE, SINGLE_SEAT):
+        raise ValueError("El modo guardado del perfil no es válido.")
+    return mode
+
+
+def _layout_modes(resolution, profile):
+    saved = _get("layouts", resolution, profile=profile)
+    if saved is None:
+        return {}
+    if not isinstance(saved, dict):
+        raise ValueError("Las zonas guardadas de esta resolución tienen un formato inválido.")
+    return saved
+
+
+def get_card_layout(resolution, mode, profile=None):
+    """Validated new-mode layout, or None. No defaults, scaling or mode fallback."""
+    if mode not in (TABLE, SINGLE_SEAT):
+        raise ValueError("Elegí un modo de mesa o de un asiento.")
+    saved = _layout_modes(resolution, profile)
+    payload = saved.get(mode)
+    if payload is None:
+        return None
+    return CardLayout.from_payload(payload, resolution)
+
+
+def set_card_layout(layout, profile=None, source_context=None):
+    payload = layout.to_payload()
+    if source_context is not None:
+        payload["reference_source"] = source_context
+    # Revalidate at the write boundary, including objects built without from_payload.
+    checked = CardLayout.from_payload(payload, layout.resolution)
+    with _LOCK:
+        saved = dict(_layout_modes(checked.resolution, profile))
+        saved[checked.mode] = checked.to_payload()
+        _set("layouts", checked.resolution, saved, profile, layout_mode=checked.mode)
 
 
 def get_ocr(resolution):

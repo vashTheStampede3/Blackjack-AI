@@ -8,8 +8,8 @@ from tkinter import filedialog, ttk
 
 from PIL import Image, ImageTk
 
-from ..common import constants
 from ..logic import region_profiles
+from ..logic.card_layout import SEVEN_SEATS, MODE_LABELS, ZONE_COLORS, ZONE_LABELS
 from ..logic.video_source import VideoFile, parse_video_time
 from .region_editor import RegionEditor
 
@@ -25,6 +25,7 @@ class VideoFramePicker(tk.Toplevel):
         self._photo = None
         self.time_var = tk.StringVar(value="0:00")
         self.profile_var = tk.StringVar(value=profile)
+        self.mode_var = tk.StringVar(value=MODE_LABELS[SEVEN_SEATS])
         self.info_var = tk.StringVar(value="Abrí un video local y elegí un fotograma con cartas.")
         self.status_var = tk.StringVar()
 
@@ -54,10 +55,19 @@ class VideoFramePicker(tk.Toplevel):
         self.profile_combo = ttk.Combobox(save, textvariable=self.profile_var, width=24,
             values=[p["name"] for p in region_profiles.list_profiles()])
         self.profile_combo.pack(side=tk.LEFT, padx=6)
-        self.profile_combo.bind("<<ComboboxSelected>>", lambda event: self._draw())
+        self.profile_combo.bind("<<ComboboxSelected>>", self._profile_changed)
+        self.profile_combo.bind("<Return>", self._profile_changed)
         ttk.Button(save, text="Dibujar / editar zonas", command=self._edit_regions).pack(side=tk.LEFT)
         ttk.Button(save, text="Ver zonas guardadas", command=self._draw).pack(side=tk.LEFT, padx=6)
         ttk.Button(save, text="Cerrar", command=self.close).pack(side=tk.RIGHT)
+        modes = ttk.Frame(self, padding=(8, 0, 8, 4))
+        modes.pack(fill=tk.X)
+        ttk.Label(modes, text="Modo:").pack(side=tk.LEFT)
+        self.mode_combo = ttk.Combobox(modes, textvariable=self.mode_var, state="readonly",
+                                       width=34, values=list(MODE_LABELS.values()))
+        self.mode_combo.pack(side=tk.LEFT, padx=6)
+        self.mode_combo.bind("<<ComboboxSelected>>", self._mode_changed)
+        ttk.Label(modes, text="Cada modo conserva sus propias zonas.").pack(side=tk.LEFT)
         ttk.Label(self, textvariable=self.status_var, wraplength=1050).pack(fill=tk.X, padx=10, pady=3)
         ttk.Label(self, text="El perfil usa el tamaño del video. Otra resolución o encuadre en vivo "
                   "requiere revisión. No se analiza ni se cuenta ninguna carta.",
@@ -73,6 +83,9 @@ class VideoFramePicker(tk.Toplevel):
             self.open_video(path)
 
     def open_video(self, path):
+        if self.editor is not None and self.editor.winfo_exists():
+            self.status_var.set("Terminá o cancelá la edición antes de cambiar el video.")
+            return False
         candidate = None
         try:
             candidate = VideoFile(path)
@@ -87,8 +100,32 @@ class VideoFramePicker(tk.Toplevel):
             self.reader.close()
         self.reader, self.source = candidate, source
         self.slider.configure(to=candidate.last_frame_seconds)
+        self._restore_mode()
         self._accept_source(source)
         return True
+
+    def _current_mode(self):
+        return next(key for key, label in MODE_LABELS.items() if label == self.mode_var.get())
+
+    def _restore_mode(self):
+        if self.source is not None:
+            try:
+                mode = region_profiles.layout_mode(self.source.resolution, profile=self.profile_var.get().strip())
+            except ValueError as exc:
+                self.status_var.set(str(exc))
+                return
+            self.mode_var.set(MODE_LABELS[mode])
+
+    def _profile_changed(self, event=None):
+        self._restore_mode()
+        self._draw()
+
+    def _mode_changed(self, event=None):
+        if self.editor is not None and self.editor.winfo_exists():
+            self.mode_var.set(MODE_LABELS[self.editor.mode])
+            self.status_var.set("Terminá o cancelá la edición antes de cambiar el modo.")
+            return
+        self._draw()
 
     def _cancel_seek(self):
         if self._seek_job is not None:
@@ -154,6 +191,10 @@ class VideoFramePicker(tk.Toplevel):
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
         profile = self.profile_var.get().strip()
+        mode = self._current_mode()
+        if mode != SEVEN_SEATS:
+            self._draw_card_layout(profile, mode, scale)
+            return
         data = region_profiles.get_regions(self.source.resolution, profile=profile) if profile else None
         if data is None:
             self.status_var.set("Este perfil no tiene zonas para este tamaño. Dibujalas y guardalas.")
@@ -168,6 +209,27 @@ class VideoFramePicker(tk.Toplevel):
                                      outline="#ff4d4d", width=2, tags="regions")
         self.status_var.set(f'Zonas guardadas en "{profile}" · {w}×{h}. P1 izquierda / P7 derecha.')
 
+    def _draw_card_layout(self, profile, mode, scale):
+        try:
+            layout = region_profiles.get_card_layout(self.source.resolution, mode, profile=profile) if profile else None
+        except ValueError as exc:
+            self.status_var.set(f"Zonas guardadas inválidas: {exc}")
+            return
+        if layout is None:
+            self.status_var.set(f'"{profile}" no tiene zonas para {MODE_LABELS[mode]} en este tamaño. '
+                                "Dibujá Mesa, Mi asiento y Crupier; no se usan las zonas de otro modo.")
+            return
+        for key, label in ZONE_LABELS.items():
+            poly = getattr(layout, key)
+            self.canvas.create_polygon(*[v * scale for p in poly for v in p], fill="",
+                                       outline=ZONE_COLORS[key], width=2, tags="regions")
+            xs, ys = zip(*poly)
+            self.canvas.create_text(sum(xs)/len(xs)*scale, sum(ys)/len(ys)*scale,
+                                    text=label, fill=ZONE_COLORS[key], tags="regions")
+        w, h = layout.resolution
+        self.status_var.set(f'Zonas válidas en "{profile}" · {MODE_LABELS[mode]} · {w}×{h}. '
+                            "Mi asiento todavía debe compararse con tus etiquetas.")
+
     def _edit_regions(self):
         if self.source is None:
             self.status_var.set("Abrí un video y elegí un fotograma primero.")
@@ -180,11 +242,16 @@ class VideoFramePicker(tk.Toplevel):
             self.status_var.set("Escribí un nombre de perfil.")
             return
         self._cancel_seek()
-        self.editor = RegionEditor(self, self.source, on_save=self._saved, profile=profile)
+        try:
+            self.editor = RegionEditor(self, self.source, on_save=self._saved, profile=profile,
+                                       mode=self._current_mode())
+        except ValueError as exc:
+            self.status_var.set(str(exc))
 
     def _saved(self, saved=True):
         if saved:
             self.profile_var.set(region_profiles.active_name())
+            self._restore_mode()
         self.profile_combo.configure(values=[p["name"] for p in region_profiles.list_profiles()])
         self._draw()
 

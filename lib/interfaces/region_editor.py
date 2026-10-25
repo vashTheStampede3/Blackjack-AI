@@ -1,10 +1,8 @@
-"""Interactive region calibration (Feature 10).
+"""Edit regions over a frozen capture or video frame, in native coordinates.
 
-A live screenshot of the selected monitor with the seat polygons and dealer
-rectangle drawn on top; every vertex is a draggable handle. Saving writes
-the layout into a NAMED table profile (the name field, prefilled with the
-active profile) — saving a new name creates that profile and makes it
-active; the engine then reloads its regions.
+The seven-seat mode keeps its existing profile format. The two table modes
+save separate Mesa / Mi asiento / Crupier polygons and validate them before
+writing. Calibration never constructs a detector or counts cards.
 """
 
 import tkinter as tk
@@ -15,21 +13,28 @@ from PIL import Image, ImageTk
 
 from ..common import constants
 from ..logic import monitor_utils, region_profiles
+from ..logic.card_layout import (SEVEN_SEATS, MODE_LABELS, ZONE_COLORS,
+                                 ZONE_LABELS, CardLayout)
 
 C = constants.COLORS
 HANDLE = 5  # handle radius in canvas px
 
 
 class RegionEditor(tk.Toplevel):
-    def __init__(self, parent, capture, on_save=None, profile=None):
+    def __init__(self, parent, capture, on_save=None, profile=None, mode=SEVEN_SEATS):
+        if mode not in MODE_LABELS:
+            raise ValueError("Modo de zonas desconocido.")
+        layout = (region_profiles.get_card_layout(capture.resolution, mode, profile=profile)
+                  if mode != SEVEN_SEATS else None)
         frame_bgr = capture.grab_bgr()
         super().__init__(parent)
-        self.title("Calibrate Regions — drag the corner handles")
+        self.title(f"Editar zonas — {MODE_LABELS[mode]}")
         self.configure(bg=C["bg_primary"])
         self.on_save = on_save
         self.capture = capture
         self.resolution = capture.resolution
         self._frame_bgr = frame_bgr
+        self.mode = mode
 
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         # Fit the screenshot into a workable window, remember the scale to
@@ -45,54 +50,64 @@ class RegionEditor(tk.Toplevel):
         self.canvas.pack(padx=10, pady=(10, 6))
         self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
 
-        custom = monitor_utils.load_custom_regions(self.resolution, profile=profile)
-        if custom is not None:
-            players = custom["players"]
-            dealer = custom["dealer"]
-        else:
-            players = monitor_utils.default_player_regions(self.resolution)
-            dealer = monitor_utils.default_dealer_rect(self.resolution)
-
-        # Drop the duplicated closing vertex for editing; re-added on save.
         self.polys = []
-        for poly in players:
-            pts = [list(p) for p in poly]
-            if len(pts) > 1 and pts[0] == pts[-1]:
-                pts = pts[:-1]
-            self.polys.append([[x * self.scale, y * self.scale] for x, y in pts])
-        left, top, right, bottom = dealer
-        self.dealer = [[left * self.scale, top * self.scale],
-                       [right * self.scale, bottom * self.scale]]
+        self.dealer = []
+        self.zones = [[] for _ in ZONE_LABELS]
+        if mode == SEVEN_SEATS:
+            custom = monitor_utils.load_custom_regions(self.resolution, profile=profile)
+            players = custom["players"] if custom else monitor_utils.default_player_regions(self.resolution)
+            dealer = custom["dealer"] if custom else monitor_utils.default_dealer_rect(self.resolution)
+            # Drop the duplicated closing vertex for editing; re-added on save.
+            for poly in players:
+                pts = [list(p) for p in poly]
+                if len(pts) > 1 and pts[0] == pts[-1]:
+                    pts = pts[:-1]
+                self.polys.append([[x * self.scale, y * self.scale] for x, y in pts])
+            left, top, right, bottom = dealer
+            self.dealer = [[left * self.scale, top * self.scale],
+                           [right * self.scale, bottom * self.scale]]
+        elif layout is not None:
+            self.zones = [[[x * self.scale, y * self.scale] for x, y in getattr(layout, key)]
+                          for key in ZONE_LABELS]
 
         self._drag = None  # ("poly", i, j) or ("dealer", i)
         self._draw_start = None
-        self.draw_mode = tk.BooleanVar(value=False)
+        self.draw_mode = tk.BooleanVar(value=mode != SEVEN_SEATS and layout is None)
         controls = tk.Frame(self, bg=C["bg_primary"])
         controls.pack(fill=tk.X, padx=10, pady=3)
         tk.Label(controls, text="Zona:", bg=C["bg_primary"]).pack(side=tk.LEFT)
-        self.zone_combo = ttk.Combobox(controls, state="readonly", width=13,
-            values=[f"P{i + 1}" for i in range(constants.NUM_SEATS)] + ["Crupier"])
+        zone_names = ([f"P{i + 1}" for i in range(constants.NUM_SEATS)] + ["Crupier"]
+                      if mode == SEVEN_SEATS else list(ZONE_LABELS.values()))
+        self.zone_combo = ttk.Combobox(controls, state="readonly", width=13, values=zone_names)
         self.zone_combo.current(0)
         self.zone_combo.pack(side=tk.LEFT, padx=6)
         tk.Checkbutton(controls, text="Dibujar rectángulo (arrastrar sobre la mesa)",
             variable=self.draw_mode, bg=C["bg_primary"]).pack(side=tk.LEFT)
         w, h = self.resolution
-        tk.Label(self, text=f"{capture.name if hasattr(capture, 'name') else 'Captura'} · {w}×{h} · "
-            "P1 izquierda / P7 derecha. Desmarcá Dibujar para ajustar vértices.",
+        hint = ("P1 izquierda / P7 derecha. Desmarcá Dibujar para ajustar vértices."
+                if mode == SEVEN_SEATS else
+                "Dibujá las 3 zonas. Desmarcá Dibujar para mover puntos. "
+                "Clic derecho en un borde agrega un punto; en un punto lo quita.")
+        tk.Label(self, text=f"{getattr(capture, 'name', 'Captura')} · {w}×{h} · {hint}",
+            wraplength=max_w,
             bg=C["bg_primary"], fg=C["text_secondary"]).pack(fill=tk.X, padx=10)
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._move)
         self.canvas.bind("<ButtonRelease-1>", self._release)
+        if mode != SEVEN_SEATS:
+            self.canvas.bind("<Button-3>", self._edit_vertex)
 
         bar = tk.Frame(self, bg=C["bg_primary"])
         bar.pack(fill=tk.X, padx=10, pady=(0, 10))
-        tk.Label(bar, text="Orange: seat regions · Red: dealer area",
+        legend = ("Naranja: asientos · Rojo: crupier" if mode == SEVEN_SEATS else
+                  "Verde: Mesa · Naranja: Mi asiento · Rojo: Crupier")
+        tk.Label(bar, text=legend,
                  bg=C["bg_primary"], fg=C["text_secondary"],
                  font=constants.FONT_SMALL).pack(side=tk.LEFT)
-        actions = [("Save", self._save, C["success"])]
-        if profile is None:
+        actions = [("Guardar", self._save, C["success"])]
+        if profile is None and mode == SEVEN_SEATS:
             actions.append(("Reset to defaults", self._reset, C["warning"]))
-        actions.append(("Cancel", self.destroy, C["text_secondary"]))
+        actions.append(("Cancelar", self.destroy, C["text_secondary"]))
         for text, cmd, bg in actions:
             tk.Button(bar, text=text, command=cmd, bg=bg,
                       fg="white" if bg != C["warning"] else C["text_primary"],
@@ -113,25 +128,31 @@ class RegionEditor(tk.Toplevel):
 
     # ------------------------------------------------------------- drawing
 
+    def _shapes(self):
+        if self.mode != SEVEN_SEATS:
+            for i, (key, label) in enumerate(ZONE_LABELS.items()):
+                yield "zone", i, self.zones[i], label, ZONE_COLORS[key]
+        else:
+            for i, pts in enumerate(self.polys):
+                yield "poly", i, pts, f"P{i + 1}", "#ff9f1a"
+            yield "dealer", 0, self.dealer, "Crupier", "#ff4d4d"
+
     def _redraw(self):
         self.canvas.delete("overlay")
-        for i, pts in enumerate(self.polys):
+        for kind, _, pts, label, color in self._shapes():
+            if not pts:
+                continue
             flat = [c for p in pts for c in p]
-            self.canvas.create_polygon(*flat, outline="#ff9f1a", fill="", width=2,
-                                       tags="overlay")
+            if kind == "dealer":
+                self.canvas.create_rectangle(*flat, outline=color, width=2, tags="overlay")
+            else:
+                self.canvas.create_polygon(*flat, outline=color, fill="", width=2, tags="overlay")
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
-            self.canvas.create_text(cx, cy, text=f"P{i + 1}", fill="#ff9f1a",
+            self.canvas.create_text(cx, cy, text=label, fill=color,
                                     font=constants.FONT_BODY_BOLD, tags="overlay")
             for p in pts:
-                self._handle(p, "#ff9f1a")
-        (x1, y1), (x2, y2) = self.dealer
-        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#ff4d4d", width=2,
-                                     tags="overlay")
-        self.canvas.create_text((x1 + x2) / 2, y1 + 14, text="DEALER", fill="#ff4d4d",
-                                font=constants.FONT_BODY_BOLD, tags="overlay")
-        for p in self.dealer:
-            self._handle(p, "#ff4d4d")
+                self._handle(p, color)
 
     def _handle(self, p, color):
         x, y = p
@@ -146,15 +167,11 @@ class RegionEditor(tk.Toplevel):
             self._drag = None
             return
         best, best_d = None, (HANDLE * 3) ** 2
-        for i, pts in enumerate(self.polys):
+        for kind, i, pts, _, _ in self._shapes():
             for j, (x, y) in enumerate(pts):
                 d = (x - event.x) ** 2 + (y - event.y) ** 2
                 if d < best_d:
-                    best, best_d = ("poly", i, j), d
-        for i, (x, y) in enumerate(self.dealer):
-            d = (x - event.x) ** 2 + (y - event.y) ** 2
-            if d < best_d:
-                best, best_d = ("dealer", i, 0), d
+                    best, best_d = (kind, i, j), d
         self._drag = best
 
     def _move(self, event):
@@ -166,7 +183,9 @@ class RegionEditor(tk.Toplevel):
             if right - left < 2 or bottom - top < 2:
                 return
             zone = self.zone_combo.current()
-            if zone == constants.NUM_SEATS:
+            if self.mode != SEVEN_SEATS:
+                self.zones[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
+            elif zone == constants.NUM_SEATS:
                 self.dealer = [[left, top], [right, bottom]]
             else:
                 self.polys[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
@@ -176,11 +195,42 @@ class RegionEditor(tk.Toplevel):
             return
         x, y = self._point(event)
         kind, i, j = self._drag
-        if kind == "poly":
+        if kind == "zone":
+            self.zones[i][j] = [x, y]
+        elif kind == "poly":
             self.polys[i][j] = [x, y]
         else:
-            self.dealer[i] = [x, y]
+            self.dealer[j] = [x, y]
         self._redraw()
+
+    def _edit_vertex(self, event):
+        """Add/remove vertices of the selected new-mode polygon, without a new editor."""
+        if self.mode == SEVEN_SEATS:
+            return
+        pts = self.zones[self.zone_combo.current()]
+        if not pts:
+            return
+        x, y = self._point(event)
+        radius2 = (HANDLE * 3) ** 2
+        for i, (px, py) in enumerate(pts):
+            if (x - px) ** 2 + (y - py) ** 2 <= radius2:
+                if len(pts) > 3:
+                    pts.pop(i)
+                    self._redraw()
+                return
+        best = None
+        for i, ((ax, ay), (bx, by)) in enumerate(zip(pts, pts[1:] + pts[:1])):
+            length2 = (bx - ax) ** 2 + (by - ay) ** 2
+            if not length2:
+                continue
+            t = min(1., max(0., ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / length2))
+            px, py = ax + t * (bx - ax), ay + t * (by - ay)
+            distance = (x - px) ** 2 + (y - py) ** 2
+            if distance <= radius2:
+                best, radius2 = (i + 1, [px, py]), distance
+        if best:
+            pts.insert(*best)
+            self._redraw()
 
     def _point(self, event):
         return (min(max(event.x, 0), self._photo.width()),
@@ -194,6 +244,9 @@ class RegionEditor(tk.Toplevel):
     # --------------------------------------------------------------- save
 
     def _save(self):
+        if self.mode != SEVEN_SEATS:
+            self._save_card_layout()
+            return
         players = []
         for pts in self.polys:
             native = [[round(x / self.scale, 1), round(y / self.scale, 1)]
@@ -214,6 +267,29 @@ class RegionEditor(tk.Toplevel):
                 if (not saved or saved.get("players") != players or saved.get("dealer") != dealer
                         or saved.get("reference_source") != context):
                     raise ValueError("No se pudo comprobar el guardado. Las zonas siguen abiertas para reintentar.")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
+            return
+        if self.on_save:
+            self.on_save()
+        self.destroy()
+
+    def _save_card_layout(self):
+        try:
+            profile = self.profile_var.get().strip()
+            if not profile:
+                raise ValueError("Escribí un nombre de perfil.")
+            payload = {"mode": self.mode, "resolution": list(self.resolution)}
+            for key, pts in zip(ZONE_LABELS, self.zones):
+                payload[key] = [[round(x / self.scale, 1), round(y / self.scale, 1)] for x, y in pts]
+            context = getattr(self.capture, "calibration_context", None)
+            if context is not None:
+                payload["reference_source"] = context
+            layout = CardLayout.from_payload(payload, self.resolution)
+            region_profiles.set_card_layout(layout, profile=profile)
+            saved = region_profiles.get_card_layout(self.resolution, self.mode, profile=profile)
+            if saved is None or saved.to_payload() != layout.to_payload():
+                raise ValueError("No se pudo comprobar el guardado; las zonas siguen abiertas.")
         except (OSError, ValueError) as exc:
             messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
             return

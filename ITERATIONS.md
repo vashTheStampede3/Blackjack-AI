@@ -184,3 +184,21 @@ Added a local-only frame reader with two decoder threads, native-size frozen fra
 ## Local video calibration ? user-chosen frame and regions
 
 Reused RegionEditor and the profile store in a local video-frame picker. The user chooses the timestamp and draws seven seat regions plus dealer; frozen native-size geometry and frame reference are saved, without image files or inference. Verified 32 selected reader/editor/profile tests with generated video, isolated stores and network calls forbidden in UI tests. No screenshots were viewed for this verification. Existing user profiles, model parameters, executor settings and recognition logic were not changed.
+
+## Local video calibration — three selectable layout modes
+
+Hypothesis: table-wide counting needs an explicit Mesa polygon and ownership
+zones without overwriting the existing seven-seat reference. Added the table
+and single-seat modes to the same viewer/editor, with separate exact-resolution
+profiles, native coordinates, optional polygon vertices, and persisted source
+references. Reject missing, crossed, out-of-frame, overlapping or non-contained
+zones before saving. The saved layout loader tags native-coordinate positions
+without inference or counting; production detection and card memory are unchanged.
+
+Before: new-mode checks could not load because the layout module did not exist.
+After: 55 focused reader/editor/geometry/profile checks passed in 2.37 seconds,
+using generated frames and isolated stores. Existing user profile and label bytes
+were unchanged. OpenCV processing and the video decoder are capped at two threads.
+No assistant image inspection, remote calls or recognition run. Decision: keep
+the viewer change and stop for the user to draw zones. Card sizes, false positives,
+dealer representation and all 37-card counting comparisons remain unmeasured.
