@@ -311,3 +311,18 @@ split-like movement remained uncertain; an occluded card reappeared without a
 second count. Thirteen focused checks passed. These invented detections verify
 state logic only. A card missed entirely by the detector still cannot be
 flagged by memory, and the registry remains outside the normal live path.
+
+## New Shoe — clear old advice and guard visible-card resets
+
+A regression showed that New Shoe cleared the arithmetic but kept old player
+cards in the advice projection. It now clears player/dealer round projections,
+invalidates open card pickers by advancing the round, and marks the new shoe
+uncertain if the reset happened while cards were still recorded on the table.
+The registry retains old identities as retired so an immediate stale frame
+cannot count them into the new shoe. This favors an explicit uncertainty over
+a clean but potentially contaminated count.
+
+Verification: 56 focused lifecycle, dealer, registry and memory checks passed
+in 10.09 seconds with isolated temporary output and two OpenCV threads. This
+does not establish visual recognition quality; the recorded-video count gate
+still fails, so overlay/layout work remains postponed.

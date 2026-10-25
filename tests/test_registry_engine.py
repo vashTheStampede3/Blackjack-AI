@@ -96,7 +96,8 @@ def test_new_shoe_detaches_old_registry_cards_until_clear(engine):
     engine.reset_shoe()
     observe(engine, boxes, 3.)
     observe(engine, boxes, 4.)
-    assert engine.counter.cards_seen == 0 and not engine.counter.count_uncertain
+    assert engine.counter.cards_seen == 0 and engine.counter.count_uncertain
+    assert engine.counter.uncertainties["shoe_reset_with_cards"]["counted"] is False
     with pytest.raises(ValueError, match="shoe"):
         engine.correct_tracked_card(identity, "King")
 

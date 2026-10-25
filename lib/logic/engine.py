@@ -1112,11 +1112,16 @@ class DetectionEngine:
 
     def reset_shoe(self):
         with self._lock:
+            cards_still_present = bool(
+                self.dealer_card or self.dealer_extras
+                or any(seat.cards for seat in self.seats)
+                or (self.card_registry is not None
+                    and any(c.state not in ("retired", "rejected")
+                            for c in self.card_registry.cards.values())))
             self.counter.reset_shoe()
             if self.card_registry is not None:
                 self.card_registry.detach_shoe()
-            self._round_observation.count_uncertain = False
-            self._round_observation.count_pending = False
+            self._round_observation.reset_round()
             self._unread_positions.clear()
             self._pending_extra.clear()
             self._pending_positions.clear()
@@ -1137,15 +1142,29 @@ class DetectionEngine:
             # A fresh shoe starts clean under whatever paytables now apply.
             self._shoe_paytable_hash = settlement.paytable_hash()
             self.paytable_changed_midshoe = False
-            # Cards already on the table belong to the pre-reset history;
-            # detach them so later corrections can't drive the fresh count negative.
+            # New Shoe ends the old hand as well as resetting its arithmetic.
             for seat in self.seats:
-                for card in seat.cards:
-                    card["counted"] = False
+                seat.cards.clear()
+                seat.split = False
             self._dealer_counted = False
+            self._empty_frames = self._dealer_empty_frames = 0
+            self._prev_thumb = self._prev_dealer_thumb = None
+            self._last_frame = None
+            self.round_number += 1  # invalidate card pickers opened in the old shoe
+            if cards_still_present:
+                self.counter.mark_uncertainty("shoe_reset_with_cards", {
+                    "reason": "New Shoe iniciado mientras aún había cartas visibles",
+                    "counted": False, "round": self.round_number,
+                })
+            self._round_observation.count_uncertain = self.counter.count_uncertain
+            self._round_observation.count_pending = False
         if self.store is not None:
             self._io_pool.submit(self._save_state_job)
-        self.log("Shoe counts reset.")
+        if cards_still_present:
+            self.log("Shoe counts reset with cards still present — count uncertain; "
+                     "after the table clears, reset the shoe again.", level="WARNING")
+        else:
+            self.log("Shoe counts reset.")
         self.publish_snapshot()
 
     def dismiss_reshuffle_badge(self):

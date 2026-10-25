@@ -267,6 +267,18 @@ class ReshuffleBadge(EngineCase):
         self.assertEqual(eng.dealer_extras, [])
         self.assertFalse(eng._dealer_counted)
 
+    def test_new_shoe_clears_old_player_hand_and_flags_cards_still_visible(self):
+        eng = self.engine
+        eng.replace_card(0, 0, "5")
+        eng.replace_card(0, 1, "8")
+
+        eng.reset_shoe()
+
+        self.assertEqual(eng.counter.cards_seen, 0)
+        self.assertEqual(eng.seats[0].cards, [])
+        self.assertTrue(eng.counter.count_uncertain)
+        self.assertIn("shoe_reset_with_cards", eng.counter.uncertainties)
+
     def test_badge_shows_on_confirmation_and_hides_on_dismiss(self):
         eng = self.engine
         self.assertFalse(eng.get_snapshot()["reshuffle_badge"])
