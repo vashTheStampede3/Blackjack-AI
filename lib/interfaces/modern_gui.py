@@ -882,8 +882,11 @@ class ModernBlackjackGUI(tk.Tk):
                    allow_remove=slot < n_cards, split_info=split_info)
 
     def _on_dealer_click(self):
+        snapshot = self.controller.engine.get_snapshot()
+        round_at_click = snapshot["round"] if snapshot else None
         CardPicker(self, "Dealer up-card", self.table.card_image,
-                   lambda name: self.controller.engine.replace_dealer(name))
+                   lambda name: self.controller.engine.replace_dealer(
+                       name, expected_round=round_at_click))
 
     def _on_dealer_extra_click(self, idx):
         """Correct a tracked dealer draw, or add one the detector missed

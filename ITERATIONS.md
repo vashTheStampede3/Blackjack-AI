@@ -282,3 +282,19 @@ was fixed. Final verification: 49 selected logic, layout, replay and SQLite
 checks passed in an isolated temporary directory. User profiles, settings,
 labels and session database bytes were unchanged. Passing software tests do not
 establish card recognition accuracy.
+
+## Count-state safety — stop/start and round boundaries
+
+Two focused regressions failed before the change: a dealer-card picker opened
+in one round could edit the next round, and New Shoe kept the old dealer hand
+and extra cards in the advice projection after clearing the shoe count. Dealer
+corrections now carry the picker-open round through the GUI and stale edits are
+discarded. New Shoe clears the dealer hand/history projections. A rapid
+Stop→Start now queues one restart until the current cycle releases capture.
+
+Verification: 51 focused lifecycle, dealer, registry and memory checks passed
+in 6.98 seconds using temporary output storage; the new blocked-cycle test saw
+two sequential cycles and a maximum overlap of one. No app, casino, remote API,
+image or model was used. Recognition quality and the full GUI callback flow
+remain unverified. Keep these targeted guards; revert the individual commit if
+a later lifecycle test shows a regression.

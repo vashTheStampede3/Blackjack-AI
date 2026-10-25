@@ -1121,6 +1121,16 @@ class DetectionEngine:
             self._pending_extra.clear()
             self._pending_positions.clear()
             self._card_evidence = CardEvidence()
+            # A shoe reset is a boundary for every dealer card, including
+            # manually added playout cards. Keeping these projections would
+            # feed the previous shoe's hand into advice for the new one.
+            self.dealer_extras.clear()
+            self.dealer_card = None
+            self.dealer_locked = False
+            self._dealer_history.clear()
+            self._pending_dealer.clear()
+            self._dealer_pos = None
+            self._dealer_miss_streak = 0
             self.cutting_card_seen = False
             self._pending_cutting_card.clear()
             self._reshuffle_dismissed = False  # next confirmation shows a fresh badge
@@ -1255,16 +1265,19 @@ class DetectionEngine:
                 self.log(f"P{seat_idx + 1} split undone.")
         self.publish_snapshot()
 
-    def replace_dealer(self, card_name):
+    def replace_dealer(self, card_name, expected_round=None):
         """Manual dealer correction; card_name is a full name, rank, or None.
         Full names are kept — the suit refines the 52-cell composition."""
         with self._lock:
+            if expected_round is not None and expected_round != self.round_number:
+                self.log("Dealer correction discarded — the round changed while the picker was open.")
+                return
             if self.card_registry is not None:
                 dealer = sorted((c for c in self.card_registry.cards.values() if c.owner == "dealer" and c.counted),
                                 key=lambda c: (c.first_seen, c.id))
                 if not dealer:
                     raise ValueError("Elegí el identificador de la carta del crupier pendiente")
-                self.correct_tracked_card(dealer[0].id, card_name, expected_round=self.round_number)
+                self.correct_tracked_card(dealer[0].id, card_name, expected_round=expected_round)
                 return
             if card_name and " of " in str(card_name):
                 rank = card_name

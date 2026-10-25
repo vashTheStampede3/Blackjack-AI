@@ -61,6 +61,22 @@ class EngineCase(unittest.TestCase):
 
 
 class RoundEndGate(EngineCase):
+    def test_stale_dealer_picker_cannot_edit_next_round(self):
+        eng = self.engine
+        eng.replace_dealer("King")
+        old_round = eng.round_number
+        old_count = eng.counter.get_state()
+        eng.new_round()
+
+        eng.replace_dealer("6", expected_round=old_round)
+        self.assertIsNone(eng.dealer_card)
+        self.assertEqual(eng.counter.get_state(), old_count)
+
+        eng.replace_dealer("6", expected_round=eng.round_number)
+        self.assertEqual(eng.dealer_card, "6")
+        self.assertEqual(eng.counter.running_count,
+                         old_count["running_count"] + 1)  # new round's up-card
+
     def test_needs_five_consecutive_empty_frames(self):
         self.complete_round()
         start = self.engine.round_number
@@ -237,6 +253,20 @@ class CuttingCardPollCadence(unittest.TestCase):
 
 
 class ReshuffleBadge(EngineCase):
+    def test_new_shoe_detaches_old_dealer_hand_and_extras(self):
+        eng = self.engine
+        eng.replace_dealer("King")
+        eng.add_dealer_extra("5")
+        self.assertEqual(eng.counter.cards_seen, 2)
+
+        eng.reset_shoe()
+
+        self.assertEqual(eng.counter.cards_seen, 0)
+        self.assertIsNone(eng.dealer_card)
+        self.assertFalse(eng.dealer_locked)
+        self.assertEqual(eng.dealer_extras, [])
+        self.assertFalse(eng._dealer_counted)
+
     def test_badge_shows_on_confirmation_and_hides_on_dismiss(self):
         eng = self.engine
         self.assertFalse(eng.get_snapshot()["reshuffle_badge"])

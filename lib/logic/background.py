@@ -19,6 +19,8 @@ class DetectionController:
         self.engine = DetectionEngine(log=log)
         self._stop = threading.Event()
         self._thread = None
+        self._lifecycle_lock = threading.RLock()
+        self._restart_requested = False
         self.state = "idle"  # idle | starting | running | stopped | error
         self._idle_refresh_failed = False  # gates the "Idle Ns" announcement
 
@@ -30,22 +32,35 @@ class DetectionController:
         self.engine.set_monitor(monitor)
 
     def start(self):
-        if self.running:
-            return False
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                if self._stop.is_set():
+                    # Finish the old cycle and release its capture before a
+                    # queued restart can begin on the shared engine.
+                    self._restart_requested = True
+                    self.state = "starting"
+                    return True
+                return False
+            self._launch_locked()
+            return True
+
+    def _launch_locked(self):
         # Each worker gets its OWN stop event. A stopped-but-still-finishing
         # old worker keeps watching its (already set) event, so a quick
         # Stop -> Start can never revive it alongside the new one.
         stop_event = threading.Event()
         self._stop = stop_event
+        self._restart_requested = False
         self.state = "starting"
         self._thread = threading.Thread(target=self._run, args=(stop_event,),
                                         daemon=True, name="detection")
         self._thread.start()
-        return True
 
     def stop(self):
-        self._stop.set()
-        self.state = "stopped"
+        with self._lifecycle_lock:
+            self._restart_requested = False
+            self._stop.set()
+            self.state = "stopped"
 
     def _maybe_idle_refresh(self, prev_cycle_ts, now) -> bool:
         """Refresh model backends when the gap since the previous cycle says
@@ -98,3 +113,6 @@ class DetectionController:
         finally:
             # Release this thread's GDI capture resources.
             self.engine.capture.close_local()
+            with self._lifecycle_lock:
+                if self._restart_requested and self._stop is stop_event:
+                    self._launch_locked()
