@@ -764,7 +764,15 @@ class ModernBlackjackGUI(tk.Tk):
                 self.set_status(str(exc), error=True)
                 return
         self.monitor = selected
-        self.controller.set_monitor(self.monitor)
+        try:
+            self.controller.set_monitor(self.monitor)
+        except ValueError as exc:
+            self.start_btn.config(state="disabled")
+            self.regions_btn.config(state="disabled")
+            self.calibrate_btn.config(state="normal")
+            self.monitor_status.config(text=str(exc), fg=C["danger"])
+            self.set_status(str(exc), error=True)
+            return
         status = f"Using {self.source_kind.get().lower()} {idx + 1} — {self.monitor.width}x{self.monitor.height}"
         from ..logic.ocr import OCR_AVAILABLE
         if (OCR_AVAILABLE and constants.OCR.get("enabled")

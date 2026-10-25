@@ -346,3 +346,15 @@ shoe uncertainty after round clear. Two equal ranks crossing between ownership
 zones leave Hi-Lo unchanged and withhold advice. Split-like movement still
 remains ambiguous. These are invented detections; they do not establish that
 the local model recognizes rotated or physical cards.
+
+## Live profile selection fails closed
+
+Three focused regressions failed before the change. With a non-default profile
+selected, live detection silently loaded seven-seat defaults when only a new
+layout existed; a video-origin legacy layout could be applied to a live monitor;
+and Default fallback was not announced. The engine now rejects the first two
+cases before changing capture source, while the GUI leaves calibration available
+and Start disabled. Default's scaled fallback logs a warning. Four profile/UI
+checks and sixteen card-memory checks passed with temporary stores. This does
+not activate the new layout in live detection; its recorded-video count gate
+still fails.

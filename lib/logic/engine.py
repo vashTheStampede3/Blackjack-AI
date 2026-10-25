@@ -33,6 +33,7 @@ from . import phase
 from . import seat_quality
 from . import settlement
 from . import shoe
+from . import region_profiles
 from . import sidebet_outcomes
 from . import sidebets
 from . import anchors as anchors_mod
@@ -218,11 +219,20 @@ class DetectionEngine:
     # ------------------------------------------------------------------ setup
 
     def set_monitor(self, monitor, *, profile=None):
-        custom = None
-        if profile is not None:
-            custom = load_custom_regions((monitor.width, monitor.height), profile=profile)
-            if custom is None:
-                raise ValueError(f'Profile "{profile}" has no seven-seat layout at {monitor.width}x{monitor.height}.')
+        resolution = (monitor.width, monitor.height)
+        selected_profile = profile or region_profiles.active_name()
+        custom = load_custom_regions(resolution, profile=selected_profile)
+        if custom is None:
+            if profile is not None or selected_profile != region_profiles.DEFAULT_NAME:
+                raise ValueError(f'Profile "{selected_profile}" has no seven-seat layout at '
+                                 f'{monitor.width}x{monitor.height}. Select or calibrate one first.')
+            self.log(f'Using scaled default regions at {monitor.width}x{monitor.height}; '
+                     'no exact calibration is saved.', level="WARNING")
+        elif (profile is None and
+              ((region_profiles.get_regions(resolution, profile=selected_profile) or {})
+               .get("reference_source") or {}).get("kind") == "video_frame"):
+            raise ValueError(f'Profile "{selected_profile}" was calibrated on a video, '
+                             'not this live capture source.')
         with self._lock:
             self.capture.set_monitor(monitor)
             if self._unread_positions:
