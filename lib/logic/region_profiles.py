@@ -32,7 +32,8 @@ import threading
 from datetime import datetime
 
 from ..common import constants
-from .card_layout import SEVEN_SEATS, SINGLE_SEAT, TABLE, CardLayout
+from .app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODES, normalize_mode
+from .card_layout import SEVEN_SEATS, CardLayout
 
 DEFAULT_NAME = "Default"
 
@@ -163,9 +164,8 @@ def list_profiles():
     """[{'name', 'saved'}] — Default first, the rest alphabetical."""
     data = _load()
     items = [{"name": name, "saved": prof.get("saved"),
-              "card_resolutions": sorted({key for key, modes in prof.get("layouts", {}).items()
-                                           if isinstance(modes, dict) and any(
-                                               mode in modes for mode in (TABLE, SINGLE_SEAT))}),
+              "card_resolutions": sorted(key for key, modes in prof.get("layouts", {}).items()
+                                         if _valid_card_resolution(key, modes)),
               "ocr_resolutions": sorted(key for key, value in prof.get("ocr", {}).items() if value)}
              for name, prof in data["profiles"].items()]
     items.sort(key=lambda p: (p["name"] != DEFAULT_NAME, p["name"].lower()))
@@ -310,16 +310,21 @@ def delete_regions(resolution):
 
 
 def layout_mode(resolution, profile=None):
-    """Saved selection for this exact resolution; old profiles remain seven-seat."""
+    """UI selection only; the default does not imply a usable calibration."""
     saved = _layout_modes(resolution, profile)
-    mode = saved.get("selected_mode", SEVEN_SEATS)
-    if mode not in (SEVEN_SEATS, TABLE, SINGLE_SEAT):
-        raise ValueError("El modo guardado del perfil no es válido.")
-    return mode
+    mode = saved.get("selected_mode", INDIVIDUAL)
+    return INDIVIDUAL if mode == SEVEN_SEATS else normalize_mode(mode)
 
 
 def _layout_modes(resolution, profile):
-    saved = _get("layouts", resolution, profile=profile)
+    return _stored_layout_modes(_load(), resolution, profile)
+
+
+def _stored_layout_modes(data, resolution, profile):
+    if data.get("_locked"):
+        raise OSError("Region-profile store unreadable; layout access blocked.")
+    prof = data["profiles"].get(profile) if profile else data["profiles"][data["active"]]
+    saved = prof["layouts"].get(_res_key(resolution)) if prof else None
     if saved is None:
         return {}
     if not isinstance(saved, dict):
@@ -329,13 +334,46 @@ def _layout_modes(resolution, profile):
 
 def get_card_layout(resolution, mode, profile=None):
     """Validated new-mode layout, or None. No defaults, scaling or mode fallback."""
-    if mode not in (TABLE, SINGLE_SEAT):
-        raise ValueError("Elegí un modo de mesa o de un asiento.")
+    mode = normalize_mode(mode)
     saved = _layout_modes(resolution, profile)
-    payload = saved.get(mode)
-    if payload is None:
+    return _card_layout_from_modes(saved, resolution, mode)
+
+
+def _card_layout_from_modes(saved, resolution, mode):
+    legacy = "single_seat" if mode == INDIVIDUAL else "table"
+    key = mode if mode in saved else legacy
+    if key not in saved:
         return None
-    return CardLayout.from_payload(payload, resolution)
+    layout = CardLayout.from_payload(saved[key], resolution)
+    if layout.mode != mode:
+        raise ValueError("El modo del layout no coincide con su clave guardada.")
+    return layout
+
+
+def has_card_layout(resolution, mode, profile=None) -> bool:
+    """False for missing/corrupt geometry; explicit loads raise. I/O errors propagate."""
+    try:
+        return get_card_layout(resolution, mode, profile=profile) is not None
+    except ValueError:
+        return False
+
+
+def _valid_card_resolution(key, modes):
+    if not isinstance(modes, dict):
+        return False
+    try:
+        resolution = tuple(int(v) for v in key.split("x"))
+        if len(resolution) != 2 or _res_key(resolution) != key:
+            return False
+    except (ValueError, TypeError, AttributeError):
+        return False
+    for mode in APP_MODES:
+        try:
+            if _card_layout_from_modes(modes, resolution, mode) is not None:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def set_card_layout(layout, profile=None, source_context=None):
@@ -345,9 +383,17 @@ def set_card_layout(layout, profile=None, source_context=None):
     # Revalidate at the write boundary, including objects built without from_payload.
     checked = CardLayout.from_payload(payload, layout.resolution)
     with _LOCK:
-        saved = dict(_layout_modes(checked.resolution, profile))
+        data = _load()
+        name = (profile or data["active"]).strip() or data["active"]
+        saved = dict(_stored_layout_modes(data, checked.resolution, name))
         saved[checked.mode] = checked.to_payload()
-        _set("layouts", checked.resolution, saved, profile, layout_mode=checked.mode)
+        saved.pop("single_seat" if checked.mode == INDIVIDUAL else "table", None)
+        saved["selected_mode"] = checked.mode
+        prof = data["profiles"].setdefault(name, _new_profile())
+        prof["layouts"][_res_key(checked.resolution)] = saved
+        prof["saved"] = datetime.now().isoformat(timespec="seconds")
+        data["active"] = name
+        _write(data)
 
 
 def get_ocr(resolution):

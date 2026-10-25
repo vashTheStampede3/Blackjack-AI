@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 
 from ..common import constants
+from .app_modes import INDIVIDUAL, MULTIPLAYER
 from ..common.card_mappings import PLAYER_CLASS_MAP, DEALER_CLASS_MAP, CUTTING_CARD_CLASS
 from . import betting
 from . import cards
@@ -529,7 +530,12 @@ class DetectionEngine:
         current_seats = {}
         watched = list(self.regions or [])
         if self.card_layout is not None:
-            watched.append(Polygon(self.card_layout.table))
+            if self.card_layout.mode == INDIVIDUAL:
+                watched.append(Polygon(self.card_layout.mine))
+            elif self.card_layout.mode == MULTIPLAYER:
+                watched.append(Polygon(self.card_layout.table))
+            else:
+                raise ValueError(f"Modo desconocido: {self.card_layout.mode}")
         for i, region in enumerate(watched):
             l, t, r, b = [int(v) for v in region.bounds]
             crop = frame[max(0,t):min(frame.shape[0],b), max(0,l):min(frame.shape[1],r)]

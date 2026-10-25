@@ -10,9 +10,12 @@ from PIL import Image
 
 from ..common import constants
 from ..common.card_mappings import PLAYER_CLASS_MAP
+from .app_modes import zones_for_mode
 from .models import model_metadata
 from .monitor_utils import dealer_area_rect, scaled_player_regions
 from .table_inference import predict_layout, predict_table
+
+ZONE_COLORS = {"table": (255, 120, 0), "mine": (0, 180, 255), "dealer": (0, 0, 220)}
 
 
 def build_region_preview(engine, source=None, *, live_running=False) -> Image.Image:
@@ -66,7 +69,7 @@ def build_region_preview(engine, source=None, *, live_running=False) -> Image.Im
         patches = bounds.get("patches", [])
         for patch in patches:
             l, t, r, b = patch["native"]
-            color = (0, 220, 220) if patch.get("role") == "table" else (0, 0, 220)
+            color = ZONE_COLORS.get(patch.get("role"), (0, 220, 220))
             cv2.rectangle(img, (l, t), (r-1, b-1), color, 2)
             cv2.putText(img, f"{patch.get('role', 'input')} PATCH",
                         (l+5, max(t+16, 16)), cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1)
@@ -113,13 +116,13 @@ def build_region_preview(engine, source=None, *, live_running=False) -> Image.Im
 
     # Seat polygons (blue) with seat numbers.
     if card_layout is not None:
-        for role, polygon, color in (("TABLE", card_layout.table, (255, 120, 0)),
-                                     ("MINE", card_layout.mine, (0, 180, 255)),
-                                     ("DEALER", card_layout.dealer, (0, 0, 220))):
+        for role in zones_for_mode(card_layout.mode):
+            polygon = getattr(card_layout, role)
+            color = ZONE_COLORS[role]
             pts = np.asarray(polygon, dtype=np.int32).reshape((-1, 1, 2))
             cv2.polylines(img, [pts], isClosed=True, color=color, thickness=2)
             x, y = polygon[0]
-            cv2.putText(img, role, (int(x)+3, max(14, int(y)+16)),
+            cv2.putText(img, role.upper(), (int(x)+3, max(14, int(y)+16)),
                         cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1)
     elif regions:
         for i, region in enumerate(regions):

@@ -1,10 +1,11 @@
 """Edit regions over a frozen capture or video frame, in native coordinates.
 
-The seven-seat mode keeps its existing profile format. The two table modes
-save separate Mesa / Mi asiento / Crupier polygons and validate them before
+The official modes edit only their required polygons and validate before
 writing. Calibration never constructs a detector or counts cards.
 """
 
+import math
+from numbers import Real
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -12,20 +13,41 @@ import cv2
 from PIL import Image, ImageTk
 
 from ..common import constants
-from ..logic import monitor_utils, region_profiles
-from ..logic.card_layout import (SEVEN_SEATS, MODE_LABELS, ZONE_COLORS,
-                                 ZONE_LABELS, CardLayout)
+from ..logic import region_profiles
+from ..logic.app_modes import (INDIVIDUAL, MULTIPLAYER, APP_MODE_LABELS,
+                               normalize_mode, zones_for_mode)
+from ..logic.card_layout import CardLayout, ZONE_COLORS
 
 C = constants.COLORS
 HANDLE = 5  # handle radius in canvas px
 
+EDITOR_ZONE_LABELS = {"table": "Mesa general", "mine": "Mi mano", "dealer": "Crupier"}
+
+
+def build_layout_payload(mode, resolution, zone_keys, zones, scale, reference_source=None):
+    """Convert canvas coordinates once, then delegate geometry to CardLayout."""
+    mode = normalize_mode(mode)
+    required = zones_for_mode(mode)
+    if tuple(zone_keys) != required or len(zones) != len(required):
+        raise ValueError("Las zonas no coinciden con el modo seleccionado.")
+    if isinstance(scale, bool) or not isinstance(scale, Real) or not math.isfinite(scale) or scale <= 0:
+        raise ValueError("La escala debe ser numérica, finita y mayor que cero.")
+    try:
+        payload = {"mode": mode, "resolution": list(resolution)}
+        for key, points in zip(required, zones):
+            payload[key] = [[round(x / scale, 1), round(y / scale, 1)] for x, y in points]
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Coordenadas o resolución inválidas.") from None
+    if reference_source is not None:
+        payload["reference_source"] = reference_source
+    return CardLayout.from_payload(payload, resolution).to_payload()
+
 
 class RegionEditor(tk.Toplevel):
-    def __init__(self, parent, capture, on_save=None, profile=None, mode=SEVEN_SEATS):
-        if mode not in MODE_LABELS:
-            raise ValueError("Modo de zonas desconocido.")
-        layout = (region_profiles.get_card_layout(capture.resolution, mode, profile=profile)
-                  if mode != SEVEN_SEATS else None)
+    def __init__(self, parent, capture, on_save=None, profile=None, mode=INDIVIDUAL):
+        self.mode = normalize_mode(mode)
+        self.zone_keys = zones_for_mode(self.mode)
+        layout = region_profiles.get_card_layout(capture.resolution, self.mode, profile=profile)
         frame_bgr = capture.grab_bgr()
         audit = getattr(parent, "ui_actions", None)
         if audit:
@@ -39,13 +61,12 @@ class RegionEditor(tk.Toplevel):
         self._editor_parent = parent
         self._shown_logged = False
         self.bind("<Map>", self._on_editor_mapped, add="+")
-        self.title(f"Editar zonas — {MODE_LABELS[mode]}")
+        self.title(f"Editar regiones — {APP_MODE_LABELS[self.mode]}")
         self.configure(bg=C["bg_primary"])
         self.on_save = on_save
         self.capture = capture
         self.resolution = capture.resolution
         self._frame_bgr = frame_bgr
-        self.mode = mode
 
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         # Fit the screenshot into a workable window, remember the scale to
@@ -61,65 +82,46 @@ class RegionEditor(tk.Toplevel):
         self.canvas.pack(padx=10, pady=(10, 6))
         self.canvas.create_image(0, 0, image=self._photo, anchor="nw")
 
-        self.polys = []
-        self.dealer = []
-        self.zones = [[] for _ in ZONE_LABELS]
-        if mode == SEVEN_SEATS:
-            custom = monitor_utils.load_custom_regions(self.resolution, profile=profile)
-            players = custom["players"] if custom else monitor_utils.default_player_regions(self.resolution)
-            dealer = custom["dealer"] if custom else monitor_utils.default_dealer_rect(self.resolution)
-            # Drop the duplicated closing vertex for editing; re-added on save.
-            for poly in players:
-                pts = [list(p) for p in poly]
-                if len(pts) > 1 and pts[0] == pts[-1]:
-                    pts = pts[:-1]
-                self.polys.append([[x * self.scale, y * self.scale] for x, y in pts])
-            left, top, right, bottom = dealer
-            self.dealer = [[left * self.scale, top * self.scale],
-                           [right * self.scale, bottom * self.scale]]
-        elif layout is not None:
+        self.zones = [[] for _ in self.zone_keys]
+        if layout is not None:
             self.zones = [[[x * self.scale, y * self.scale] for x, y in getattr(layout, key)]
-                          for key in ZONE_LABELS]
+                          for key in self.zone_keys]
 
-        self._drag = None  # ("poly", i, j) or ("dealer", i)
+        self._drag = None  # ("zone", zone index, vertex index)
         self._draw_start = None
-        self.draw_mode = tk.BooleanVar(value=mode != SEVEN_SEATS and layout is None)
+        self.draw_mode = tk.BooleanVar(value=layout is None)
         controls = tk.Frame(self, bg=C["bg_primary"])
         controls.pack(fill=tk.X, padx=10, pady=3)
         tk.Label(controls, text="Zona:", bg=C["bg_primary"]).pack(side=tk.LEFT)
-        zone_names = ([f"P{i + 1}" for i in range(constants.NUM_SEATS)] + ["Crupier"]
-                      if mode == SEVEN_SEATS else list(ZONE_LABELS.values()))
+        zone_names = [EDITOR_ZONE_LABELS[key] for key in self.zone_keys]
         self.zone_combo = ttk.Combobox(controls, state="readonly", width=13, values=zone_names)
         self.zone_combo.current(0)
         self.zone_combo.pack(side=tk.LEFT, padx=6)
         tk.Checkbutton(controls, text="Dibujar rectángulo (arrastrar sobre la mesa)",
             variable=self.draw_mode, bg=C["bg_primary"]).pack(side=tk.LEFT)
         w, h = self.resolution
-        hint = ("P1 izquierda / P7 derecha. Desmarcá Dibujar para ajustar vértices."
-                if mode == SEVEN_SEATS else
-                "Mi asiento va dentro de Mesa. Crupier puede ir fuera, sobre el gráfico del casino. "
-                "Si usás el gráfico, dejá las cartas físicas del crupier fuera de Mesa. "
-                "Desmarcá Dibujar para mover puntos. "
-                "Clic derecho en un borde agrega un punto; en un punto lo quita.")
+        hint = ("Dibujá dos regiones: una que contenga tus cartas y otra que contenga las cartas "
+                "del crupier. No deben superponerse." if self.mode == INDIVIDUAL else
+                "Dibujá la mesa general, tu región y la del crupier. Tu región debe estar dentro "
+                "de la mesa general. Las demás manos se identificarán automáticamente.")
+        hint += (" Arrastrá para crear un rectángulo. Desmarcá Dibujar para mover vértices. "
+                 "Clic derecho en un borde agrega un punto; en un punto lo quita.")
         tk.Label(self, text=f"{getattr(capture, 'name', 'Captura')} · {w}×{h} · {hint}",
             wraplength=max_w,
             bg=C["bg_primary"], fg=C["text_secondary"]).pack(fill=tk.X, padx=10)
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._move)
         self.canvas.bind("<ButtonRelease-1>", self._release)
-        if mode != SEVEN_SEATS:
-            self.canvas.bind("<Button-3>", self._edit_vertex)
+        self.canvas.bind("<Button-3>", self._edit_vertex)
 
         bar = tk.Frame(self, bg=C["bg_primary"])
         bar.pack(fill=tk.X, padx=10, pady=(0, 10))
-        legend = ("Naranja: asientos · Rojo: crupier" if mode == SEVEN_SEATS else
-                  "Verde: Mesa · Naranja: Mi asiento · Rojo: Crupier")
+        legend = ("Naranja: Mi mano · Rojo: Crupier" if self.mode == INDIVIDUAL else
+                  "Verde: Mesa general · Naranja: Mi mano · Rojo: Crupier")
         tk.Label(bar, text=legend,
                  bg=C["bg_primary"], fg=C["text_secondary"],
                  font=constants.FONT_SMALL).pack(side=tk.LEFT)
         actions = [("Guardar", self._save, C["success"])]
-        if profile is None and mode == SEVEN_SEATS:
-            actions.append(("Reset to defaults", self._reset, C["warning"]))
         actions.append(("Cancelar", self.destroy, C["text_secondary"]))
         for text, cmd, bg in actions:
             tk.Button(bar, text=text, command=cmd, bg=bg,
@@ -169,13 +171,8 @@ class RegionEditor(tk.Toplevel):
     # ------------------------------------------------------------- drawing
 
     def _shapes(self):
-        if self.mode != SEVEN_SEATS:
-            for i, (key, label) in enumerate(ZONE_LABELS.items()):
-                yield "zone", i, self.zones[i], label, ZONE_COLORS[key]
-        else:
-            for i, pts in enumerate(self.polys):
-                yield "poly", i, pts, f"P{i + 1}", "#ff9f1a"
-            yield "dealer", 0, self.dealer, "Crupier", "#ff4d4d"
+        for index, key in enumerate(self.zone_keys):
+            yield "zone", index, self.zones[index], EDITOR_ZONE_LABELS[key], ZONE_COLORS[key]
 
     def _redraw(self):
         self.canvas.delete("overlay")
@@ -183,10 +180,7 @@ class RegionEditor(tk.Toplevel):
             if not pts:
                 continue
             flat = [c for p in pts for c in p]
-            if kind == "dealer":
-                self.canvas.create_rectangle(*flat, outline=color, width=2, tags="overlay")
-            else:
-                self.canvas.create_polygon(*flat, outline=color, fill="", width=2, tags="overlay")
+            self.canvas.create_polygon(*flat, outline=color, fill="", width=2, tags="overlay")
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
             self.canvas.create_text(cx, cy, text=label, fill=color,
@@ -223,31 +217,26 @@ class RegionEditor(tk.Toplevel):
             if right - left < 2 or bottom - top < 2:
                 return
             zone = self.zone_combo.current()
-            if self.mode != SEVEN_SEATS:
-                self.zones[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
-            elif zone == constants.NUM_SEATS:
-                self.dealer = [[left, top], [right, bottom]]
-            else:
-                self.polys[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
+            if not 0 <= zone < len(self.zone_keys):
+                return
+            self.zones[zone] = [[left, top], [right, top], [right, bottom], [left, bottom]]
             self._redraw()
             return
         if self._drag is None:
             return
         x, y = self._point(event)
         kind, i, j = self._drag
-        if kind == "zone":
-            self.zones[i][j] = [x, y]
-        elif kind == "poly":
-            self.polys[i][j] = [x, y]
-        else:
-            self.dealer[j] = [x, y]
+        if kind != "zone" or not 0 <= i < len(self.zone_keys) or not 0 <= j < len(self.zones[i]):
+            return
+        self.zones[i][j] = [x, y]
         self._redraw()
 
     def _edit_vertex(self, event):
         """Add/remove vertices of the selected new-mode polygon, without a new editor."""
-        if self.mode == SEVEN_SEATS:
+        zone = self.zone_combo.current()
+        if not 0 <= zone < len(self.zone_keys):
             return
-        pts = self.zones[self.zone_combo.current()]
+        pts = self.zones[zone]
         if not pts:
             return
         x, y = self._point(event)
@@ -284,48 +273,16 @@ class RegionEditor(tk.Toplevel):
     # --------------------------------------------------------------- save
 
     def _save(self):
-        if self.mode != SEVEN_SEATS:
-            self._save_card_layout()
-            return
-        players = []
-        for pts in self.polys:
-            native = [[round(x / self.scale, 1), round(y / self.scale, 1)]
-                      for x, y in pts]
-            native.append(list(native[0]))  # close the polygon (base format)
-            players.append(native)
-        (x1, y1), (x2, y2) = self.dealer
-        dealer = [int(min(x1, x2) / self.scale), int(min(y1, y2) / self.scale),
-                  int(max(x1, x2) / self.scale), int(max(y1, y2) / self.scale)]
-        options = {"profile": self.profile_var.get()}
-        context = getattr(self.capture, "calibration_context", None)
-        if context is not None:
-            options["source_context"] = context
-        try:
-            monitor_utils.save_custom_regions(self.resolution, players, dealer, **options)
-            saved = region_profiles.get_regions(self.resolution, profile=self.profile_var.get().strip())
-            if (not saved or saved.get("players") != players or saved.get("dealer") != dealer
-                    or (context is not None and saved.get("reference_source") != context)):
-                raise ValueError("No se pudo comprobar el guardado. Las zonas siguen abiertas para reintentar.")
-        except (OSError, ValueError) as exc:
-            self._log_save_error(exc)
-            messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
-            return
-        self._log_saved()
-        if self.on_save:
-            self.on_save()
-        self.destroy()
+        self._save_card_layout()
 
     def _save_card_layout(self):
         try:
             profile = self.profile_var.get().strip()
             if not profile:
                 raise ValueError("Escribí un nombre de perfil.")
-            payload = {"mode": self.mode, "resolution": list(self.resolution)}
-            for key, pts in zip(ZONE_LABELS, self.zones):
-                payload[key] = [[round(x / self.scale, 1), round(y / self.scale, 1)] for x, y in pts]
             context = getattr(self.capture, "calibration_context", None)
-            if context is not None:
-                payload["reference_source"] = context
+            payload = build_layout_payload(self.mode, self.resolution, self.zone_keys,
+                                           self.zones, self.scale, context)
             layout = CardLayout.from_payload(payload, self.resolution)
             region_profiles.set_card_layout(layout, profile=profile)
             saved = region_profiles.get_card_layout(self.resolution, self.mode, profile=profile)
@@ -353,17 +310,3 @@ class RegionEditor(tk.Toplevel):
             audit.record("PROFILE_SAVED", "CONFIRMADO · regiones guardadas y verificadas al releer el perfil.",
                          details={"profile": self.profile_var.get().strip(),
                                   "resolution": self.resolution, "mode": self.mode})
-
-    def _reset(self):
-        # Reset targets the ACTIVE profile (the typed save-as name is a save
-        # target only) — name it and confirm before destroying a calibration.
-        active = region_profiles.active_name()
-        if not messagebox.askyesno(
-                "Reset to defaults",
-                f"Remove the calibrated layout of profile \"{active}\" for "
-                "this resolution and use the shipped defaults?", parent=self):
-            return
-        monitor_utils.delete_custom_regions(self.resolution)
-        if self.on_save:
-            self.on_save(False)
-        self.destroy()

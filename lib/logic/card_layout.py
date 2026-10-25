@@ -3,6 +3,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 import math
 
+from .app_modes import INDIVIDUAL, MULTIPLAYER, normalize_mode, zones_for_mode
+
+# Transitional compatibility for existing consumers; not current layout modes.
 SEVEN_SEATS = "seven_seats"
 TABLE = "table"
 SINGLE_SEAT = "single_seat"
@@ -107,44 +110,54 @@ def _overlaps(first, second):
 class CardLayout:
     mode: str
     resolution: tuple
-    table: tuple
+    table: tuple | None
     mine: tuple
     dealer: tuple
     reference_source: dict | None = None
 
     @classmethod
     def from_payload(cls, data, resolution):
-        if not isinstance(data, dict) or data.get("mode") not in (TABLE, SINGLE_SEAT):
+        if not isinstance(data, dict):
             raise ValueError("El modo de zonas no es válido.")
-        if (len(resolution) != 2 or any(not isinstance(v, int) or v <= 1 for v in resolution)
+        raw_mode = data.get("mode")
+        mode = normalize_mode(raw_mode)
+        if (not isinstance(resolution, (tuple, list)) or len(resolution) != 2
+                or any(type(v) is not int or v <= 1 for v in resolution)
                 or data.get("resolution") != list(resolution)):
             raise ValueError("La resolución del perfil no coincide; no se adapta automáticamente.")
-        zones = {key: _polygon(data.get(key, []), label, resolution) for key, label in ZONE_LABELS.items()}
-        if not _inside(zones["mine"], zones["table"]):
+        if raw_mode == INDIVIDUAL and "table" in data:
+            raise ValueError("El modo individual no admite una región table.")
+        labels = {"table": "Mesa", "mine": "Mi asiento", "dealer": "Crupier"}
+        zones = {key: _polygon(data.get(key, []), labels[key], resolution)
+                 for key in zones_for_mode(mode)}
+        if mode == MULTIPLAYER and not _inside(zones["mine"], zones["table"]):
             raise ValueError("Mi asiento debe quedar completamente dentro de Mesa.")
         # The dealer's selected representation may be a separate casino card HUD.
         # Keep that region independent; never stretch Mesa across the intervening UI.
         if _overlaps(zones["mine"], zones["dealer"]):
             raise ValueError("Mi asiento y Crupier no pueden tocarse ni superponerse.")
-        return cls(data["mode"], tuple(resolution), **zones,
+        return cls(mode, tuple(resolution), table=zones.get("table"),
+                   mine=zones["mine"], dealer=zones["dealer"],
                    reference_source=deepcopy(data.get("reference_source")))
 
     def to_payload(self):
         data = {"mode": self.mode, "resolution": list(self.resolution),
-                **{key: [list(p) for p in getattr(self, key)] for key in ZONE_LABELS}}
+                **{key: [list(p) for p in getattr(self, key)]
+                   for key in zones_for_mode(self.mode)}}
         if self.reference_source is not None:
             data["reference_source"] = deepcopy(self.reference_source)
         return data
 
     def owner_at(self, x, y):
         """Tag a detection already expressed in native frame pixels; never count."""
-        if _contains(self.dealer, (x, y)):
+        point = (x, y)
+        if _contains(self.dealer, point):
             return "dealer"
-        if not _contains(self.table, (x, y)):
-            return None
-        if _contains(self.mine, (x, y)):
+        if _contains(self.mine, point):
             return "mine"
-        return "other"
+        if self.mode == MULTIPLAYER and _contains(self.table, point):
+            return "other"
+        return None
 
 
 @dataclass

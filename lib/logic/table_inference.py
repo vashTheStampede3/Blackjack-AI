@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from ..common import constants
+from .app_modes import INDIVIDUAL, MULTIPLAYER
 from .models import model_input_geometry
 
 
@@ -69,17 +70,31 @@ def predict_table(model, frame, regions, dealer, confidence, overlap):
     return restored, bounds
 
 
+def inference_regions(layout):
+    """Select the two model patches for an official calibration mode."""
+    if layout.mode == INDIVIDUAL:
+        regions = (("mine", layout.mine), ("dealer", layout.dealer))
+    elif layout.mode == MULTIPLAYER:
+        regions = (("table", layout.table), ("dealer", layout.dealer))
+    else:
+        raise ValueError(f"Modo desconocido: {layout.mode}")
+    for role, polygon in regions:
+        if polygon is None:
+            raise ValueError(f"Falta la región {role} para el modo {layout.mode}")
+    return regions
+
+
 def prepare_layout_image(frame, layout):
     """Pack selected regions without resizing or including the UI between them.
 
-    Mesa and the dealer source occupy separate masked patches. If dealer lies
+    The players' region and dealer occupy separate masked patches. If dealer lies
     in Mesa, those pixels are excluded from the table patch to avoid duplication.
     All returned coordinates can be mapped back to native frame pixels once.
     """
     if (frame.shape[1], frame.shape[0]) != layout.resolution:
         raise ValueError("Frame and layout resolutions differ; no automatic stretching")
     pieces = []
-    for role, polygon in (("table", layout.table), ("dealer", layout.dealer)):
+    for role, polygon in inference_regions(layout):
         left = max(0, math.floor(min(p[0] for p in polygon)))
         top = max(0, math.floor(min(p[1] for p in polygon)))
         right = min(frame.shape[1], math.ceil(max(p[0] for p in polygon)))
@@ -126,7 +141,8 @@ def predict_layout(model, frame, layout, confidence, overlap):
             left, top, _, _ = patch["native"]
             cx, cy = p["cx"]-x+left, p["cy"]-y+top
             owner = layout.owner_at(cx, cy)
-            if ((patch["role"] == "dealer" and owner == "dealer")
+            if ((patch["role"] == "mine" and owner == "mine")
+                    or (patch["role"] == "dealer" and owner == "dealer")
                     or (patch["role"] == "table" and owner in ("mine", "other"))):
                 restored.append(p | _box_scale(p, input_size, geometry) |
                                 {"cx": cx, "cy": cy, "owner": owner})
