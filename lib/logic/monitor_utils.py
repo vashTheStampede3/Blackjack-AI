@@ -116,12 +116,12 @@ def scaling_factors(current_resolution):
 
 # ----------------------------------------------- calibrated region profiles
 
-def load_custom_regions(resolution):
+def load_custom_regions(resolution, profile=None):
     """{"players": [[[x,y],...], ...], "dealer": [l,t,r,b]} or None — the
     ACTIVE table profile's calibration. Coordinates are native to
     `resolution` (no scaling applied)."""
     try:
-        data = region_profiles.get_regions(resolution)
+        data = region_profiles.get_regions(resolution, profile=profile)
         if data is None:
             return None
         players = data["players"]
@@ -135,12 +135,13 @@ def load_custom_regions(resolution):
         return None
 
 
-def save_custom_regions(resolution, players, dealer, profile=None):
+def save_custom_regions(resolution, players, dealer, profile=None, source_context=None):
     """Save into the named table profile (the active one when None);
     saving stamps the profile's date and makes it active."""
-    region_profiles.set_regions(
-        resolution, {"players": players, "dealer": list(dealer)},
-        profile=profile)
+    payload = {"players": players, "dealer": list(dealer)}
+    if source_context is not None:
+        payload["reference_source"] = source_context
+    region_profiles.set_regions(resolution, payload, profile=profile)
 
 
 def delete_custom_regions(resolution):

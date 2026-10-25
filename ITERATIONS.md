@@ -176,3 +176,7 @@ input infrastructure. Handle windows closing during enumeration.
 Verification limited to enumeration, no interface tests/clicks/screenshots:
 VirtualBox.exe, VirtualBoxVM.exe (Vcore9.2), Obsidian.exe, zen.exe all present;
 VirtualBox Manager correctly marked minimized. Keep this targeted change.
+
+## Local video calibration ? frame reader
+
+Added a local-only frame reader with two decoder threads, native-size frozen frames, and named profile source references. No recognition, model settings, casino capture or remote calls. Verified 28 selected reader/profile checks using generated video and temporary profile stores. This is a calibration utility change, not a recognition accuracy result.

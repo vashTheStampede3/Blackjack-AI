@@ -217,8 +217,8 @@ def _delete(kind, resolution):
             _write(data)
 
 
-def get_regions(resolution):
-    return _get("regions", resolution)
+def get_regions(resolution, profile=None):
+    return _get("regions", resolution, profile=profile)
 
 
 def set_regions(resolution, payload, profile=None):
