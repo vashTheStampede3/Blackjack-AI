@@ -54,6 +54,10 @@ _ACTION_NAMES = {"S": "Stand", "H": "Hit", "D": "Double", "P": "Split", "R": "Su
 _ACTION_COLOR_KEYS = {"S": "S", "H": "H", "D": "D/H", "P": "P", "R": "R/H"}
 
 
+class _FrameSourceMismatch(RuntimeError):
+    pass
+
+
 def _level_aware(log_fn):
     """Engine logs pass level="WARNING" for entries that must stand out.
     LogManager.add_log accepts that kwarg, but the GUI injects plain print
@@ -85,6 +89,10 @@ class DetectionEngine:
         self._card_evidence = CardEvidence()
         self._unread_positions = {}
         self.provider = provider if provider is not None else ModelProvider.get()
+        self._model_metadata_cache = {"players": None, "dealer": None}
+        self._metadata_model_refs = {}
+        self._model_metadata_lock = threading.Lock()
+        self._source_mismatch = None
         self.strategy = StrategyAdvisor()
         self.counter = CardCounter()
         try:
@@ -94,6 +102,8 @@ class DetectionEngine:
             self.log(f"Session store unavailable: {e}")
 
         self._lock = threading.RLock()
+        self._preview_cache_lock = threading.Lock()
+        self._preview_detection_cache = None
         self.seats = [Seat(i) for i in range(constants.NUM_SEATS)]
         self.dealer_card = None          # rank string, e.g. "King" or "10"
         self.dealer_locked = False
@@ -229,8 +239,9 @@ class DetectionEngine:
         if selected_mode != SEVEN_SEATS and selected_layout is None:
             raise ValueError(f'Profile "{selected_profile}" has no saved card zones at '
                              f'{monitor.width}x{monitor.height}. Calibrate this mode first.')
-        custom = load_custom_regions(resolution, profile=selected_profile)
-        if custom is None:
+        custom = (load_custom_regions(resolution, profile=selected_profile)
+                  if selected_mode == SEVEN_SEATS else None)
+        if selected_mode == SEVEN_SEATS and custom is None:
             if profile is not None or selected_profile != region_profiles.DEFAULT_NAME:
                 raise ValueError(f'Profile "{selected_profile}" has no seven-seat layout at '
                                  f'{monitor.width}x{monitor.height}. Select or calibrate one first.')
@@ -243,6 +254,8 @@ class DetectionEngine:
                              'not this live capture source.')
         with self._lock:
             self.capture.set_monitor(monitor)
+            self._active_profile = selected_profile
+            self._active_mode = selected_mode
             if self._unread_positions:
                 self._round_observation.count_uncertain = True
             self._unread_positions.clear()
@@ -330,6 +343,25 @@ class DetectionEngine:
         # job doesn't pay the process start-up mid-round.
         ev_offload.prewarm("advice", "predeal")
 
+    def _cache_loaded_model_metadata(self, kind, model):
+        """Cache safe identity facts once per loaded model object; never load it."""
+        with self._model_metadata_lock:
+            if self._metadata_model_refs.get(kind) is model:
+                return
+            getter = getattr(self.provider, "loaded_model_metadata", None)
+            if not callable(getter):
+                info = {}
+            else:
+                try:
+                    raw = getter(kind) or {}
+                    info = {key: raw.get(key) for key in
+                            ("artifact", "version", "quantization", "input_size",
+                             "input_size_known")}
+                except Exception:
+                    info = {}
+            self._metadata_model_refs[kind] = model
+            self._model_metadata_cache[kind] = info
+
     def health_check_and_refresh(self) -> bool:
         """Refresh model backends after a long idle gap (system sleep/restore).
 
@@ -379,7 +411,22 @@ class DetectionEngine:
         skipped = False
         try:
             frame = self.capture.grab_bgr()
+            recovering_source = bool(self._source_mismatch)
             self._round_observation.captured_at = time.time()
+            frame_resolution = (frame.shape[1], frame.shape[0])
+            expected_resolution = self.capture.resolution
+            if tuple(frame_resolution) != tuple(expected_resolution):
+                raise _FrameSourceMismatch(
+                    f"Capture resolution changed: expected {expected_resolution[0]}x"
+                    f"{expected_resolution[1]}, received {frame_resolution[0]}x"
+                    f"{frame_resolution[1]}. Re-select or recalibrate this source.")
+            if (self.card_layout is not None
+                    and tuple(self.card_layout.resolution) != tuple(frame_resolution)):
+                raise _FrameSourceMismatch(
+                    "Frame and selected table layout resolutions differ; no automatic scaling.")
+            if recovering_source:
+                self.last_error = None
+            self._source_mismatch = None
             # OCR runs regardless of the frame diff: a balance/bet text
             # change in a small corner never trips the whole-frame
             # threshold, so a static table would defer reads ~10 s.
@@ -395,6 +442,8 @@ class DetectionEngine:
             # each draw still accumulates its confirmation sightings even
             # while the dealer's hand sits static between cards.
             unchanged = self._frame_unchanged(frame)
+            if recovering_source:
+                unchanged = False
             with self._lock:
                 force_detect = self._dealer_drawing() or self._has_pending_detection()
             if unchanged and not force_detect:
@@ -422,6 +471,14 @@ class DetectionEngine:
                     # skip counter run away toward MAX_SKIPPED_CYCLES.
                     self._skipped_cycles = 0
                 self._detect(frame)
+        except _FrameSourceMismatch as e:
+            self._source_mismatch = str(e)
+            self.last_error = str(e)
+            with self._lock:
+                self._round_observation.inferred_at = 0.0
+                self._round_observation.dealer_ok = False
+                self._round_observation.seats = {}
+            self.log(f"Error: {e}")
         except ModelError as e:
             self.last_error = str(e)
             self.log(f"Error: {e}")
@@ -501,19 +558,30 @@ class DetectionEngine:
 
     def _detect(self, frame):
         t0 = time.perf_counter()
+        detect_context = (self.capture.resolution,
+                          getattr(self, "_active_profile", None),
+                          getattr(self, "_active_mode", None), self.card_layout)
         if self.card_layout is None:
+            player_model = self.provider.players_model()
+            self._cache_loaded_model_metadata("players", player_model)
             players_future = self._pool.submit(
-                predict_table, self.provider.players_model(), frame, self.regions, self._dealer_rect,
+                predict_table, player_model, frame, self.regions, self._dealer_rect,
                 constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
         else:
+            player_model = self.provider.players_model()
+            self._cache_loaded_model_metadata("players", player_model)
             players_future = self._pool.submit(
-                predict_layout, self.provider.players_model(), frame, self.card_layout,
+                predict_layout, player_model, frame, self.card_layout,
                 constants.PREDICTION_CONFIDENCE_PLAYERS, constants.PREDICTION_OVERLAP_PLAYERS)
 
         self._last_frame = frame  # retained for training-data crops
         left, top, right, bottom = self._dealer_rect
 
         player_preds, input_bounds = players_future.result()
+        raw_player_preds = [dict(p) for p in player_preds]
+        input_size = (list(input_bounds.get("size", ())) if isinstance(input_bounds, dict)
+                      else [input_bounds[2]-input_bounds[0],
+                            input_bounds[3]-input_bounds[1]])
         self._metrics["input_bounds"] = input_bounds
         player_preds = self._card_evidence.observe(frame, player_preds)
         # The dealer area is watched for the whole round: before the lock to
@@ -550,7 +618,9 @@ class DetectionEngine:
                 and (self._pending_cutting_card
                      or self._cc_cycle % constants.CUTTING_CARD_CHECK_EVERY == 0)):
             try:
-                cc_preds = self.provider.dealer_model().predict(
+                dealer_model = self.provider.dealer_model()
+                self._cache_loaded_model_metadata("dealer", dealer_model)
+                cc_preds = dealer_model.predict(
                     frame[top:bottom, left:right],
                     constants.PREDICTION_CONFIDENCE_DEALER,
                     constants.PREDICTION_OVERLAP_DEALER)
@@ -565,6 +635,17 @@ class DetectionEngine:
         self._metrics["inference_ms"] = (time.perf_counter() - t0) * 1000.0
         self.last_error = None
 
+        # Retain one fresh, read-only source for UI previews. It is bounded to
+        # one frame and only served when the monitor/profile/layout still match.
+        with self._preview_cache_lock:
+            self._preview_detection_cache = {
+                "timestamp": time.monotonic(), "frame": frame,
+                "resolution": list(detect_context[0]),
+                "profile": detect_context[1], "mode": detect_context[2],
+                "layout": detect_context[3], "bounds": input_bounds,
+                "input_size": input_size, "predictions": raw_player_preds,
+            }
+
         with self._lock:
             if self.card_registry is not None:
                 self._observe_registry(player_preds)
@@ -576,6 +657,30 @@ class DetectionEngine:
                 self._round_observation.count_uncertain = True
                 self._unread_positions.clear()
             self._maybe_auto_new_round(player_preds)
+
+    def get_region_preview_cache(self, *, max_age_s=2.0):
+        """Return a copy of a fresh frame/prediction result for preview UI.
+
+        No detector is called. Cache entries are rejected after a source,
+        resolution, profile, or layout change.
+        """
+        with self._preview_cache_lock:
+            cached = self._preview_detection_cache
+            if cached is None or time.monotonic() - cached["timestamp"] > max_age_s:
+                return None
+            if (self.capture.monitor is None
+                    or list(self.capture.resolution) != cached["resolution"]
+                    or getattr(self, "_active_profile", None) != cached["profile"]
+                    or getattr(self, "_active_mode", None) != cached["mode"]
+                    or self.card_layout is not cached["layout"]):
+                return None
+            return {key: value for key, value in cached.items() if key != "layout"} | {
+                "frame": cached["frame"].copy(),
+                "predictions": [dict(p) for p in cached["predictions"]]}
+
+    def get_recent_preview_detection(self, *, max_age=2.0):
+        """Compatibility alias for callers using the earlier cache name."""
+        return self.get_region_preview_cache(max_age_s=max_age)
 
     def _observe_registry(self, predictions):
         now = getattr(self.capture.monitor, "timestamp", time.monotonic())
@@ -635,6 +740,59 @@ class DetectionEngine:
                       else f"No se pudo corregir la carta: {result.reason}")
             raise ValueError(reason)
         return result
+
+    def correct_legacy_card(self, legacy_ref=None, *, reference=None, expected_round,
+                            expected_shoe=None, shoe_id=None, expected_name,
+                            action, new_rank=None, new_suit=None):
+        """Apply a snapshot-bound correction to the existing legacy ledger."""
+        legacy_ref = reference if reference is not None else legacy_ref
+        expected_shoe = shoe_id if shoe_id is not None else expected_shoe
+        with self._lock:
+            if expected_round != self.round_number or expected_shoe != self.counter.shoe_id:
+                return False
+            if self.card_registry is not None or not isinstance(legacy_ref, dict):
+                return False
+            if action not in ("set_rank", "not_a_card"):
+                return False
+            if action == "set_rank":
+                aliases = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}
+                new_rank = aliases.get(new_rank, new_rank)
+                try:
+                    cards.card_value(new_rank)
+                except (TypeError, ValueError):
+                    return False
+            # The legacy pipeline stores ranks only. It has no card-memory
+            # suit ledger, so refuse suit edits instead of claiming one stuck.
+            if new_suit is not None:
+                return False
+            if legacy_ref.get("dealer"):
+                slot = legacy_ref.get("slot")
+                if not isinstance(slot, int) or slot < 0:
+                    return False
+                if slot == 0:
+                    if self.dealer_card != expected_name:
+                        return False
+                    self.replace_dealer(new_rank if action == "set_rank" else None,
+                                        expected_round=expected_round)
+                else:
+                    extra_idx = slot - 1
+                    if (extra_idx >= len(self.dealer_extras)
+                            or self.dealer_extras[extra_idx].get("rank") != expected_name):
+                        return False
+                    self.replace_dealer_extra(
+                        extra_idx, new_rank if action == "set_rank" else None,
+                        expected_round=expected_round)
+                return True
+            seat_idx, slot = legacy_ref.get("seat_index"), legacy_ref.get("card_index")
+            if (not isinstance(seat_idx, int) or not 0 <= seat_idx < len(self.seats)
+                    or not isinstance(slot, int) or slot < 0):
+                return False
+            seat = self.seats[seat_idx]
+            if slot >= len(seat.cards) or seat.cards[slot].get("name") != expected_name:
+                return False
+            self.replace_card(seat_idx, slot, new_rank if action == "set_rank" else None,
+                              expected_round=expected_round)
+            return True
 
     def apply_correction(self, card_id, expected_round_id, action, *,
                          new_rank=None, new_suit=None, new_seat_id=None):
@@ -1820,6 +1978,8 @@ class DetectionEngine:
         """Pre-deal side-bet EVs. Non-blocking: returns the latest computed
         values (possibly one composition behind) and lets the advice thread
         catch up; the finished job publishes a fresh snapshot."""
+        if not any(v.get("enabled") for v in constants.SIDE_BETS.values()):
+            return []
         sig = (count["cards_seen"],
                tuple(sorted(count["per_rank"].items())),
                tuple(sorted(count["suit_seen"].items())),
@@ -2339,6 +2499,11 @@ class DetectionEngine:
         self.publish_snapshot()
 
     def _sidebet_job(self, sig, count):
+        if not any(v.get("enabled") for v in constants.SIDE_BETS.values()):
+            with self._advice_lock:
+                self._sidebet_result = ([], None)
+                self._sidebet_pending = False
+            return
         try:
             comp52 = shoe.from_counter_snapshot(count, self.counter.deck_count)
             comp10 = ev_engine.comp_from_per_rank(count["per_rank"],
@@ -2445,8 +2610,19 @@ class DetectionEngine:
             return f"+EV ({edge:+.2%}) but best seat plays only {pct:.0%} book"
         return f"P{idx + 1} ✓ ({edge:+.2%} edge, {pct:.0%} book over {n} hands)"
 
+    @staticmethod
+    def _advice_withdrawal_reason(dealer_rank, *, registry_pending=False,
+                                  hero_ambiguous=False, dealer_uncertain=False,
+                                  stale_reading=False, count_uncertain=False):
+        if (registry_pending or hero_ambiguous or dealer_uncertain or stale_reading
+                or count_uncertain or not dealer_rank):
+            return "Lectura de mano o crupier incompleta o dudosa"
+        return None
+
     def publish_snapshot(self):
         with self._lock:
+            source_resolution = (self.capture.resolution
+                                 if self.capture.monitor is not None else None)
             dealer_rank = self.dealer_card
             dealer_extra_ranks = [c["rank"] for c in self.dealer_extras]
             count = self.counter.snapshot()
@@ -2518,6 +2694,20 @@ class DetectionEngine:
                 # Latch only — _reset_round_state turns the many snapshots a
                 # round publishes into a single bet_capped_rounds tick.
                 self._bet_was_capped = True
+            seat_order = sorted((
+                ((sum(self.regions[i].bounds[::2]) / 2)
+                 if self.regions is not None and i < len(self.regions) else float(i), i)
+                for i in range(len(self.seats))), key=lambda row: -row[0])
+            legacy_seat_ids = {seat_index: f"J{rank}"
+                               for rank, (_x, seat_index) in enumerate(seat_order, start=1)}
+            legacy_slot_indices = {seat_index: slot
+                                   for slot, (_x, seat_index) in enumerate(
+                                       sorted(seat_order, key=lambda row: row[0]))}
+            with self._model_metadata_lock:
+                model_metadata_snapshot = {
+                    kind: {"loaded": self._metadata_model_refs.get(kind) is not None,
+                           **(self._model_metadata_cache.get(kind) or {})}
+                    for kind in ("players", "dealer")}
             snapshot = {
                 "seq": 0,
                 # Publish time: the executor refuses to fire from a stale
@@ -2562,6 +2752,22 @@ class DetectionEngine:
                 "activity": self._last_activity,
                 "metrics": dict(self._metrics),
                 "backend": self.provider.backend_name,
+                "source_profile": getattr(self, "_active_profile", None),
+                "source_mode": getattr(self, "_active_mode", None),
+                "source_resolution": (list(source_resolution)
+                                      if source_resolution is not None else None),
+                "source_backend": self.provider.backend_name,
+                "source_context": (region_profiles.get_source_context(
+                    source_resolution, profile=getattr(self, "_active_profile", None))
+                    if source_resolution is not None else None),
+                "dealer_source": {
+                    "detector": "players_model",
+                    "region": "layout_dealer" if self.card_layout is not None else "legacy_dealer_rect",
+                    "bounds": list(self._dealer_rect) if self._dealer_rect is not None else None,
+                },
+                "model_metadata": model_metadata_snapshot,
+                "source_error": self._source_mismatch,
+                "shoe_id": self.counter.shoe_id,
                 "error": self.last_error,
                 "reading": self._round_observation.snapshot(),
                 "card_registry": self.card_registry.snapshot() if self.card_registry is not None else None,
@@ -2580,29 +2786,101 @@ class DetectionEngine:
                         "state": card.state,
                         "reason": card.reason,
                         "hand": card.hand,
+                        "owner": card.owner,
+                        "first_seen": card.first_seen,
+                        "last_seen": card.last_seen,
+                        "center_norm": ([card.cx / self.card_layout.resolution[0],
+                                         card.cy / self.card_layout.resolution[1]]
+                                        if self.card_layout is not None else None),
+                        "bbox_norm": ({
+                            "x": (card.cx-card.width/2) / self.card_layout.resolution[0],
+                            "y": (card.cy-card.height/2) / self.card_layout.resolution[1],
+                            "w": card.width / self.card_layout.resolution[0],
+                            "h": card.height / self.card_layout.resolution[1],
+                            "cx": card.cx / self.card_layout.resolution[0],
+                            "cy": card.cy / self.card_layout.resolution[1],
+                        } if self.card_layout is not None else None),
                     } for card in group.cards],
                 } for group in self.card_registry.group_tracker.ordered_groups()]
-                    if self.card_registry is not None else []),
+                    if self.card_registry is not None else [{
+                        "seat_id": legacy_seat_ids.get(seat.index, f"J{seat.index + 1}"),
+                        "slot_index": legacy_slot_indices.get(seat.index),
+                        "is_hero": seat.index in self.my_seats,
+                        "is_ambiguous": False, "has_split": bool(seat.split),
+                        "closed_by_double": False,
+                        "cards": [{"rank": c.get("name"), "state": "confirmed",
+                                   "hand": c.get("hand", 0), "suit": c.get("suit"),
+                                   "legacy_ref": {"seat_index": seat.index, "card_index": index},
+                                   "bbox": c.get("bbox"), "cx": c.get("cx"), "cy": c.get("cy"),
+                                   "center_norm": ([c["cx"] / self.capture.resolution[0],
+                                                    c["cy"] / self.capture.resolution[1]]
+                                                   if c.get("cx") is not None and c.get("cy") is not None
+                                                   else None),
+                                   "confidence": c.get("confidence")}
+                                  for index, c in enumerate(seat.cards)]
+                    } for seat in self.seats if seat.cards]),
                 "dealer_cards": ([{
                     "card_id": card.id,
                     "rank": card.rank if card.counted and not card.reason else None,
                     "suit": card.suit,
                     "state": card.state,
                     "reason": card.reason,
+                    "owner": card.owner,
+                    "first_seen": card.first_seen,
+                    "last_seen": card.last_seen,
+                    "center_norm": ([card.cx / self.card_layout.resolution[0],
+                                     card.cy / self.card_layout.resolution[1]]
+                                    if self.card_layout is not None else None),
+                    "bbox_norm": ({
+                        "x": (card.cx-card.width/2) / self.card_layout.resolution[0],
+                        "y": (card.cy-card.height/2) / self.card_layout.resolution[1],
+                        "w": card.width / self.card_layout.resolution[0],
+                        "h": card.height / self.card_layout.resolution[1],
+                        "cx": card.cx / self.card_layout.resolution[0],
+                        "cy": card.cy / self.card_layout.resolution[1],
+                    } if self.card_layout is not None else None),
                 } for card in self.card_registry.cards.values()
                     if card.owner == "dealer" and card.status == "active"]
-                    if self.card_registry is not None else []),
+                    if self.card_registry is not None else ([{
+                        "rank": self.dealer_card, "state": "confirmed" if self.dealer_locked else "pending",
+                        "legacy_ref": {"dealer": True, "slot": 0}
+                    }] if self.dealer_card else []) + [{
+                        "rank": card.get("rank"), "state": "confirmed",
+                        "legacy_ref": {"dealer": True, "slot": index + 1}
+                    } for index, card in enumerate(self.dealer_extras)]),
                 "model_refresh_ts": self._model_refresh_ts,
             }
             if self.card_registry is not None:
                 snapshot["count"]["count_uncertain"] = self.counter.count_uncertain
-                if self.card_registry.advice_pending:
-                    for seat in snapshot["seats"]:
-                        if seat["mine"]:
-                            seat.update(advice=None,
-                                        advice_withdrawn_reason="Lectura dudosa (? o asiento dudoso)",
-                                        book_action=None, optimal="",
-                                        optimal_action=None, index_advice="")
+                hero_groups = [g for g in self.card_registry.group_tracker.ordered_groups()
+                               if g.is_hero]
+                hero_uncertain = any(g.is_ambiguous for g in hero_groups)
+                dealer_uncertain = any(c.owner == "dealer" and
+                                       (not c.counted or c.reason or c.state != "confirmed")
+                                       for c in self.card_registry.cards.values())
+                registry_pending = self.card_registry.advice_pending
+            else:
+                hero_uncertain = dealer_uncertain = registry_pending = False
+            observation = snapshot["reading"]
+            stale_reading = (not observation.get("inferred_at")
+                             or time.time() - observation["inferred_at"] > 3.
+                             or not observation.get("dealer_ok")
+                             or bool(self._source_mismatch)
+                             or bool(self.last_error))
+            withdrawal = self._advice_withdrawal_reason(
+                dealer_rank, registry_pending=registry_pending,
+                hero_ambiguous=hero_uncertain, dealer_uncertain=dealer_uncertain,
+                stale_reading=stale_reading,
+                count_uncertain=(self.counter.count_uncertain
+                                 or bool(observation.get("count_uncertain"))
+                                 or bool(observation.get("count_pending"))))
+            if withdrawal:
+                for seat in snapshot["seats"]:
+                    if seat["mine"]:
+                        seat.update(advice=None,
+                                    advice_withdrawn_reason=withdrawal,
+                                    book_action=None, optimal="",
+                                    optimal_action=None, index_advice="")
             # Publish while still holding the state lock so a snapshot built
             # from older state can never be stored with a newer seq.
             with self._snapshot_lock:

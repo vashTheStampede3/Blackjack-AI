@@ -7,6 +7,7 @@ call ever happens off the main thread.
 """
 
 import threading
+import os
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
@@ -38,6 +39,9 @@ class LoggingWindow(tk.Toplevel):
         self.log_manager = log_manager
         self.title("Blackjack AI — Logs")
         self.geometry("1100x650")
+        self._visibility_state = "created"
+        self.bind("<Map>", self._on_mapped, add="+")
+        self.bind("<Unmap>", self._on_unmapped, add="+")
         self.configure(bg=C["bg_primary"])
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -51,6 +55,12 @@ class LoggingWindow(tk.Toplevel):
         self._pending_lock = threading.Lock()
 
         self._build_controls()
+        path = str(log_manager.session_path or "No se pudo crear el archivo")
+        if log_manager.persistence_error:
+            path += f" | Error de escritura: {log_manager.persistence_error}"
+        tk.Label(self, text=f"Archivo de esta sesión: {path}", anchor="w", wraplength=1050,
+                 bg=C["bg_primary"], fg=C["text_secondary"],
+                 font=constants.FONT_SMALL).pack(fill=tk.X, padx=14, pady=(0, 8))
         self._build_display()
 
         # Register BEFORE loading history so nothing logged in between is
@@ -62,6 +72,19 @@ class LoggingWindow(tk.Toplevel):
         if matching:
             self._insert_entries(matching)
         self.after(150, self._drain_pending)
+
+        # Make the user-requested window discoverable even when its parent is
+        # behind another window. Mapping is confirmed by <Map>, not after_idle.
+        self.transient(parent)
+        self.deiconify()
+        self.lift()
+
+    def _on_mapped(self, _event=None):
+        self._visibility_state = "visible"
+
+    def _on_unmapped(self, _event=None):
+        if self._visibility_state != "closed":
+            self._visibility_state = "hidden"
 
     # ---------------------------------------------------------------- layout
 
@@ -93,7 +116,10 @@ class LoggingWindow(tk.Toplevel):
         tk.Button(bar, text="Export", command=self._export, bg=C["accent"], fg="white",
                   font=constants.FONT_BODY, relief="flat", cursor="hand2",
                   padx=14, pady=5).pack(side=tk.RIGHT, padx=8)
-        tk.Button(bar, text="Clear", command=self._clear, bg=C["warning"],
+        tk.Button(bar, text="Abrir carpeta", command=self._open_folder,
+                  bg=C["bg_secondary"], fg=C["text_primary"], font=constants.FONT_BODY,
+                  relief="flat", padx=10, pady=5).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Limpiar vista", command=self._clear, bg=C["warning"],
                   fg=C["text_primary"], font=constants.FONT_BODY, relief="flat",
                   cursor="hand2", padx=14, pady=5).pack(side=tk.RIGHT)
 
@@ -134,13 +160,16 @@ class LoggingWindow(tk.Toplevel):
                 if shown:
                     self._insert_entries(shown)
         except Exception:
-            pass  # never let one bad batch kill the drain loop
+            if not getattr(self, "_drain_error_reported", False):
+                self._drain_error_reported = True
+                self.log_manager.exception("No se pudo actualizar la ventana de Logs.")
         self.after(150, self._drain_pending)
 
     def _insert_entries(self, entries):
         self.text.config(state="normal")
         for entry in entries:
-            self.text.insert(tk.END, self._format(entry), f"cat_{entry.category.name}")
+            color = "ERROR" if entry.level == "ERROR" else "PERFORMANCE" if entry.level == "WARNING" else entry.category.name
+            self.text.insert(tk.END, self._format(entry), f"cat_{color}")
         self._shown_count += len(entries)
         # Trim the widget so long sessions don't degrade. index("end-1c")
         # counts one extra (empty) line after the trailing newline.
@@ -155,11 +184,14 @@ class LoggingWindow(tk.Toplevel):
 
     @staticmethod
     def _format(entry):
-        return f"[{entry.timestamp.strftime('%H:%M:%S')}] [{entry.category.value:13}] {entry.message}\n"
+        timestamp = entry.timestamp.strftime('%H:%M:%S.%f')[:-3]
+        action = f" [{entry.action_id}]" if entry.action_id else ""
+        event = f" [{entry.event}]" if entry.event else ""
+        return f"[{timestamp}] [{entry.level}]{action}{event} [{entry.category.value}] {entry.message}\n"
 
     def _matches(self, entry):
         needle = self.search_var.get().lower()
-        if needle and needle not in entry.message.lower():
+        if needle and needle not in self._format(entry).lower():
             return False
         chosen = self.filter_var.get()
         if chosen == "All":
@@ -192,7 +224,7 @@ class LoggingWindow(tk.Toplevel):
         self.count_label.config(text=f"Showing {self._shown_count} of {total}")
 
     def _clear(self):
-        if messagebox.askyesno("Clear logs", "Clear the log history? This cannot be undone.",
+        if messagebox.askyesno("Limpiar vista", "¿Limpiar el historial en memoria? El archivo de la sesión se conserva.",
                                parent=self):
             self.log_manager.clear_logs()
             self._refresh()
@@ -209,17 +241,27 @@ class LoggingWindow(tk.Toplevel):
             filetypes=[("Log files", "*.log"), ("Text files", "*.txt")])
         if not path:
             return
+        if self.log_manager.session_path and os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(self.log_manager.session_path)):
+            messagebox.showerror("Export failed", "Elegí otro archivo: el registro de esta sesión está en uso.", parent=self)
+            return
         entries = self.log_manager.get_all_logs()
         try:
             with open(path, "w", encoding="utf-8", errors="replace") as f:
                 f.write(f"Blackjack AI logs — exported {datetime.now():%Y-%m-%d %H:%M:%S}\n")
                 f.write("=" * 80 + "\n")
                 for e in entries:
-                    f.write(f"[{e.timestamp:%Y-%m-%d %H:%M:%S}] [{e.level:7}] "
-                            f"[{e.category.value:13}] {e.message}\n")
+                    f.write(self._format(e))
             messagebox.showinfo("Export", f"Exported {len(entries)} entries to:\n{path}", parent=self)
         except OSError as e:
+            self.log_manager.exception("No se pudieron exportar los logs.")
             messagebox.showerror("Export failed", str(e), parent=self)
+
+    def _open_folder(self):
+        directory = self.log_manager.session_path.parent if self.log_manager.session_path else constants.LOGS_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(directory))
+        self.log_manager.add_log("Carpeta de logs solicitada al Explorador de Windows.",
+                                 event="LOG_FOLDER_REQUESTED")
 
     def _on_manual_scroll(self, _event):
         self.after_idle(self._sync_autoscroll)
@@ -234,5 +276,6 @@ class LoggingWindow(tk.Toplevel):
             self.auto_scroll.set(False)
 
     def on_close(self):
+        self._visibility_state = "closed"
         self.log_manager.unregister_callback(self._on_log)
         self.destroy()

@@ -54,7 +54,7 @@ def _res_key(resolution):
 
 def _new_profile():
     return {"saved": None, "regions": {}, "ocr": {}, "controls": {},
-            "anchors": {}, "layouts": {}}
+            "anchors": {}, "layouts": {}, "source_contexts": {}}
 
 
 def _empty():
@@ -74,7 +74,7 @@ def _load():
                 raise ValueError("no profiles")
             for prof in profiles.values():
                 prof.setdefault("saved", None)
-                for kind in ("regions", "ocr", "controls", "anchors", "layouts"):
+                for kind in ("regions", "ocr", "controls", "anchors", "layouts", "source_contexts"):
                     # setdefault alone lets an existing null/list through,
                     # which would crash every _get/_set downstream.
                     if not isinstance(prof.get(kind), dict):
@@ -162,10 +162,21 @@ def _write(data):
 def list_profiles():
     """[{'name', 'saved'}] — Default first, the rest alphabetical."""
     data = _load()
-    items = [{"name": name, "saved": prof.get("saved")}
+    items = [{"name": name, "saved": prof.get("saved"),
+              "card_resolutions": sorted({key for key, modes in prof.get("layouts", {}).items()
+                                           if isinstance(modes, dict) and any(
+                                               mode in modes for mode in (TABLE, SINGLE_SEAT))}),
+              "ocr_resolutions": sorted(key for key, value in prof.get("ocr", {}).items() if value)}
              for name, prof in data["profiles"].items()]
     items.sort(key=lambda p: (p["name"] != DEFAULT_NAME, p["name"].lower()))
     return items
+
+
+def calibration_resolution_summary(profile_item):
+    """Short, real saved resolutions for card layouts and separate OCR data."""
+    cards = tuple(profile_item.get("card_resolutions", ()))
+    ocr = tuple(profile_item.get("ocr_resolutions", ()))
+    return cards, ocr
 
 
 def active_name() -> str:
@@ -228,6 +239,72 @@ def set_regions(resolution, payload, profile=None):
     _set("regions", resolution, payload, profile, layout_mode=SEVEN_SEATS)
 
 
+def set_source_context(resolution, context, profile=None):
+    """Remember the non-sensitive capture source reference for calibration."""
+    clean = clean_source_context(context)
+    with _LOCK:
+        data = _load()
+        if data.pop("_locked", False):
+            return
+        name = profile or data["active"]
+        prof = data["profiles"].setdefault(name, _new_profile())
+        prof["source_contexts"][_res_key(resolution)] = clean
+        prof["saved"] = datetime.now().isoformat(timespec="seconds")
+        _write(data)
+
+
+def get_source_context(resolution, profile=None):
+    return _get("source_contexts", resolution, profile=profile)
+
+
+def has_calibration(resolution, profile=None):
+    data = _load()
+    prof = data["profiles"].get(profile) if profile else data["profiles"][data["active"]]
+    if not prof:
+        return False
+    key = _res_key(resolution)
+    return any(bool(prof.get(kind, {}).get(key))
+               for kind in ("regions", "ocr", "controls", "anchors", "layouts"))
+
+
+def source_contexts(profile=None):
+    data = _load()
+    prof = data["profiles"].get(profile) if profile else data["profiles"][data["active"]]
+    return dict(prof.get("source_contexts", {})) if prof else {}
+
+
+def clean_source_context(context):
+    if not isinstance(context, dict):
+        return {}
+    return {key: context[key] for key in ("kind", "source_id", "width", "height")
+            if key in context and isinstance(context[key], (str, int, float, bool))}
+
+
+def clean_calibration_reference(context):
+    """Keep the non-pixel video-frame provenance used by saved layouts.
+
+    Window/monitor hints remain deliberately narrow. Video provenance is a
+    separate contract: preserve its local path, frame, crop, and timestamps,
+    while excluding arbitrary values such as image arrays or credentials.
+    """
+    if not isinstance(context, dict):
+        return {}
+    if context.get("kind") != "video_frame":
+        return clean_source_context(context)
+    allowed = ("kind", "path", "native_resolution", "resolution", "crop",
+               "frame_index", "timestamp_seconds")
+
+    def safe(value):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return True
+        return (isinstance(value, (list, tuple)) and
+                all(isinstance(item, (str, int, float, bool)) or item is None
+                    for item in value))
+
+    return {key: list(value) if isinstance(value, tuple) else value
+            for key, value in context.items() if key in allowed and safe(value)}
+
+
 def delete_regions(resolution):
     _delete("regions", resolution)
 
@@ -264,7 +341,7 @@ def get_card_layout(resolution, mode, profile=None):
 def set_card_layout(layout, profile=None, source_context=None):
     payload = layout.to_payload()
     if source_context is not None:
-        payload["reference_source"] = source_context
+        payload["reference_source"] = clean_calibration_reference(source_context)
     # Revalidate at the write boundary, including objects built without from_payload.
     checked = CardLayout.from_payload(payload, layout.resolution)
     with _LOCK:

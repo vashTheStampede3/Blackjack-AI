@@ -32,11 +32,12 @@ class LocalYoloModel:
     hosted = False
 
     def __init__(self, weights_path):
+        self._weights_path = Path(weights_path)
         try:
             from ultralytics import YOLO
         except ImportError as e:
             raise ModelError("ultralytics is not installed (pip install ultralytics)") from e
-        self._model = YOLO(str(weights_path))
+        self._model = YOLO(str(self._weights_path))
         try:
             import torch
             self._device = 0 if torch.cuda.is_available() else "cpu"
@@ -72,15 +73,40 @@ def letterbox(image_bgr: np.ndarray, size: int = 640, color=(114, 114, 114)):
     """Resize keeping aspect, pad to size x size (YOLO preprocessing).
     Returns (padded, ratio, (pad_x, pad_y))."""
     h, w = image_bgr.shape[:2]
-    ratio = min(size / w, h and size / h or 1)
+    geometry = onnx_input_geometry(w, h, size, "letterbox")
+    ratio = geometry["scale"][0]
     new_w, new_h = max(1, round(w * ratio)), max(1, round(h * ratio))
     resized = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    pad_x, pad_y = (size - new_w) / 2.0, (size - new_h) / 2.0
-    top, bottom = int(round(pad_y - 0.1)), int(round(pad_y + 0.1))
-    left, right = int(round(pad_x - 0.1)), int(round(pad_x + 0.1))
+    left, top = geometry["pad"]
+    right, bottom = size-new_w-left, size-new_h-top
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right,
                                 cv2.BORDER_CONSTANT, value=color)
     return padded, ratio, (left, top)
+
+
+def onnx_input_geometry(width, height, size, resize_mode="letterbox"):
+    """Pure geometry matching OnnxModel.predict's resize/letterbox transform."""
+    width, height, size = int(width), int(height), int(size)
+    if min(width, height, size) <= 0:
+        raise ValueError("Image and network dimensions must be positive")
+    if resize_mode == "Stretch to":
+        sx, sy = size/width, size/height
+        return {"known": True, "input_size": [size, size], "scale": [sx, sy],
+                "pad": [0, 0], "mode": "stretch"}
+    ratio = min(size/width, size/height)
+    new_w, new_h = max(1, round(width*ratio)), max(1, round(height*ratio))
+    pad_x, pad_y = (size-new_w)/2.0, (size-new_h)/2.0
+    left, top = int(round(pad_x-.1)), int(round(pad_y-.1))
+    return {"known": True, "input_size": [size, size], "scale": [ratio, ratio],
+            "pad": [left, top], "mode": "letterbox"}
+
+
+def model_input_geometry(model, width, height):
+    """Known network preprocessing geometry; never guesses for other backends."""
+    if isinstance(model, OnnxModel):
+        return onnx_input_geometry(width, height, model._size, model._resize_mode)
+    return {"known": False, "input_size": None, "scale": None,
+            "pad": None, "mode": "unknown"}
 
 
 def nms(boxes_xyxy: np.ndarray, scores: np.ndarray, iou_threshold: float):
@@ -116,6 +142,7 @@ class OnnxModel:
     hosted = False
 
     def __init__(self, model_path):
+        self._model_path = Path(model_path)
         try:
             import onnxruntime
         except ImportError as e:
@@ -139,6 +166,7 @@ class OnnxModel:
         self._size = int(shape[2]) if isinstance(shape[2], int) else 640
         # ultralytics embeds the class-name dict in the model metadata.
         self._names = {}
+        self._artifact_metadata = {}
         meta = self._session.get_modelmeta().custom_metadata_map
         if "names" in meta:
             try:
@@ -155,6 +183,13 @@ class OnnxModel:
         if sidecar.exists():
             try:
                 info = json.loads(sidecar.read_text(encoding="utf-8"))
+                # Retain a small local display whitelist, never the complete
+                # sidecar (which may carry provenance or other unrelated data).
+                self._artifact_metadata = {
+                    key: info[key] for key in ("model_id", "version", "quantization",
+                                               "quantized_from", "model_type")
+                    if isinstance(info, dict) and key in info
+                }
                 names = info.get("names")
                 if isinstance(names,list):
                     self._names = dict(enumerate(map(str,names)))
@@ -304,6 +339,49 @@ class ManualShuffleModel:
         return []
 
 
+def model_metadata(model):
+    """Report only already-loaded model identity and local sidecar facts.
+
+    This function never loads weights, initializes ONNX Runtime, runs inference,
+    hashes artifacts, or contacts a hosted service. Unknown facts stay unknown.
+    """
+    if model is None:
+        return {"model": "not loaded", "artifact": None, "version": None,
+                "quantization": "unknown", "input_size": None}
+    result = {"model": getattr(model, "name", type(model).__name__),
+              "artifact": None, "version": None,
+              "quantization": "unknown", "input_size": None,
+              "input_size_known": None, "model_type": None}
+    path = getattr(model, "_model_path", None) or getattr(model, "_weights_path", None)
+    if path is not None:
+        result["artifact"] = Path(path).name
+    if isinstance(model, OnnxModel):
+        result["input_size"] = model._size
+        result["input_size_known"] = True
+        info = model._artifact_metadata
+        result["version"] = info.get("model_id") or info.get("version")
+        result["quantization"] = info.get("quantization") or "unknown"
+        result["quantized_from"] = info.get("quantized_from")
+        result["model_type"] = info.get("model_type")
+    elif isinstance(model, LocalYoloModel):
+        # Ultralytics may use rectangular batches; 640 is nominal, not a
+        # guaranteed final tensor dimension for every source aspect ratio.
+        result["input_size"] = 640
+        result["input_size_known"] = False
+        sidecar = Path(str(path)+".json")
+        if sidecar.is_file():
+            try:
+                info = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                info = {}
+            result["version"] = info.get("model_id") or info.get("version")
+            result["quantization"] = info.get("quantization") or "unknown"
+            result["model_type"] = info.get("model_type")
+    elif isinstance(model, RoboflowModel):
+        result["artifact"] = "hosted model (local identity only)"
+    return result
+
+
 class ModelProvider:
     """Process-wide lazy, thread-safe access to the two detection models.
 
@@ -370,6 +448,12 @@ class ModelProvider:
         with self._lock:
             return any(getattr(m, "hosted", False)
                        for m in (self._players, self._dealer))
+
+    def loaded_model_metadata(self, kind="players"):
+        """Peek at loaded-model metadata without triggering lazy model loading."""
+        with self._lock:
+            model = self._players if kind == "players" else self._dealer
+        return model_metadata(model)
 
     def refresh(self, log=None):
         """Rebuild hosted model sessions and re-validate local weight files.

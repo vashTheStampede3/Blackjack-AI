@@ -28,6 +28,28 @@ from .validation import attach_numeric_entry
 C = constants.COLORS
 
 
+def format_model_runtime_hint(metadata):
+    """Format only snapshot-reported runtime identities; never inspect files."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    loaded = [(kind, item) for kind, item in metadata.items()
+              if isinstance(item, dict) and item.get("loaded")]
+    if not loaded:
+        return "Models: not loaded"
+    labels = []
+    for kind, item in loaded:
+        label = item.get("artifact") or item.get("model") or kind
+        parts = [str(label)]
+        version = item.get("version")
+        quantization = item.get("quantization")
+        if version:
+            version = str(version)
+            parts.append(version if version.casefold().startswith("v") else f"v{version}")
+        if quantization and str(quantization).casefold() != "unknown":
+            parts.append(str(quantization))
+        labels.append(" ".join(parts))
+    return "Model: " + " + ".join(dict.fromkeys(labels))
+
+
 class ModernBlackjackGUI(tk.Tk):
     def __init__(self, log_manager=None):
         super().__init__()
@@ -42,11 +64,19 @@ class ModernBlackjackGUI(tk.Tk):
         self.minsize(*self._minsize_applied)
         self.configure(bg=C["bg_primary"])
 
-        self.log_manager = log_manager
+        from ..logic.log_manager import LogManager
+        from .ui_actions import UIActionLogger
+        self.log_manager = log_manager or LogManager()
+        self.log_manager.start_session(constants.LOGS_DIR)
+        self.ui_actions = UIActionLogger(self, self.log_manager)
+        self._detection_action = None
+        self._preview_action = None
+        self._source_configured = False
+        self._region_editor = None
         # add_log (not print) so engine WARNING/ERROR levels survive into the
         # log window instead of being folded into the message text.
         self.controller = DetectionController(
-            log=log_manager.add_log if log_manager else print)
+            log=self.log_manager.add_log)
         self.monitor = None
         self._preview_source = None
         self.round_overlay = None
@@ -94,6 +124,10 @@ class ModernBlackjackGUI(tk.Tk):
         self.after(250, self._toggle_round_overlay)
         self.after(600, self._maybe_restore_shoe)
         self.set_status("Ready — confirm a monitor, then press Start Detection.")
+        if self.log_manager.persistence_error:
+            self.set_status(f"No se están guardando los logs: {self.log_manager.persistence_error}", error=True)
+        elif self.ui_actions.install_error:
+            self.set_status(f"No se activó el registro de botones: {self.ui_actions.install_error}", error=True)
 
     def _apply_chrome_scale(self):
         """Re-apply the fixed px() dimensions after a DPI rescale (monitor
@@ -278,6 +312,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.source_kind = tk.StringVar(value="Monitor")
         self.source_combo = ttk.Combobox(section, textvariable=self.source_kind,
                                         values=["Monitor", "Window"], state="readonly")
+        self.source_combo._ui_action_label = "Tipo de captura"
         self.source_combo.pack(fill=tk.X, pady=(0, 6))
         self.source_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_sources())
         self.refresh_sources_btn = self._button(section, "Refresh windows", self._refresh_sources,
@@ -291,12 +326,20 @@ class ModernBlackjackGUI(tk.Tk):
             f"Monitor {i + 1}: {m.width}x{m.height}" + (" (primary)" if getattr(m, "is_primary", False) else "")
             for i, m in enumerate(self._monitors)
         ]
+        self.monitor_combo._ui_action_label = "Fuente de captura"
         self.monitor_combo.pack(fill=tk.X, pady=(0, 8))
         self.monitor_combo.bind("<<ComboboxSelected>>", lambda e: self._confirm_monitor())
 
         self.monitor_status = tk.Label(section, text="No monitor confirmed", font=constants.FONT_SMALL,
-                                       bg=C["bg_secondary"], fg=C["text_secondary"])
-        self.monitor_status.pack(anchor="w", pady=(0, 4))
+                                       bg=C["bg_secondary"], fg=C["text_secondary"],
+                                       justify=tk.LEFT, anchor="w", wraplength=240)
+        self.monitor_status.pack(fill=tk.X, pady=(0, 4))
+        self.calibration_action_btn = self._button(
+            section, "Calibrate Regions", self._calibrate_regions, C["bg_canvas_soft"],
+            tooltip="Abrir las zonas de la fuente seleccionada para esta resolucion")
+        self.calibration_action_btn.pack(fill=tk.X, pady=(0, 4))
+        section.bind("<Configure>", lambda event: self.monitor_status.config(
+            wraplength=max(80, event.width - 16)), add="+")
         row = tk.Frame(section, bg=C["bg_secondary"])
         row.pack(fill=tk.X, pady=(6, 0))
         self.round_enabled = tk.BooleanVar(value=True)
@@ -320,6 +363,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.profile_var = tk.StringVar()
         self.profile_combo = ttk.Combobox(section, textvariable=self.profile_var,
                                           state="readonly", font=constants.FONT_BODY)
+        self.profile_combo._ui_action_label = "Perfil de regiones"
         self.profile_combo.pack(fill=tk.X, pady=(0, 8))
         self.profile_combo.bind("<<ComboboxSelected>>",
                                 lambda e: self._select_profile())
@@ -354,21 +398,27 @@ class ModernBlackjackGUI(tk.Tk):
             tooltip="Drag the seat polygons and dealer area over a live screenshot")
         self.calibrate_btn.pack(fill=tk.X, pady=4)
         self.calibrate_btn.config(state="disabled")
+        self.advanced_tools_open = tk.BooleanVar(value=False)
+        self.advanced_tools_btn = ttk.Button(section, text="Advanced tools ▸", command=self._toggle_advanced_tools)
+        self.advanced_tools_btn.pack(fill=tk.X, pady=(8, 2))
+        self.advanced_tools_frame = tk.Frame(section, bg=C["bg_secondary"])
+        self.advanced_tools_frame.pack(fill=tk.X)
+        self.advanced_tools_frame.pack_forget()
         self.ocr_btn = self._button(
-            section, "🔡  OCR Regions", self._calibrate_ocr, C["bg_canvas_soft"],
+            self.advanced_tools_frame, "🔡  OCR Regions", self._calibrate_ocr, C["bg_canvas_soft"],
             tooltip="Mark the balance / bet / result / timer areas to read "
                     "from the screen")
         self.ocr_btn.pack(fill=tk.X, pady=4)
         self.ocr_btn.config(state="disabled")
         self.controls_btn = self._button(
-            section, "🎛  Capture Controls", self._calibrate_controls,
+            self.advanced_tools_frame, "🎛  Capture Controls", self._calibrate_controls,
             C["bg_canvas_soft"],
             tooltip="Capture the Hit/Stand/Double/Split buttons and the bet "
                     "spot as templates — powers phase & turn detection")
         self.controls_btn.pack(fill=tk.X, pady=4)
         self.controls_btn.config(state="disabled")
         self.anchors_btn = self._button(
-            section, "⚓  Capture Anchors", self._calibrate_anchors,
+            self.advanced_tools_frame, "⚓  Capture Anchors", self._calibrate_anchors,
             C["bg_canvas_soft"],
             tooltip="Capture 2-3 stable UI elements (logo, chip tray, menu) "
                     "— maps this calibration to any resolution or window "
@@ -376,10 +426,24 @@ class ModernBlackjackGUI(tk.Tk):
         self.anchors_btn.pack(fill=tk.X, pady=4)
         self.anchors_btn.config(state="disabled")
 
+    def _toggle_advanced_tools(self):
+        opened = not self.advanced_tools_open.get()
+        self.advanced_tools_open.set(opened)
+        if opened:
+            self.advanced_tools_frame.pack(fill=tk.X, pady=(0, 4))
+            self.advanced_tools_btn.config(text="Advanced tools ▾")
+        else:
+            self.advanced_tools_frame.pack_forget()
+            self.advanced_tools_btn.config(text="Advanced tools ▸")
+
     def _build_executor_section(self, parent):
         """Ghost-mode executor controls (V4 Feature 2). Ghost draws where it
         WOULD click and logs the would-click match rate; Assist additionally
         fires on the F8 confirm key — after the §6 ghost gate, never before."""
+        # Keep the existing implementation available for future review while
+        # the primary interface remains advisory and the executor stays off.
+        if self.executor.mode != "off":
+            self.executor.set_mode("off")
         section = self._section(parent, "Executor (ghost / assist)")
         self.exec_mode_var = tk.StringVar()
         self._exec_mode_by_label = {"Off": "off", "Ghost (plan only)": "ghost",
@@ -413,10 +477,7 @@ class ModernBlackjackGUI(tk.Tk):
         tk.Label(section, text="F8 confirm · F9 kill · corner = abort",
                  font=constants.FONT_SMALL, bg=C["bg_secondary"],
                  fg=C["text_secondary"]).pack(anchor="w", pady=(2, 0))
-        if self.executor.mode == "assist":
-            # Restored from settings: hotkeys live, but NEVER armed at start.
-            self.arm_btn.config(state="normal")
-            self._start_hotkeys()
+        section.pack_forget()
 
     def _set_executor_mode(self):
         mode = self._exec_mode_by_label.get(self.exec_mode_var.get(), "off")
@@ -553,6 +614,11 @@ class ModernBlackjackGUI(tk.Tk):
                      bg=C["bg_secondary"], fg=C["text_primary"], wraplength=150,
                      justify="left").pack(side=tk.LEFT, fill=tk.X, expand=True)
             self.info_vars[key] = var
+
+        tk.Label(section, text="Card suit readings are not reliable; use ranks and counts as guidance.",
+                 font=constants.FONT_SMALL, bg=C["bg_secondary"],
+                 fg=C["text_secondary"], wraplength=240, justify="left"
+                 ).pack(anchor="w", pady=(3, 0))
 
         # Editable bankroll feeds the fractional-Kelly bet suggestion.
         row = tk.Frame(section, bg=C["bg_secondary"])
@@ -705,12 +771,15 @@ class ModernBlackjackGUI(tk.Tk):
 
     def set_status(self, message, error=False):
         self.status_var.set(message)
+        self.ui_actions.status(message, error)
 
     # --------------------------------------------------------------- actions
 
     def _refresh_sources(self):
         if self.controller.running:
+            self.ui_actions.blocked("Detené la detección antes de cambiar la fuente.")
             return
+        self._source_configured = False
         if self.source_kind.get() == "Window":
             from ..logic.window_capture import list_windows
             try:
@@ -718,7 +787,8 @@ class ModernBlackjackGUI(tk.Tk):
             except Exception as exc:
                 self.set_status(f"Cannot list windows: {exc}", error=True)
                 return
-            labels = [m.display_name for m in self._monitors]
+            from ..logic.window_capture import window_display_labels
+            labels = window_display_labels(self._monitors)
         else:
             self._monitors = list(screeninfo.get_monitors())
             labels = [f"Monitor {i + 1}: {m.width}x{m.height}"
@@ -734,6 +804,18 @@ class ModernBlackjackGUI(tk.Tk):
         self.set_status("Window capture: keep the window restored; it may stay in the background.")
 
     def _auto_select_monitor(self):
+        # Do not silently fall back to a physical monitor when this profile
+        # was calibrated against a window. Let the user choose/reselect it.
+        try:
+            from ..logic import region_profiles
+            contexts = region_profiles.source_contexts()
+            if any(item.get("kind") == "window" for item in contexts.values()):
+                self.source_kind.set("Window")
+                self._refresh_sources()
+                self.set_status("This profile references a window source. Select that window or refresh the list.")
+                return
+        except (OSError, AttributeError, TypeError):
+            pass
         if self._monitors:
             primary = next((i for i, m in enumerate(self._monitors)
                             if getattr(m, "is_primary", False)), 0)
@@ -743,7 +825,16 @@ class ModernBlackjackGUI(tk.Tk):
     def _confirm_monitor(self):
         idx = self.monitor_combo.current()
         if idx < 0 or idx >= len(self._monitors):
-            return
+            self._source_configured = False
+            self.monitor = None
+            for button in (self.start_btn, self.calibrate_btn, self.regions_btn,
+                           self.ocr_btn, self.controls_btn, self.anchors_btn):
+                button.config(state="disabled")
+            self.monitor_status.config(text="Seleccioná una fuente de captura válida.", fg=C["danger"])
+            if self.ui_actions.current is not None:
+                self.ui_actions.blocked("Seleccioná una fuente de captura de la lista.")
+            return False
+        self._source_configured = False
         selected = self._monitors[idx]
         if self.source_kind.get() == "Window":
             try:
@@ -755,18 +846,63 @@ class ModernBlackjackGUI(tk.Tk):
                     button.config(state="disabled")
                 self.monitor_status.config(text=str(exc), fg=C["danger"])
                 self.set_status(str(exc), error=True)
-                return
+                return False
+        source_warning = ""
+        source_review = False
+        try:
+            from ..logic import region_profiles
+            from ..logic.window_capture import source_descriptor, source_review_required
+            reference = region_profiles.get_source_context(
+                (selected.width, selected.height))
+            descriptor = source_descriptor(selected, self.source_kind.get())
+            ambiguous = (reference and self.source_kind.get() == "Window"
+                         and sum(source_descriptor(candidate, "Window") == descriptor
+                                 for candidate in self._monitors) > 1)
+            if getattr(self, "_reviewed_source_descriptor", None) == descriptor:
+                ambiguous = False  # explicit editor save in this session
+            source_review = source_review_required(
+                reference, descriptor, ambiguous=ambiguous,
+                has_calibration=region_profiles.has_calibration(
+                    (selected.width, selected.height)))
+            if reference and reference != descriptor:
+                source_warning = " · Fuente distinta a la usada al calibrar; revisá las zonas antes de iniciar."
+            elif ambiguous:
+                source_warning = " · Hay varias ventanas compatibles; comprobá que seleccionaste la correcta."
+        except (AttributeError, OSError, ValueError, TypeError):
+            source_warning = " · No se pudo verificar la fuente de calibración."
         self.monitor = selected
+        self._source_review_required = bool(source_review)
+        if source_review:
+            self.regions_btn.config(state="normal")
+            self.calibrate_btn.config(state="normal")
+            self.start_btn.config(state="disabled")
+            for button in (self.ocr_btn, self.controls_btn, self.anchors_btn):
+                button.config(state="disabled")
+            self.monitor_status.config(
+                text=f"{selected.width}x{selected.height} — revisar calibración de fuente.{source_warning}",
+                fg=C["warning"])
+            self.set_status("Detection blocked until Calibrate Regions is saved for this selected source.", error=True)
+            self.ui_actions.record("SOURCE_REVIEW_REQUIRED", "Fuente incompatible o ambigua; calibración requiere revisión explícita.",
+                                   level="WARNING", details=self.ui_actions.context())
+            return False
         try:
             self.controller.set_monitor(self.monitor)
         except ValueError as exc:
             self.start_btn.config(state="disabled")
             self.regions_btn.config(state="disabled")
             self.calibrate_btn.config(state="normal")
-            self.monitor_status.config(text=str(exc), fg=C["danger"])
+            for button in (self.ocr_btn, self.controls_btn, self.anchors_btn):
+                button.config(state="disabled")
+            self.monitor_status.config(text=(
+                f"{self.monitor.width}x{self.monitor.height} - Calibración pendiente\n"
+                f"{exc}\nUsá Calibrate Regions para guardar las zonas de esta fuente."),
+                fg=C["danger"])
             self.set_status(str(exc), error=True)
-            return
-        status = f"Using {self.source_kind.get().lower()} {idx + 1} — {self.monitor.width}x{self.monitor.height}"
+            self.ui_actions.record("SOURCE_NEEDS_CALIBRATION",
+                "Fuente seleccionada; detección bloqueada hasta calibrar. El editor puede usar esta fuente.",
+                level="WARNING", details=self.ui_actions.context())
+            return False
+        status = f"Using {self.source_kind.get().lower()} {idx + 1} — {self.monitor.width}x{self.monitor.height}{source_warning}"
         from ..logic.ocr import OCR_AVAILABLE
         if (OCR_AVAILABLE and constants.OCR.get("enabled")
                 and not self.controller.engine.ocr_calibrated):
@@ -783,6 +919,10 @@ class ModernBlackjackGUI(tk.Tk):
         self.set_status(f"{self.source_kind.get()} selected ({self.monitor.width}x{self.monitor.height}). "
                         + ("OCR coordinates follow this window. Keep it restored."
                            if self.source_kind.get() == "Window" else ""))
+        self._source_configured = True
+        self.ui_actions.record("SOURCE_CONFIGURED", "Fuente y perfil aplicados al motor.",
+                               details=self.ui_actions.context())
+        return True
 
     def _refresh_profiles(self):
         """Rebuild the table-profile dropdown — '<name> — <saved date>'."""
@@ -791,7 +931,14 @@ class ModernBlackjackGUI(tk.Tk):
         labels, self._profile_by_label, current = [], {}, 0
         for i, item in enumerate(region_profiles.list_profiles()):
             date = (item["saved"] or "")[:10]
-            label = f"{item['name']} — {date}" if date else item["name"]
+            from ..logic.region_profiles import calibration_resolution_summary
+            card_resolutions, ocr_resolutions = calibration_resolution_summary(item)
+            cards = ", ".join(card_resolutions)
+            ocr = ", ".join(ocr_resolutions)
+            detail = f" — {cards}" if cards else " — sin calibración de cartas"
+            if ocr and ocr != cards:
+                detail += f" · OCR {ocr}"
+            label = f"{item['name']}{detail}" + (f" · {date}" if date else "")
             labels.append(label)
             self._profile_by_label[label] = item["name"]
             if item["name"] == active:
@@ -810,6 +957,9 @@ class ModernBlackjackGUI(tk.Tk):
         self.set_status(f"Table profile \"{name}\" active — regions reloaded.")
 
     def _toggle_detection(self):
+        if getattr(self, "_source_review_required", False):
+            self.set_status("Calibrate Regions for the selected source before starting detection.", error=True)
+            return
         if self.controller.running:
             self.controller.stop()
             # No fresh snapshots while stopped — acting on a stale phase
@@ -828,9 +978,14 @@ class ModernBlackjackGUI(tk.Tk):
             self.controls_btn.config(state="normal")
             self.anchors_btn.config(state="normal")
             self.set_status("Detection stopped.")
+            self._detection_action = (self.ui_actions.pending(
+                "Parada solicitada; esperando que termine el hilo de detección."), "stopped")
             return
         if self.monitor is None:
             messagebox.showerror("No monitor", "Confirm a monitor first.")
+            return
+        if not self._source_configured:
+            self.ui_actions.blocked("La fuente tiene una calibración pendiente. Usá Calibrate Regions antes de iniciar.")
             return
         if self.round_enabled.get():
             self._toggle_round_overlay()
@@ -850,6 +1005,8 @@ class ModernBlackjackGUI(tk.Tk):
         self.controls_btn.config(state="disabled")
         self.anchors_btn.config(state="disabled")
         self.set_status("Detection starting — initializing models...")
+        self._detection_action = (self.ui_actions.pending(
+            "Inicio solicitado; esperando confirmación del motor."), "running")
 
     def _new_round(self):
         self.controller.engine.new_round()
@@ -861,7 +1018,12 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status("Shoe counts reset.")
 
     def _adjust_counter(self, key, delta):
+        before = self.controller.engine.counter.per_rank.get(key, 0)
         self.controller.engine.adjust_counter(key, delta)
+        after = self.controller.engine.counter.per_rank.get(key, 0)
+        self.ui_actions.record("COUNTER_ADJUSTMENT", f"Contador {key}: {before} → {after} (pedido {delta:+d}).",
+                               details={"rank_bucket": key, "requested_delta": delta,
+                                        "before": before, "after": after})
 
     def _on_card_click(self, seat_idx, slot):
         snapshot = self.controller.engine.get_snapshot()
@@ -916,6 +1078,7 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _preview_regions(self):
         if self._preview_busy:
+            self.ui_actions.blocked("Ya hay una vista previa en preparación.")
             return
         if self._preview_source is None and self.monitor is None:
             self._open_preview_image()
@@ -923,13 +1086,18 @@ class ModernBlackjackGUI(tk.Tk):
         self._preview_busy = True
         self.regions_btn.config(state="disabled")
         self.set_status("Generating region preview...")
+        self._preview_action = self.ui_actions.pending("Preparando la vista previa; esperando resultado.")
 
         source = self._preview_source
         def work():
             try:
-                image = build_region_preview(self.controller.engine, source=source)
+                image = build_region_preview(
+                    self.controller.engine, source=source,
+                    live_running=bool(self.controller.running and source is None))
                 self.after(0, lambda: self._show_preview(image))
             except Exception as e:
+                self.log_manager.exception("Falló la preparación de Preview Regions.",
+                                           action_id=self._preview_action)
                 self.after(0, lambda e=e: self._preview_failed(e))
 
         threading.Thread(target=work, daemon=True).start()
@@ -949,13 +1117,17 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status(f"Image: {self._preview_source.name} · calibration {w}x{h} · does not change the count.")
         else:
             self.set_status("Live preview — cards and seat regions are outlined.")
+        self.ui_actions.complete(self._preview_action, "Vista previa dibujada en la ventana principal.")
+        self._preview_action = None
 
     def _open_preview_image(self):
         if self._preview_busy:
+            self.ui_actions.blocked("Esperá a que termine la vista previa antes de abrir otra imagen.")
             return
         path = filedialog.askopenfilename(parent=self, title="Abrir captura de la mesa",
             filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"), ("All files", "*.*")])
         if not path:
+            self.ui_actions.cancelled("Selección de imagen cancelada.")
             return
         try:
             from ..logic.image_source import ImageSource
@@ -994,6 +1166,8 @@ class ModernBlackjackGUI(tk.Tk):
         self._preview_busy = False
         self.regions_btn.config(state="normal")
         self.set_status(f"Region preview failed: {error}", error=True)
+        self.ui_actions.complete(self._preview_action, f"Falló la vista previa: {error}", error=True)
+        self._preview_action = None
 
     def _open_logs(self):
         if getattr(self, "logging_window", None) is not None and self.logging_window.winfo_exists():
@@ -1020,9 +1194,23 @@ class ModernBlackjackGUI(tk.Tk):
             # running when the worker stalls and snapshots stop flowing.
             self._render_executor(self.executor.step(snapshot))
             self._sync_start_button()
+            if self._detection_action is not None:
+                target = self._detection_action[1]
+                state = self.controller.state
+                thread = self.controller._thread
+                settled = ((target == "running" and state in ("running", "error")) or
+                           (target == "stopped" and (thread is None or not thread.is_alive())))
+                if settled:
+                    self.ui_actions.complete(self._detection_action[0],
+                        f"Detección: {state}. {self.controller.engine.last_error or ''}",
+                        error=state == "error")
+                    self._detection_action = None
+            self._last_render_error = None
         except Exception as e:
             # A render error must never kill the update loop.
-            print(f"Error rendering snapshot: {e}")
+            if str(e) != getattr(self, "_last_render_error", None):
+                self.log_manager.exception(f"Error actualizando la interfaz: {e}")
+                self._last_render_error = str(e)
         self.after(constants.SNAPSHOT_POLL_MS, self._poll_snapshot)
 
     def _sync_start_button(self):
@@ -1139,10 +1327,12 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status(f"{activity}{extra}")
 
         m = snap["metrics"]
+        model_hint = format_model_runtime_hint(snap.get("model_metadata"))
         if self.controller.running and m["cycle_ms"]:
             skipped = " · idle (frame unchanged)" if m["skipped"] else ""
             text = (f"{snap['backend']} · cycle {m['cycle_ms']:.0f} ms"
                     f" · inference {m['inference_ms']:.0f} ms{skipped}")
+            text += f" · {model_hint}"
             # OCR liveness: makes "the bankroll isn't updating" diagnosable
             # at a glance — off (no regions for this monitor), waiting
             # (enabled but nothing read yet), or seconds since last read.
@@ -1156,7 +1346,9 @@ class ModernBlackjackGUI(tk.Tk):
                     text += " · OCR waiting"
             self.metrics_var.set(text)
         elif not self.controller.running:
-            self.metrics_var.set("")
+            self.metrics_var.set(model_hint)
+        else:
+            self.metrics_var.set(model_hint)
 
     def _sync_money_entries(self, snap):
         """Reflect engine-side bankroll / bet-placed (OCR sync, auto-settle)
@@ -1297,15 +1489,36 @@ class ModernBlackjackGUI(tk.Tk):
         self._toggle_round_overlay()
 
     def _correct_overlay_card(self, card_id, round_id, action,
-                              new_rank=None, new_suit=None, new_seat_id=None):
+                              new_rank=None, new_suit=None, new_seat_id=None,
+                              reference=None, shoe_id=None, expected_name=None):
+        details = {"card_id": card_id, "expected_round": round_id, "action": action,
+                   "rank": new_rank, "suit": new_suit, "seat_id": new_seat_id}
+        if reference is not None:
+            details.update(legacy_ref=reference, expected_shoe=shoe_id)
+        self.ui_actions.record("CARD_CORRECTION_REQUEST", "Mini Table correction requested.", details=details)
         try:
-            self.controller.engine.correct_tracked_card(
-                card_id, new_rank, expected_round=round_id, action=action,
-                new_suit=new_suit, new_seat_id=new_seat_id)
-            self.set_status("Carta corregida.")
+            engine = self.controller.engine
+            if reference is not None:
+                if action not in ("set_rank", "not_a_card"):
+                    self.set_status("This reference correction does not support seat or suit changes.", error=True)
+                    return False
+                result = engine.correct_legacy_card(
+                    reference, expected_round=round_id, expected_shoe=shoe_id,
+                    expected_name=expected_name, action=action, new_rank=new_rank)
+            else:
+                result = engine.correct_tracked_card(
+                    card_id, new_rank, expected_round=round_id, action=action,
+                    new_suit=new_suit, new_seat_id=new_seat_id)
+            if result is False or (reference is not None and result is None):
+                self.set_status("Correction rejected because the table changed or the reference is stale.", error=True)
+                return False
+            reason = getattr(result, "reason", "legacy reference accepted")
+            self.ui_actions.record("CARD_CORRECTION_APPLIED", f"CONFIRMED: correction applied: {reason}.", details=details)
+            self.set_status("Card corrected.")
+            return True
         except (ValueError, RuntimeError) as error:
-            self.set_status(f"No se corrigió la carta: {error}", error=True)
-
+            self.set_status(f"Card was not corrected: {error}", error=True)
+            return False
     def _on_hud_closed(self):
         """The close control hides the one overlay and clears both references."""
         self.hud = None
@@ -1399,12 +1612,39 @@ class ModernBlackjackGUI(tk.Tk):
             self.controller.engine.publish_snapshot()
             self.set_status(f"Bankroll set to €{value:g} — bet ramp updated.")
 
+    def _calibration_capture(self):
+        """Editors use the selected source even if its layout failed validation."""
+        if self._preview_source is not None:
+            return self._preview_source
+        if self.monitor is None:
+            raise ValueError("Seleccioná una ventana o abrí una imagen antes de calibrar.")
+        from ..logic.monitor_utils import ScreenCapture
+        source = self.monitor
+        if hasattr(source, "ready_source"):
+            source = source.ready_source()
+        capture = ScreenCapture()
+        capture.set_monitor(source)
+        capture.guard = self._capture_guard
+        return capture
+
+    def _store_source_reference(self, resolution):
+        if self.monitor is None:
+            return
+        try:
+            from ..logic import region_profiles
+            from ..logic.window_capture import source_descriptor
+            descriptor = source_descriptor(self.monitor, self.source_kind.get())
+            region_profiles.set_source_context(resolution, descriptor)
+            self._reviewed_source_descriptor = descriptor
+        except (OSError, ValueError, TypeError):
+            self.set_status("Calibration saved; source reference could not be saved.", error=True)
+
     def _calibrate_regions(self):
         if self.controller.running:
-            self.set_status("Stop Detection before changing calibration.")
+            self.ui_actions.blocked("Detené la detección antes de calibrar las regiones.")
             return
-        capture = self._preview_source or self.controller.engine.capture
         if self.monitor is None and self._preview_source is None:
+            self.ui_actions.blocked("Seleccioná una ventana o abrí una imagen antes de calibrar.")
             return
         from .region_editor import RegionEditor
 
@@ -1412,26 +1652,64 @@ class ModernBlackjackGUI(tk.Tk):
             # _confirm_monitor reloads all regions AND refreshes the
             # sidebar's "OCR not calibrated" hint (a save into a NEW
             # profile has no OCR rects yet).
-            if self.monitor is not None:
-                self._confirm_monitor()
+            if saved and self.monitor is not None:
+                self._store_source_reference((self.monitor.width, self.monitor.height))
+            applied = self._confirm_monitor() if self.monitor is not None else None
             self._refresh_profiles()  # a new/updated profile (and its date)
             from ..logic import region_profiles
             name = region_profiles.active_name()
+            if applied is False:
+                self.set_status(f'Perfil "{name}" actualizado, pero el motor sigue bloqueado. '
+                                'Revisá el error SOURCE_NEEDS_CALIBRATION en Logs.', error=True)
+                self.ui_actions.record("CALIBRATION_APPLY_FAILED",
+                    "El perfil cambió en disco, pero no se pudo aplicar al motor.",
+                    level="ERROR", details=self.ui_actions.context())
+                return
+            if applied:
+                self.ui_actions.record("CALIBRATION_APPLIED",
+                    "Perfil de regiones aplicado al motor para la fuente seleccionada.",
+                    details=self.ui_actions.context())
             if saved:
-                self.set_status(f"Regions saved to profile \"{name}\" — "
-                                "detection now uses the calibrated layout.")
+                self.set_status(f'Zonas guardadas en "{name}".' +
+                                (" Perfil aplicado al motor." if applied else " Configuración de imagen guardada."))
             else:
                 self.set_status(f"Calibration removed from profile \"{name}\""
                                 " — using the shipped default layout.")
 
+        capture = None
         try:
+            existing = getattr(self, "_region_editor", None)
+            if existing is not None and existing.winfo_exists():
+                existing.show_editor()
+                self.set_status("Editor de regiones abierto; revisá la ventana de calibración.")
+                return
+            self._region_editor = None
+            self.set_status("Abriendo Calibrate Regions: capturando la fuente seleccionada...")
+            capture = self._calibration_capture()
+            from ..logic import region_profiles
+            mode = region_profiles.layout_mode(capture.resolution)
+            self.ui_actions.record("CALIBRATION_OPEN", "Capturando el fondo para abrir el editor de regiones.",
+                details={"resolution": capture.resolution, "mode": mode,
+                         "profile": region_profiles.active_name(), "uses_selected_source": True})
             def saved_regions(saved=True):
                 reload_regions(saved)
                 if self._preview_source is not None:
                     self._preview_regions()
-            RegionEditor(self, capture, on_save=saved_regions)
+            editor = RegionEditor(self, capture, on_save=saved_regions, mode=mode)
+            self._region_editor = editor
+            editor.show_editor()
+            if not editor._shown_logged:
+                self.set_status(f"Editor de regiones creado para {capture.resolution[0]}x{capture.resolution[1]}. "
+                                "Esperando que se muestre.")
         except Exception as e:
+            self.ui_actions.record("CALIBRATION_OPEN_FAILED", str(e), level="ERROR")
+            self.log_manager.exception("No se pudo abrir el editor de regiones.",
+                                       action_id=self.ui_actions.current_id)
             self.set_status(f"Calibration failed: {e}", error=True)
+            messagebox.showerror("No se pudo abrir Calibrate Regions", str(e), parent=self)
+        finally:
+            if capture is not None and hasattr(capture, "close_local"):
+                capture.close_local()
 
     def _calibrate_controls(self):
         if self.monitor is None:
@@ -1443,6 +1721,7 @@ class ModernBlackjackGUI(tk.Tk):
             # regions, OCR rects, phase templates) — a "Save as profile"
             # switches the active profile, and reloading only the templates
             # would leave the engine running mixed-profile calibration.
+            self._store_source_reference((self.monitor.width, self.monitor.height))
             self._confirm_monitor()
             self._refresh_profiles()  # control saves restamp the profile date
             self.set_status("Control templates saved — phase & turn "
@@ -1462,6 +1741,7 @@ class ModernBlackjackGUI(tk.Tk):
         def reload_anchors():
             # Same full-reload chain as the other editors: set_monitor
             # queues an anchor re-solve for the next worker cycle.
+            self._store_source_reference((self.monitor.width, self.monitor.height))
             self._confirm_monitor()
             self._refresh_profiles()
             self.set_status("Anchors saved — the transform is solved on the "
@@ -1486,6 +1766,7 @@ class ModernBlackjackGUI(tk.Tk):
 
         def reload_regions():
             if self.monitor is not None:
+                self._store_source_reference((self.monitor.width, self.monitor.height))
                 self._confirm_monitor()   # reload + refresh the OCR hint
             self._refresh_profiles()  # OCR saves restamp the profile date
             self.set_status("OCR regions saved — balance/bet/result now read "
@@ -1514,7 +1795,7 @@ class ModernBlackjackGUI(tk.Tk):
             from ..common import settings
             settings.save()
         except Exception:
-            pass
+            self.log_manager.exception("No se pudo guardar la configuración al cerrar.")
         for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
             pool = getattr(self.controller.engine,name,None)
             if pool is not None:

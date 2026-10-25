@@ -27,7 +27,18 @@ class RegionEditor(tk.Toplevel):
         layout = (region_profiles.get_card_layout(capture.resolution, mode, profile=profile)
                   if mode != SEVEN_SEATS else None)
         frame_bgr = capture.grab_bgr()
+        audit = getattr(parent, "ui_actions", None)
+        if audit:
+            audit.record("CALIBRATION_FRAME", "Fotograma recibido para el editor; no se guarda la imagen.",
+                         details={"expected_resolution": capture.resolution,
+                                  "frame_resolution": [frame_bgr.shape[1], frame_bgr.shape[0]]})
+        if (frame_bgr.shape[1], frame_bgr.shape[0]) != tuple(capture.resolution):
+            raise ValueError("El tamaño capturado cambió. Volvé a seleccionar la ventana antes de calibrar.")
         super().__init__(parent)
+        self.transient(parent)
+        self._editor_parent = parent
+        self._shown_logged = False
+        self.bind("<Map>", self._on_editor_mapped, add="+")
         self.title(f"Editar zonas — {MODE_LABELS[mode]}")
         self.configure(bg=C["bg_primary"])
         self.on_save = on_save
@@ -127,6 +138,33 @@ class RegionEditor(tk.Toplevel):
 
         self._redraw()
         self.grab_set()
+
+    def show_editor(self):
+        """Restore and place the editor over its owner without permanent topmost."""
+        self.update_idletasks()
+        parent = self._editor_parent
+        width, height = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = max(0, min(parent.winfo_rootx() + (parent.winfo_width() - width) // 2,
+                       self.winfo_screenwidth() - width))
+        y = max(0, min(parent.winfo_rooty() + (parent.winfo_height() - height) // 2,
+                       self.winfo_screenheight() - height))
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        self.focus_set()
+        self.grab_set()
+
+    def _on_editor_mapped(self, event):
+        if event.widget is not self or self._shown_logged:
+            return
+        self._shown_logged = True
+        parent = self._editor_parent
+        audit = getattr(parent, "ui_actions", None)
+        if audit:
+            audit.record("CALIBRATION_SHOWN", "Ventana del editor de regiones mostrada.",
+                         details={"resolution": self.resolution, "mode": self.mode})
+        if hasattr(parent, "set_status"):
+            parent.set_status("Calibrate Regions visible: ajustá las zonas y pulsá Guardar.")
 
     # ------------------------------------------------------------- drawing
 
@@ -264,14 +302,15 @@ class RegionEditor(tk.Toplevel):
             options["source_context"] = context
         try:
             monitor_utils.save_custom_regions(self.resolution, players, dealer, **options)
-            if context is not None:
-                saved = region_profiles.get_regions(self.resolution, profile=self.profile_var.get().strip())
-                if (not saved or saved.get("players") != players or saved.get("dealer") != dealer
-                        or saved.get("reference_source") != context):
-                    raise ValueError("No se pudo comprobar el guardado. Las zonas siguen abiertas para reintentar.")
+            saved = region_profiles.get_regions(self.resolution, profile=self.profile_var.get().strip())
+            if (not saved or saved.get("players") != players or saved.get("dealer") != dealer
+                    or (context is not None and saved.get("reference_source") != context)):
+                raise ValueError("No se pudo comprobar el guardado. Las zonas siguen abiertas para reintentar.")
         except (OSError, ValueError) as exc:
+            self._log_save_error(exc)
             messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
             return
+        self._log_saved()
         if self.on_save:
             self.on_save()
         self.destroy()
@@ -293,11 +332,27 @@ class RegionEditor(tk.Toplevel):
             if saved is None or saved.to_payload() != layout.to_payload():
                 raise ValueError("No se pudo comprobar el guardado; las zonas siguen abiertas.")
         except (OSError, ValueError) as exc:
+            self._log_save_error(exc)
             messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)
             return
+        self._log_saved()
         if self.on_save:
             self.on_save()
         self.destroy()
+
+    def _log_save_error(self, exc):
+        audit = getattr(self._root(), "ui_actions", None)
+        if audit:
+            audit.log.exception("No se pudieron guardar/verificar las regiones.",
+                                action_id=audit.current_id)
+            audit.status(f"No se guardaron las regiones: {exc}", True)
+
+    def _log_saved(self):
+        audit = getattr(self._root(), "ui_actions", None)
+        if audit:
+            audit.record("PROFILE_SAVED", "CONFIRMADO · regiones guardadas y verificadas al releer el perfil.",
+                         details={"profile": self.profile_var.get().strip(),
+                                  "resolution": self.resolution, "mode": self.mode})
 
     def _reset(self):
         # Reset targets the ACTIVE profile (the typed save-as name is a save

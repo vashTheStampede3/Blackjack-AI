@@ -14,6 +14,7 @@ class ImageSource:
         self.resolution = tuple(resolution or (frame.shape[1], frame.shape[0]))
         self.name = name
         self.crop = (0, 0, frame.shape[1], frame.shape[0])
+        self._last_capture_metadata = None
         self._validate(self.crop)
 
     @classmethod
@@ -46,8 +47,21 @@ class ImageSource:
     def grab_bgr(self):
         self._validate(self.crop)
         l, t, r, b = self.crop
-        return cv2.resize(self.original[t:b, l:r], self.resolution,
-                          interpolation=cv2.INTER_LINEAR)
+        output = cv2.resize(self.original[t:b, l:r], self.resolution,
+                            interpolation=cv2.INTER_LINEAR)
+        self._last_capture_metadata = {
+            "source_size": [self.original.shape[1], self.original.shape[0]],
+            "crop": [l, t, r, b],
+            "crop_size": [r-l, b-t],
+            "output_size": [output.shape[1], output.shape[0]],
+            "scale": [self.resolution[0]/(r-l), self.resolution[1]/(b-t)],
+        }
+        return output
+
+    @property
+    def last_capture_metadata(self):
+        """Metadata for the last offline frame transform; no pixels retained."""
+        return dict(self._last_capture_metadata) if self._last_capture_metadata else None
 
     def close_local(self):
         pass

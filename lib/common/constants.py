@@ -343,20 +343,20 @@ VISION = {
 # stake x paytable into the session P&L.
 SIDE_BETS = {
     "perfect_pairs": {
-        "label": "Perfect Pairs", "enabled": True, "stake": 0.0,
+        "label": "Perfect Pairs", "enabled": False, "stake": 0.0,
         "paytable": {"perfect": 25, "colored": 12, "mixed": 6},
     },
     "21+3": {
-        "label": "21+3", "enabled": True, "stake": 0.0,
+        "label": "21+3", "enabled": False, "stake": 0.0,
         "paytable": {"suited_trips": 100, "straight_flush": 40, "trips": 30,
                      "straight": 10, "flush": 5},
     },
     "hot3": {
-        "label": "Hot 3", "enabled": True, "stake": 0.0,
+        "label": "Hot 3", "enabled": False, "stake": 0.0,
         "paytable": {"777": 100, "suited_21": 20, "21": 4, "20": 2, "19": 1},
     },
     "bust_it": {
-        "label": "Bust It", "enabled": True, "stake": 0.0,
+        "label": "Bust It", "enabled": False, "stake": 0.0,
         "paytable": {3: 1, 4: 2, 5: 9, 6: 50, 7: 100, 8: 250},  # 8 = 8+ cards
     },
     "lucky_lucky": {

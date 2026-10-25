@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from ..common import constants
+from .models import model_input_geometry
 
 
 def table_bounds(shape, regions, dealer):
@@ -24,13 +25,46 @@ def table_bounds(shape, regions, dealer):
     return (left, top, right, bottom) if right > left and bottom > top else (0, 0, w, h)
 
 
-def predict_table(model, frame, regions, dealer, confidence, overlap):
+def prepare_table_input(frame, model, regions, dealer):
+    """Shared frame preparation used by preview and the live detection cycle."""
     h, w = frame.shape[:2]
     bounds = table_bounds(frame.shape, regions, dealer) if (
         constants.TABLE_CROP_ENABLED and not getattr(model, "hosted", False)) else (0, 0, w, h)
+    left, top, right, bottom = bounds
+    return frame[top:bottom, left:right].copy(), bounds
+
+
+def _input_box(prediction):
+    cx, cy = float(prediction["cx"]), float(prediction["cy"])
+    width, height = float(prediction.get("width", 0)), float(prediction.get("height", 0))
+    return [cx-width/2, cy-height/2, cx+width/2, cy+height/2]
+
+
+def _box_scale(prediction, input_size, geometry):
+    """Record exact prepared pixels and known model-network pixels separately."""
+    prepared_bbox = _input_box(prediction)
+    result = {"prepared_bbox": prepared_bbox, "input_size": list(input_size),
+              "network_bbox": None, "network_input_size": None,
+              "network_transform_known": bool(geometry.get("known"))}
+    if not geometry.get("known"):
+        return result
+    sx, sy = geometry["scale"]
+    px, py = geometry["pad"]
+    result["network_bbox"] = [prepared_bbox[0]*sx+px, prepared_bbox[1]*sy+py,
+                              prepared_bbox[2]*sx+px, prepared_bbox[3]*sy+py]
+    result["network_input_size"] = geometry["input_size"]
+    result["network_transform"] = {k: geometry[k] for k in ("scale", "pad", "mode")}
+    return result
+
+
+def predict_table(model, frame, regions, dealer, confidence, overlap):
+    input_image, bounds = prepare_table_input(frame, model, regions, dealer)
     l, t, r, b = bounds
-    predictions = model.predict(frame[t:b, l:r].copy(), confidence, overlap)
-    restored = [p | {"cx": p["cx"]+l, "cy": p["cy"]+t} for p in predictions
+    predictions = model.predict(input_image, confidence, overlap)
+    input_size = [input_image.shape[1], input_image.shape[0]]
+    geometry = model_input_geometry(model, *input_size)
+    restored = [p | _box_scale(p, input_size, geometry) |
+                    {"cx": p["cx"]+l, "cy": p["cy"]+t} for p in predictions
                 if 0 <= p["cx"] < r-l and 0 <= p["cy"] < b-t]
     return restored, bounds
 
@@ -81,6 +115,8 @@ def predict_layout(model, frame, layout, confidence, overlap):
         raise ValueError("Table-layout replay requires a local model")
     image, patches = prepare_layout_image(frame, layout)
     predictions = model.predict(image, confidence, overlap)
+    input_size = [image.shape[1], image.shape[0]]
+    geometry = model_input_geometry(model, *input_size)
     restored = []
     for p in predictions:
         for patch in patches:
@@ -92,6 +128,7 @@ def predict_layout(model, frame, layout, confidence, overlap):
             owner = layout.owner_at(cx, cy)
             if ((patch["role"] == "dealer" and owner == "dealer")
                     or (patch["role"] == "table" and owner in ("mine", "other"))):
-                restored.append(p | {"cx": cx, "cy": cy, "owner": owner})
+                restored.append(p | _box_scale(p, input_size, geometry) |
+                                {"cx": cx, "cy": cy, "owner": owner})
             break
     return restored, {"size": [image.shape[1], image.shape[0]], "patches": patches}

@@ -58,6 +58,7 @@ class ScreenCapture:
         self.monitor = None  # screeninfo monitor object
         self._local = threading.local()
         self.guard = None
+        self.reference_context = None
 
     def set_monitor(self, monitor):
         if monitor is None:
@@ -140,7 +141,7 @@ def save_custom_regions(resolution, players, dealer, profile=None, source_contex
     saving stamps the profile's date and makes it active."""
     payload = {"players": players, "dealer": list(dealer)}
     if source_context is not None:
-        payload["reference_source"] = source_context
+        payload["reference_source"] = region_profiles.clean_calibration_reference(source_context)
     region_profiles.set_regions(resolution, payload, profile=profile)
 
 

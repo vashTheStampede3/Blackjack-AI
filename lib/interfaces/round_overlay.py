@@ -14,6 +14,96 @@ RANK_SHORT = {"Ace": "A", "Jack": "J", "Queen": "Q", "King": "K"}
 RANK_FULL = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}
 WIDTH, HEIGHT = 1000, 310
 
+
+def overlay_visibility(snapshot, running, editing=False, hud_on=True):
+    """Return (visible, notice); fail closed for stopped/clean/idle tables."""
+    if not hud_on:
+        return False, ""
+    if editing:
+        return True, "AJUSTE DE POSICIÓN"
+    if not running:
+        return False, ""
+    snap = snapshot or {}
+    reading = snap.get("reading") or {}
+    groups = snap.get("card_groups") or []
+    dealer = snap.get("dealer_cards") or []
+    uncertain = bool((snap.get("count") or {}).get("count_uncertain"))
+    phase = (snap.get("phase") or {}).get("phase")
+    clean = reading.get("table_clean_confirmed") or reading.get("clean_table_confirmed")
+    waiting = reading.get("waiting_for_deal") or reading.get("phase") in ("waiting", "betting_open")
+    if clean or waiting or phase in ("waiting", "betting_open"):
+        return False, ""
+    if groups or dealer or reading.get("present"):
+        if uncertain or reading.get("count_pending") or reading.get("stale"):
+            return True, "LECTURA INCIERTA · SIN CONSEJO"
+        if phase == "unknown" or reading.get("ambiguous"):
+            return True, "LECTURA DUDOSA · SIN CONSEJO"
+        return True, ""
+    return False, ""
+
+
+def confirmed_slot(group):
+    """Physical slot index, explicitly zero-based from the table's left edge."""
+    slot = group.get("slot_index", group.get("seat_slot"))
+    if isinstance(slot, int) and 0 <= slot < 7:
+        return slot
+    return None
+
+
+def group_x(group, group_index=0, width=WIDTH):
+    """Place groups by confirmed slot, otherwise by relative observed bbox/order."""
+    slot = confirmed_slot(group)
+    if slot is not None:
+        return 18 + slot * 137
+    # Seat IDs are logical assignments and J1 is the rightmost table seat.
+    # This mapping preserves gaps: only occupied IDs get cards drawn.
+    sid = str(group.get("seat_id", ""))
+    if sid.startswith("J") and sid[1:].isdigit() and 1 <= int(sid[1:]) <= 7:
+        return 18 + (7-int(sid[1:])) * 137
+    box = group.get("bbox") or group.get("bbox_norm")
+    if box is None:
+        for card in group.get("cards", []):
+            if card.get("center_norm") is not None:
+                box = {"cx": card["center_norm"][0]}
+                break
+            if card.get("bbox"):
+                box = card["bbox"]
+                break
+    if isinstance(box, dict):
+        center = box.get("cx", box.get("x"))
+        if center is not None:
+            # x/cx values in [0, 1] are normalized; absolute values are
+            # deliberately ignored because no screen-to-overlay mapping exists.
+            try:
+                center = float(center)
+                if 0 <= center <= 1:
+                    return min(width-150, max(18, int(center*width)-66))
+            except (TypeError, ValueError):
+                pass
+    return 18 + group_index * 137
+
+
+def group_page(cards, page, per_page):
+    """Return one bounded local page, clamping stale page indices safely."""
+    pages = max(1, (len(cards)+per_page-1)//per_page)
+    page = min(max(0, int(page)), pages-1)
+    return cards[page*per_page:(page+1)*per_page], page, pages
+
+
+def card_chip_position(index, split_hand_index=None, x=18, y=105):
+    """Bounded chip layout inside one group hit area (132 x 104 px)."""
+    if split_hand_index is None:
+        return x+6+(index % 4)*30, y+27+(index//4)*28, (25, 27)
+    return x+6+split_hand_index*59+(index % 2)*27, y+33+(index//2)*29, (23, 27)
+
+
+def group_controls_y(y=105):
+    return y+99
+
+
+def supports_suit_correction(reference):
+    return not bool((reference or {}).get("legacy_ref"))
+
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TOOLWINDOW = 0x00000080
@@ -49,6 +139,11 @@ class MiniTableOverlay:
         self._selected_id = None
         self._selected_round = None
         self._selected_suit = None
+        self._selected_ref = None
+        self._selected_expected_name = None
+        self._group_pages = {}
+        self._notice = ""
+        self._active = False
         self._drag_origin = None
         self.win.geometry(f"{WIDTH}x{HEIGHT}+{int(constants.UI.get('round_x', 60))}+{int(constants.UI.get('round_y', 60))}")
         self.canvas.bind("<Button-1>", self._canvas_click)
@@ -89,7 +184,7 @@ class MiniTableOverlay:
         show.restype = ctypes.c_bool
 
     def _show_noactivate(self):
-        if not self.enabled or self._capture_hidden or not self.win.winfo_exists():
+        if not self.enabled or self._capture_hidden or not self._active or not self.win.winfo_exists():
             return
         if self.hwnd:
             ctypes.windll.user32.ShowWindow(self.hwnd, 4)  # SW_SHOWNOACTIVATE
@@ -101,7 +196,8 @@ class MiniTableOverlay:
     def _keep_topmost(self):
         if not self.win.winfo_exists():
             return
-        self._show_noactivate()
+        if self._active:
+            self._show_noactivate()
         self._topmost_job = self.win.after(1500, self._keep_topmost)
 
     def update_from_snapshot(self, snap, running=True):
@@ -110,10 +206,38 @@ class MiniTableOverlay:
         self._last_state = snap or {}
         self._running = bool(running)
         round_id = int(self._last_state.get("round", 0))
-        if self._selected_round is not None and self._selected_round != round_id:
+        shoe_id = self._last_state.get("shoe_id") or (self._last_state.get("context") or {}).get("shoe_id")
+        if (self._selected_round is not None and self._selected_round != round_id) or (
+                self._selected_ref and self._selected_ref.get("shoe_id") not in (None, shoe_id)):
             self._selected_id = None
+            self._selected_ref = None
             self._selected_suit = None
+        if self._selected_ref and not self._selection_exists(self._selected_ref):
+            self._selected_id = None
+            self._selected_ref = None
+            self._selected_suit = None
+        self._notice = overlay_visibility(self._last_state, self._running,
+                                          self.editing, self.enabled)[1]
         self._draw()
+
+    def _selection_exists(self, ref):
+        identity = ref.get("card_id")
+        cards = list(self._last_state.get("dealer_cards") or [])
+        for group in self._last_state.get("card_groups") or []:
+            cards.extend(group.get("cards") or [])
+        if identity is not None:
+            return any(str(card.get("card_id")) == str(identity) for card in cards)
+        legacy = ref.get("legacy_ref")
+        if not legacy:
+            return False
+        for group in self._last_state.get("card_groups") or []:
+            for card in group.get("cards") or []:
+                if card.get("legacy_ref") == legacy:
+                    return True
+        for card in self._last_state.get("dealer_cards") or []:
+            if card.get("legacy_ref") == legacy:
+                return True
+        return False
 
     def _draw(self):
         c = self.canvas
@@ -138,46 +262,99 @@ class MiniTableOverlay:
         self._rect(WIDTH-310, 13, WIDTH-18, 43,
                    "#7F1D1D" if uncertain else "#14532D", "#475569")
         self._text(WIDTH-164, 28, advice, "#F8FAFC", 9, "center")
-        self._rect(8, 58, WIDTH-8, 166, "#0F172A", "#334155")
+        self._rect(8, 58, WIDTH-8, 216, "#0F172A", "#334155")
+        # A compact felt outline keeps dealer and player groups legible as one
+        # table. Only observed groups are painted; slot gaps remain empty.
+        self.canvas.create_oval(330, 64, 670, 108, fill="#123A31",
+                                outline="#2F6F5E", width=2)
+        self._text(WIDTH/2, 82, "DEALER", "#BFDBFE", 7, "center")
+        self.canvas.create_arc(72, 88, WIDTH-72, 248, start=0, extent=180,
+                               style=tk.ARC, outline="#2F6F5E", width=2)
         groups = state.get("card_groups") or []
-        for group in groups:
-            self._draw_group(group)
+        for index, group in enumerate(groups):
+            self._draw_group(group, index)
         if not groups:
-            self._text(WIDTH/2, 108, "Esperando cartas reconocidas", "#94A3B8", 11, "center")
+            self._text(WIDTH/2, 108, "Mesa compacta · esperando cartas reconocidas", "#94A3B8", 11, "center")
         close_tag = "close"
         c.create_text(WIDTH-22, 28, text="×", fill="#CBD5E1", font=("Segoe UI", 13, "bold"), tags=(close_tag,))
         c.tag_bind(close_tag, "<Button-1>", lambda _event: self._close_by_user())
-        if self._selected_id:
+        if self._selected_id or self._selected_ref:
             self._draw_picker(state)
+        if self._notice:
+            self._rect(8, 232, WIDTH-8, 260, "#7F1D1D", "#FCA5A5")
+            self._text(WIDTH/2, 246, self._notice, "#FEE2E2", 9, "center")
         reading = state.get("reading") or {}
-        active = bool(self._running and (reading.get("present")
-                      or groups or state.get("dealer_cards")))
-        self.win.attributes("-alpha", self.opacity if active else min(.30, self.opacity))
+        active, _ = overlay_visibility(state, self._running, self.editing, self.enabled)
+        self._active = active
+        if active:
+            self._show_window()
+            self.win.attributes("-alpha", self.opacity)
+        else:
+            self.win.withdraw()
 
-    def _draw_group(self, group):
+    def _draw_group(self, group, group_index=0):
         sid = str(group.get("seat_id", "?"))
-        try:
-            order = int(sid[1:]) if sid.startswith("J") else 4
-        except ValueError:
-            order = 4
-        slot = min(6, max(0, order-1))
-        x1 = WIDTH - 18 - (slot+1)*137
-        x2 = WIDTH - 18 - slot*137 - 3
-        y1, y2 = 68, 156
+        # Unassigned groups use their normalized observed bbox when available;
+        # no empty physical seats are implied by the compact display.
+        x1 = group_x(group, group_index)
+        x2 = x1 + 132
+        y1, y2 = 105, 209
         ambiguous = bool(group.get("is_ambiguous"))
         hero = bool(group.get("is_hero"))
         color = "#F59E0B" if ambiguous else ("#22C55E" if hero else "#475569")
         self._rect(x1, y1, x2, y2, "#172417" if hero else "#1E293B", color)
         label = f"⚠ {sid} · asiento dudoso" if ambiguous else (f"★ {sid} (Vos)" if hero else sid)
         self._text((x1+x2)/2, y1+13, label, color if not ambiguous else "#FDE68A", 8, "center")
-        if group.get("has_split"):
+        if group.get("closed_by_double") or group.get("doubled"):
+            self._text(x2-8, y1+13, "×2", "#FDE68A", 8, "e")
+        cards = group.get("cards", [])
+        split_hands = {}
+        for card in cards:
+            hand = card.get("hand", 0)
+            split_hands.setdefault(hand, []).append(card)
+        if group.get("has_split") or len(split_hands) > 1:
+            split_hands.setdefault(0, [])
+            split_hands.setdefault(1, [])
             self._text(x2-8, y1+13, "DIV", "#FDE68A", 7, "e")
-        for index, card in enumerate(group.get("cards", [])):
-            col, row = index % 4, index // 4
-            x, y = x1+8+col*31, y1+25+row*38
-            self._draw_card(x, y, card)
+            hand_keys = sorted(split_hands, key=str)
+            for hidx, hand in enumerate(hand_keys[:2]):
+                self._text(x1+34+hidx*59, y1+26, f"H{hidx+1}", "#CBD5E1", 6, "center")
+                hand_cards = split_hands[hand]
+                visible, page, page_count = group_page(
+                    hand_cards, self._group_pages.get((sid, hand), 0), 4)
+                for i, card in enumerate(visible):
+                    x, y, size = card_chip_position(i, hidx, x1, y1)
+                    self._draw_card(x, y, card, size=size)
+                if page_count > 1:
+                    self._page_controls(sid, hand, page, page_count,
+                                        x1+34+hidx*59, group_controls_y(y1))
+        else:
+            visible, page, page_count = group_page(
+                cards, self._group_pages.get((sid, None), 0), 8)
+            for i, card in enumerate(visible):
+                x, y, size = card_chip_position(i, None, x1, y1)
+                self._draw_card(x, y, card, size=size)
+            if page_count > 1:
+                self._page_controls(sid, None, page, page_count,
+                                    x1+65, group_controls_y(y1))
 
-    def _draw_card(self, x, y, card):
+    def _page_controls(self, seat_id, hand, page, page_count, cx, y):
+        for dx, step, label in ((-22, -1, "‹"), (22, 1, "›")):
+            tag = f"page:{seat_id}:{hand}:{step}"
+            self.canvas.create_text(cx+dx, y, text=label, fill="#FDE68A",
+                                    font=("Segoe UI", 9, "bold"), tags=(tag,))
+            self.canvas.tag_bind(tag, "<Button-1>",
+                lambda _event, sid=seat_id, h=hand, delta=step, count=page_count:
+                    self._turn_group_page(sid, h, delta, count))
+        self._text(cx, y, f"{page+1}/{page_count}", "#CBD5E1", 6, "center")
+
+    def _turn_group_page(self, seat_id, hand, delta, count):
+        key = (seat_id, hand)
+        self._group_pages[key] = (self._group_pages.get(key, 0)+delta) % count
+        self._draw()
+
+    def _draw_card(self, x, y, card, size=(27, 34)):
+        card_w, card_h = size
         identity = str(card.get("card_id", ""))
         rank = card.get("rank")
         suit = SUIT_SYMBOLS.get(card.get("suit"), "")
@@ -185,18 +362,25 @@ class MiniTableOverlay:
         fill, edge, fg = (("#7C2D12", "#F97316", "#FFEDD5") if unknown else
                           ("#F8FAFC", "#EAB308", "#0F172A") if card.get("ambiguous_seat") else
                           ("#F8FAFC", "#38BDF8", "#0F172A"))
-        tag = f"card:{identity}"
-        self.canvas.create_rectangle(x, y, x+27, y+34, fill=fill, outline=edge, width=2,
+        tag = f"card:{identity or 'unsupported'}"
+        self.canvas.create_rectangle(x, y, x+card_w, y+card_h, fill=fill, outline=edge, width=2,
                                      tags=(tag,))
-        self.canvas.create_text(x+13.5, y+17, text=("?" if unknown else self._rank(rank))+suit,
-                                fill=fg, font=("Segoe UI", 8, "bold"), tags=(tag,))
-        self.canvas.tag_bind(tag, "<Button-1>",
-                             lambda _event, cid=identity: self._select_card(cid))
+        self.canvas.create_text(x+card_w/2, y+card_h/2, text=("?" if unknown else self._rank(rank))+suit,
+                                fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
+        if identity:
+            self.canvas.tag_bind(tag, "<Button-1>",
+                                 lambda _event, cid=identity, value=card: self._select_card(cid, value))
+        elif card.get("legacy_ref"):
+            self.canvas.tag_bind(tag, "<Button-1>",
+                                 lambda _event, value=card: self._select_card(None, value))
 
     def _draw_picker(self, state):
         x1, y1, x2, y2 = 12, 174, WIDTH-12, HEIGHT-8
         self._rect(x1, y1, x2, y2, "#0B1220", "#38BDF8")
         self._text(x1+10, y1+14, "Corregir carta · vistos en shoe", "#E2E8F0", 8, "w")
+        if not self._selected_id and not self._selected_ref:
+            self._text(x1+380, y1+14, "Corrección no disponible para esta referencia", "#FCA5A5", 8, "w")
+            return
         seen = state.get("seen_by_rank") or {}
         step = (x2-x1-20)/13
         for index, rank in enumerate(VALID_RANKS):
@@ -212,14 +396,17 @@ class MiniTableOverlay:
             self.canvas.tag_bind(tag, "<Button-1>",
                 lambda _event, val=rank: self._emit("set_rank", new_rank=val))
         sy = y1+77
-        self._text(x1+8, sy+10, "Palo", "#94A3B8", 8, "w")
-        sx = x1+54
-        for code, symbol in SUIT_SYMBOLS.items():
-            tag = f"suit:{code}"
-            self._rect(sx, sy, sx+28, sy+22, "#1D4ED8" if self._selected_suit == code else "#1E293B", "#475569")
-            self.canvas.create_text(sx+14, sy+11, text=symbol, fill="#F8FAFC", tags=(tag,))
-            self.canvas.tag_bind(tag, "<Button-1>", lambda _event, val=code: self._toggle_suit(val))
-            sx += 32
+        if supports_suit_correction(self._selected_ref):
+            self._text(x1+8, sy+10, "Palo", "#94A3B8", 8, "w")
+            sx = x1+54
+            for code, symbol in SUIT_SYMBOLS.items():
+                tag = f"suit:{code}"
+                self._rect(sx, sy, sx+28, sy+22, "#1D4ED8" if self._selected_suit == code else "#1E293B", "#475569")
+                self.canvas.create_text(sx+14, sy+11, text=symbol, fill="#F8FAFC", tags=(tag,))
+                self.canvas.tag_bind(tag, "<Button-1>", lambda _event, val=code: self._toggle_suit(val))
+                sx += 32
+        else:
+            self._text(x1+8, sy+10, "Palo: no compatible con esta referencia", "#FCA5A5", 8, "w")
         self._button_text(x1+198, sy+11, "«no era carta»", "discard", "#7F1D1D")
         self._text(x1+350, sy+11, "Cambiar jugador", "#CBD5E1", 8, "center")
         sx = x1+421
@@ -253,7 +440,12 @@ class MiniTableOverlay:
 
     @staticmethod
     def _advice_text(state):
-        if state.get("count", {}).get("count_uncertain"):
+        reading = state.get("reading") or {}
+        if (state.get("count", {}).get("count_uncertain")
+                or reading.get("count_pending") or reading.get("stale")
+                or reading.get("ambiguous")
+                or (state.get("phase") or {}).get("phase") == "unknown"
+                or any(group.get("is_ambiguous") for group in state.get("card_groups", []))):
             return "SIN CONSEJO · lectura dudosa"
         mine = next((seat for seat in state.get("seats", []) if seat.get("mine")), None)
         if mine and mine.get("advice_withdrawn_reason"):
@@ -271,21 +463,43 @@ class MiniTableOverlay:
             y = event.y_root-self._drag_origin[1]
             self.win.geometry(f"{WIDTH}x{HEIGHT}{x:+d}{y:+d}")
 
-    def _select_card(self, identity):
+    def _select_card(self, identity, card=None):
         self._selected_id = identity
         self._selected_round = int((self._last_state or {}).get("round", 0))
+        card = card or {}
+        self._selected_ref = {"card_id": identity, "legacy_ref": card.get("legacy_ref"),
+                              "shoe_id": (self._last_state or {}).get("shoe_id")}
+        self._selected_expected_name = card.get("rank")
+        self._selected_suit = None
         self._draw()
 
     def _toggle_suit(self, suit):
+        if not supports_suit_correction(self._selected_ref):
+            self._notice = "CAMBIO DE PALO NO DISPONIBLE PARA ESTA REFERENCIA"
+            self._draw()
+            return
         self._selected_suit = None if self._selected_suit == suit else suit
         self._draw()
 
     def _emit(self, action, new_rank=None, new_seat_id=None):
-        if not self._selected_id:
+        if not self._selected_id and not (self._selected_ref or {}).get("legacy_ref"):
             return
-        self.on_correct_card(self._selected_id, self._selected_round, action,
-                             new_rank, self._selected_suit, new_seat_id)
+        if new_seat_id:
+            self._notice = "CAMBIO DE JUGADOR NO DISPONIBLE PARA ESTA CARTA"
+            self._draw()
+            return
+        metadata = self._selected_ref or {}
+        args = (self._selected_id, self._selected_round, action,
+                new_rank, self._selected_suit, new_seat_id)
+        if metadata.get("legacy_ref"):
+            self.on_correct_card(*args, reference=metadata["legacy_ref"],
+                                 shoe_id=metadata.get("shoe_id"),
+                                 expected_name=self._selected_expected_name)
+        else:
+            self.on_correct_card(*args)
         self._selected_id = None
+        self._selected_ref = None
+        self._selected_expected_name = None
         self._selected_suit = None
         self._draw()
 
@@ -296,14 +510,12 @@ class MiniTableOverlay:
 
     def set_editing(self, enabled):
         self.editing = bool(enabled)
-
-    def _show_noactivate(self):
-        self.enabled = True
-        self._capture_hidden = False
-        self._show_window()
+        self._notice = overlay_visibility(self._last_state, self._running,
+                                          self.editing, self.enabled)[1]
+        self._draw()
 
     def _show_window(self):
-        if not self.win.winfo_exists() or self._capture_hidden:
+        if not self.win.winfo_exists() or self._capture_hidden or not self._active:
             return
         if self.hwnd:
             ctypes.windll.user32.ShowWindow(self.hwnd, 4)

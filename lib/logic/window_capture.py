@@ -22,6 +22,7 @@ def _api():
         (u, "GetClientRect", [W.HWND, ctypes.POINTER(W.RECT)], W.BOOL),
         (u, "GetWindowTextLengthW", [W.HWND], ctypes.c_int),
         (u, "GetWindowTextW", [W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
+        (u, "GetClassNameW", [W.HWND, W.LPWSTR, ctypes.c_int], ctypes.c_int),
         (u, "GetDC", [W.HWND], W.HDC),
         (u, "ReleaseDC", [W.HWND, W.HDC], ctypes.c_int),
         (u, "PrintWindow", [W.HWND, W.HDC, W.UINT], W.BOOL),
@@ -57,11 +58,17 @@ class WindowSource:
     y: int = 0
     application: str = ""
     minimized: bool = False
+    class_name: str = ""
 
     @property
     def display_name(self):
-        name = f"{self.application} ? {self.title}" if self.application else self.title
-        return f"{name} [{self.pid}]" + (" (minimized)" if self.minimized else "")
+        app = os.path.splitext(self.application)[0] or "Window"
+        title = " ".join((self.title or "").split())
+        if len(title) > 48:
+            title = title[:45].rstrip() + "…"
+        state = " · minimized" if self.minimized else ""
+        return f"{app} · {title or 'Untitled'} — {self.width}×{self.height}{state}"
+
 
     def ready_source(self):
         """Resolve geometry only after restoring; enumeration must not drop it."""
@@ -127,6 +134,40 @@ class WindowSource:
                 u.ReleaseDC(self.hwnd, dc)
 
 
+def window_display_labels(windows):
+    """Human labels for a window list; duplicate captions get a PID tie-breaker."""
+    base = [window.display_name for window in windows]
+    counts = {label: base.count(label) for label in set(base)}
+    labels = [f"{label} · PID {window.pid}" if counts[label] > 1 else label
+              for window, label in zip(windows, base)]
+    duplicates = {}
+    for i, label in enumerate(labels):
+        duplicates.setdefault(label, []).append(i)
+    for same_label in duplicates.values():
+        if len(same_label) > 1:
+            for number, index in enumerate(same_label, 1):
+                labels[index] = f"{labels[index]} · Window {number}"
+    return labels
+
+
+def source_descriptor(source, kind):
+    """A non-secret, non-process-identity hint for matching saved calibration."""
+    if kind == "Window":
+        app = os.path.splitext(source.application)[0].casefold()
+        cls = (source.class_name or "").casefold()
+        return {"kind": "window", "source_id": f"{app}|{cls}",
+                "width": int(source.width), "height": int(source.height)}
+    return {"kind": "monitor", "source_id": str(getattr(source, "name", "") or "monitor"),
+            "width": int(source.width), "height": int(source.height)}
+
+
+def source_review_required(reference, descriptor, *, ambiguous=False, has_calibration=False):
+    """Whether saved geometry must be explicitly reviewed for this source."""
+    if not reference:
+        return bool(has_calibration)
+    return reference != descriptor or bool(ambiguous)
+
+
 def list_windows():
     """Visible top-level windows, including minimized ones; no activation/input."""
     u, _ = _api()
@@ -141,6 +182,8 @@ def list_windows():
             return True
         text = ctypes.create_unicode_buffer(length + 1)
         u.GetWindowTextW(hwnd, text, length + 1)
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(hwnd, cls, len(cls))
         pid = W.DWORD()
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == os.getpid():
@@ -159,7 +202,8 @@ def list_windows():
             if application.casefold() in {"textinputhost.exe", "shellexperiencehost.exe"} or text.value == "Program Manager":
                 return True
             windows.append(WindowSource(int(hwnd), text.value, pid.value, width, height,
-                                        application=application, minimized=minimized))
+                                        application=application, minimized=minimized,
+                                        class_name=cls.value))
         return True
     u.EnumWindows(visit, 0)
     return sorted(windows, key=lambda item: (item.application.casefold(), item.title.casefold()))

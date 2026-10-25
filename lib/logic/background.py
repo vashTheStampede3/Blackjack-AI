@@ -7,16 +7,24 @@ the worker thread, and the GUI consumes engine snapshots by polling
 
 import threading
 import time
+import traceback
 
 from ..common import constants
 from .engine import DetectionEngine
 from .phase import BETTING_OPEN, MY_TURN
+from .log_manager import LogManager
 
 
 class DetectionController:
     def __init__(self, log=print):
-        self.log = log
-        self.engine = DetectionEngine(log=log)
+        def safe_log(message):
+            try:
+                log(message)
+            except Exception:
+                LogManager().exception("Detection log callback failed")
+                LogManager().add_log(message)
+        self.log = safe_log
+        self.engine = DetectionEngine(log=self.log)
         self._stop = threading.Event()
         self._thread = None
         self._lifecycle_lock = threading.RLock()
@@ -87,8 +95,9 @@ class DetectionController:
             except Exception as e:
                 self.state = "error"
                 self.engine.last_error = str(e)
-                self.engine.publish_snapshot()
                 self.log(f"Model initialization failed: {e}")
+                self.log(traceback.format_exc())
+                self.engine.publish_snapshot()
                 return
 
             self.state = "running"
@@ -110,9 +119,18 @@ class DetectionController:
                     sleep_s = min(sleep_s, constants.CYCLE_SLEEP_ACTION)
                 stop_event.wait(sleep_s)
             self.state = "stopped"
+        except Exception as exc:
+            self.state = "error"
+            self.engine.last_error = str(exc)
+            self.log(f"Detection worker failed: {exc}\n{traceback.format_exc()}")
+            self.engine.publish_snapshot()
         finally:
             # Release this thread's GDI capture resources.
-            self.engine.capture.close_local()
-            with self._lifecycle_lock:
-                if self._restart_requested and self._stop is stop_event:
-                    self._launch_locked()
+            try:
+                self.engine.capture.close_local()
+            except Exception:
+                LogManager().exception("Detection capture cleanup failed")
+            finally:
+                with self._lifecycle_lock:
+                    if self._restart_requested and self._stop is stop_event:
+                        self._launch_locked()

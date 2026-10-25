@@ -255,9 +255,17 @@ class TableGroupTracker:
                             if g.seat_id.startswith("TMP_")),
                            key=lambda g: -g.anchor_x)
         for group in temporary:
-            index = 1
-            while f"J{index}" in self._groups:
-                index += 1
+            existing = [g for g in self._groups.values() if g is not group
+                        and g.seat_id.startswith("J") and g.seat_id[1:].isdigit()]
+            # Once labels are visible, a later group cannot be inserted to
+            # their right or between them without changing established seats.
+            # Keep such a group provisional and explicitly doubtful.
+            if existing and group.anchor_x >= min(g.anchor_x for g in existing):
+                group.is_ambiguous = True
+                for card in group.cards:
+                    card.ambiguous_seat = True
+                continue
+            index = max((int(g.seat_id[1:]) for g in existing), default=0) + 1
             old = group.seat_id
             group.seat_id = f"J{index}"
             self._groups.pop(old)
