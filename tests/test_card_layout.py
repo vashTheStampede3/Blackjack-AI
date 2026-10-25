@@ -33,6 +33,25 @@ def test_owners_come_from_one_native_coordinate_system(mode):
     assert layout.owner_at(20, 100) == "mine"  # boundary is included
 
 
+@pytest.mark.parametrize("mode", [TABLE, SINGLE_SEAT])
+def test_dealer_graphic_outside_table_is_saved_and_tagged_without_expanding_table(store, mode):
+    data = payload(mode) | {"table": rect(5, 85, 315, 175)}
+    layout = CardLayout.from_payload(data, (320, 180))
+    region_profiles.set_card_layout(layout, profile="Separate dealer")
+    loaded = region_profiles.get_card_layout((320, 180), mode, profile="Separate dealer")
+    assert loaded.to_payload()["table"] == data["table"]
+    assert loaded.to_payload()["dealer"] == data["dealer"]
+    assert loaded.owner_at(150, 40) == "dealer"
+    assert loaded.owner_at(50, 120) == "mine"
+    assert loaded.owner_at(250, 120) == "other"
+    assert loaded.owner_at(250, 40) is None  # gap/interface between the two sources
+
+
+def test_dealer_outside_frame_is_still_rejected():
+    with pytest.raises(ValueError, match="fotograma"):
+        CardLayout.from_payload(payload() | {"dealer": rect(300, 20, 340, 60)}, (320, 180))
+
+
 @pytest.mark.parametrize("change,match", [
     ({"mine": rect(0, 100, 100, 160)}, "dentro de Mesa"),
     ({"dealer": rect(50, 120, 150, 170)}, "superponerse"),

@@ -202,3 +202,19 @@ were unchanged. OpenCV processing and the video decoder are capped at two thread
 No assistant image inspection, remote calls or recognition run. Decision: keep
 the viewer change and stop for the user to draw zones. Card sizes, false positives,
 dealer representation and all 37-card counting comparisons remain unmeasured.
+
+## External dealer card graphic — correct the layout restriction
+
+The user selects the casino's separate card graphic as the dealer source.
+The containment rule rejected that legitimate layout; four geometry/editor
+checks reproduced the rejection before the fix. Only Mi asiento must now be
+inside Mesa. Crupier can be elsewhere in the frame, remains a distinct dealer
+source when tagging positions, and does not enlarge Mesa or include the gap.
+The editor explains that selecting the graphic requires excluding the physical
+dealer cards from Mesa. This is configuration support, not measured deduplication.
+
+After: 60 focused checks passed in 3.21 seconds, including external-dealer save,
+reload and ownership in both new modes; out-of-frame and overlapping zones are
+still rejected. User profile and label bytes were unchanged. No recognition,
+remote requests or assistant image inspection. The running editor is left open
+until restart approval so its unsaved drawing is not discarded automatically.

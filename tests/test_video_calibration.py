@@ -247,3 +247,28 @@ def test_seven_seat_dealer_corners_remain_draggable(ui, video):
     editor._release(SimpleNamespace(x=220 * editor.scale, y=70 * editor.scale))
     editor._save()
     assert region_profiles.get_regions((320, 180), profile="Legacy drag")["dealer"] == [100, 20, 220, 70]
+
+
+@pytest.mark.parametrize("mode", [TABLE, SINGLE_SEAT])
+def test_viewer_saves_external_dealer_graphic_without_changing_table(ui, video, monkeypatch, mode):
+    errors = []
+    monkeypatch.setattr("lib.interfaces.region_editor.messagebox.showerror", lambda *a, **k: errors.append(a))
+    picker = VideoFramePicker(ui, video_path=video, profile="Dealer graphic")
+    picker.mode_var.set(MODE_LABELS[mode])
+    picker._mode_changed()
+    picker._edit_regions()
+    editor = picker.editor
+    draw_zone(editor, 0, 5, 85, 315, 175)
+    draw_zone(editor, 1, 20, 100, 100, 160)
+    draw_zone(editor, 2, 200, 10, 300, 60)
+    editor._save()
+    assert not errors
+    ui.update()
+    loaded = region_profiles.get_card_layout((320, 180), mode, profile="Dealer graphic")
+    assert loaded.owner_at(250, 35) == "dealer"
+    assert min(y for x, y in loaded.table) == 85
+    assert len(picker.canvas.find_withtag("regions")) == 6
+    picker.close()
+    picker = VideoFramePicker(ui, video_path=video, profile="Dealer graphic")
+    assert picker.mode_var.get() == MODE_LABELS[mode]
+    assert len(picker.canvas.find_withtag("regions")) == 6

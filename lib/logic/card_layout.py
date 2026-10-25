@@ -120,9 +120,10 @@ class CardLayout:
                 or data.get("resolution") != list(resolution)):
             raise ValueError("La resolución del perfil no coincide; no se adapta automáticamente.")
         zones = {key: _polygon(data.get(key, []), label, resolution) for key, label in ZONE_LABELS.items()}
-        for key in ("mine", "dealer"):
-            if not _inside(zones[key], zones["table"]):
-                raise ValueError(f"{ZONE_LABELS[key]} debe quedar completamente dentro de Mesa.")
+        if not _inside(zones["mine"], zones["table"]):
+            raise ValueError("Mi asiento debe quedar completamente dentro de Mesa.")
+        # The dealer's selected representation may be a separate casino card HUD.
+        # Keep that region independent; never stretch Mesa across the intervening UI.
         if _overlaps(zones["mine"], zones["dealer"]):
             raise ValueError("Mi asiento y Crupier no pueden tocarse ni superponerse.")
         return cls(data["mode"], tuple(resolution), **zones,
@@ -137,8 +138,10 @@ class CardLayout:
 
     def owner_at(self, x, y):
         """Tag a detection already expressed in native frame pixels; never count."""
+        if _contains(self.dealer, (x, y)):
+            return "dealer"
         if not _contains(self.table, (x, y)):
             return None
         if _contains(self.mine, (x, y)):
             return "mine"
-        return "dealer" if _contains(self.dealer, (x, y)) else "other"
+        return "other"

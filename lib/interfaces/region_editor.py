@@ -86,7 +86,9 @@ class RegionEditor(tk.Toplevel):
         w, h = self.resolution
         hint = ("P1 izquierda / P7 derecha. Desmarcá Dibujar para ajustar vértices."
                 if mode == SEVEN_SEATS else
-                "Dibujá las 3 zonas. Desmarcá Dibujar para mover puntos. "
+                "Mi asiento va dentro de Mesa. Crupier puede ir fuera, sobre el gráfico del casino. "
+                "Si usás el gráfico, dejá las cartas físicas del crupier fuera de Mesa. "
+                "Desmarcá Dibujar para mover puntos. "
                 "Clic derecho en un borde agrega un punto; en un punto lo quita.")
         tk.Label(self, text=f"{getattr(capture, 'name', 'Captura')} · {w}×{h} · {hint}",
             wraplength=max_w,
