@@ -340,7 +340,9 @@ class ModelProvider:
             except Exception as e:
                 # Corrupt weights, torch/DLL trouble, version mismatch, ... —
                 # report it and fall through to the hosted API.
-                print(f"Local weights {weights.name} unusable ({e}); using the hosted API.")
+                print(f"Local weights {weights.name} unusable ({e}).")
+        if constants.LOCAL_ONLY_INFERENCE:
+            raise ModelError(f"No usable local model for {weights_name}; remote inference is disabled")
         return RoboflowModel(project_id, model_version)
 
     def players_model(self):

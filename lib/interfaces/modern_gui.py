@@ -67,7 +67,8 @@ class ModernBlackjackGUI(tk.Tk):
             store=engine.store,
             io_submit=engine.submit_io,
             log=log_manager.add_log if log_manager else print,
-            running_fn=lambda: self.controller.running)
+            running_fn=lambda: self.controller.running,
+            allowed=False)
         self.ghost_marker = None
         self._hotkeys = None
 
@@ -388,6 +389,8 @@ class ModernBlackjackGUI(tk.Tk):
         labels = {v: k for k, v in self._exec_mode_by_label.items()}
         combo.set(labels.get(self.executor.mode, "Off"))
         combo.pack(fill=tk.X, pady=(0, 4))
+        if not self.executor.allowed:
+            combo.config(state="disabled")
         combo.bind("<<ComboboxSelected>>", lambda e: self._set_executor_mode())
         ToolTip(combo,
                 "Ghost: computes and draws the click it WOULD make, clicks "
@@ -417,6 +420,8 @@ class ModernBlackjackGUI(tk.Tk):
     def _set_executor_mode(self):
         mode = self._exec_mode_by_label.get(self.exec_mode_var.get(), "off")
         self.executor.set_mode(mode)
+        mode = self.executor.mode
+        self.exec_mode_var.set({v: k for k, v in self._exec_mode_by_label.items()}[mode])
         self.controller.engine.persist_settings_async()
         self.arm_btn.config(state="normal" if mode == "assist" else "disabled")
         if mode == "assist":

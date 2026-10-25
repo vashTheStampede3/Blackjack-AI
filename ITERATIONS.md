@@ -326,3 +326,14 @@ Verification: 56 focused lifecycle, dealer, registry and memory checks passed
 in 10.09 seconds with isolated temporary output and two OpenCV threads. This
 does not establish visual recognition quality; the recorded-video count gate
 still fails, so overlay/layout work remains postponed.
+
+## Local-only and executor-off policy
+
+Two new checks failed before the change: missing local weights constructed a
+hosted backend, and the executor had no application-level disabled state.
+The configured app now raises a local model error instead of falling through
+to Roboflow, including refresh through the same builder. Its executor instance
+cannot change from Off, arm or confirm; the mode selector is disabled. Local
+ONNX and optional local PT weights are unchanged. Thirty-eight focused policy,
+executor and refresh checks passed in 2.11 seconds with fake dispatchers and
+temporary output. No network, browser, casino, capture or model inference ran.

@@ -31,6 +31,7 @@ def card_image_path(card_name: str) -> Path:
 # ---------------------------------------------------------------------------
 # Credentials come only from the process environment. Local inference needs no key.
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY", "")
+LOCAL_ONLY_INFERENCE = True
 
 PROJECT_ID_PLAYERS = "dey022"
 MODEL_VERSION_PLAYERS = 1

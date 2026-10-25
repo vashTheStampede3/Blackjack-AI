@@ -266,7 +266,7 @@ class Executor:
     everything shared sits behind self._lock."""
 
     def __init__(self, snapshot_fn, monitor_fn, store=None, io_submit=None,
-                 log=_default_log, dispatcher=None, running_fn=None):
+                 log=_default_log, dispatcher=None, running_fn=None, allowed=True):
         self.snapshot_fn = snapshot_fn
         self.monitor_fn = monitor_fn
         self.running_fn = running_fn   # detection liveness; gates arming
@@ -274,10 +274,13 @@ class Executor:
         self.io_submit = io_submit or (lambda fn, *a: fn(*a))
         self.log = log
         self.dispatcher = dispatcher or ClickDispatcher(monitor_fn, log)
+        self.allowed = bool(allowed)
 
         self._lock = threading.RLock()
-        self.mode = (constants.EXECUTOR.get("mode")
-                     if constants.EXECUTOR.get("mode") in MODES else "off")
+        configured_mode = constants.EXECUTOR.get("mode")
+        self.mode = configured_mode if self.allowed and configured_mode in MODES else "off"
+        if not self.allowed:
+            constants.EXECUTOR["mode"] = "off"
         self.armed = False           # NEVER persists; off every session
         self.disarm_reason = None
         self.session = {"plans": 0, "fired": 0, "verified": 0,
@@ -293,6 +296,10 @@ class Executor:
 
     def set_mode(self, mode: str):
         with self._lock:
+            if not self.allowed:
+                self.mode = constants.EXECUTOR["mode"] = "off"
+                self._disarm_locked("disabled in this application")
+                return
             if mode not in MODES:
                 return
             if mode != self.mode:
@@ -303,6 +310,8 @@ class Executor:
 
     def arm(self) -> bool:
         with self._lock:
+            if not self.allowed:
+                return False
             if self.mode != "assist":
                 return False
             if self.running_fn is not None and not self.running_fn():
@@ -499,6 +508,8 @@ class Executor:
         the plan the human was shown, then dispatches on the persistent
         click thread. Returns a status string for the GUI/log."""
         with self._lock:
+            if not self.allowed:
+                return "confirm ignored — executor is disabled in this application"
             if self.mode != "assist":
                 return "confirm ignored — executor is not in assist mode"
             if not self.armed:
