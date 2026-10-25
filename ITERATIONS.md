@@ -413,3 +413,15 @@ same memory, counted only 14/22 and 9/15. The unquantized rank model was also
 checked on 11 saved frames around the 2/4 conflict: it reported the same 2 and
 4 at the same locations. No model was promoted or replaced. These are video
 measurements, not held-out or live accuracy claims.
+
+## Confirmed cards withstand a transient unread frame
+
+A confirmed card could be permanently marked doubtful after one unstable
+observation, even if its rank and position recovered. A focused regression
+failed first. The registry now ignores ambiguous or unstable observations for
+cards already confirmed, while still requiring consecutive clean observations
+for new cards and flagging a reliable rank conflict. Thirty-four focused tests
+passed. The same 113-frame replay (`table_registry_07`) retained exactly the
+37 counted events and RC 0 from `table_registry_06`; current-round doubtful or
+pending cards fell from 10 to 5. The shoe remains uncertain because movement
+ambiguities and the round-one 2/4 rank mismatch are unresolved.

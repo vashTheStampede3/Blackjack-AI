@@ -214,3 +214,13 @@ def test_new_dealer_rank_is_not_absorbed_by_moving_upcard():
         ledger.observe([shifted, revealed], now)
     assert counter.cards_seen == 2
     assert any(c.rank == "10" and c.counted for c in ledger.cards.values())
+
+
+def test_noisy_read_of_already_confirmed_card_does_not_taint_shoe():
+    counter, ledger = memory()
+    for now in (1., 2.):
+        ledger.observe([card("5")], now)
+    ledger.observe([card("King", unstable=True)], 3.)
+    ledger.observe([card("5")], 4.)
+    assert counter.cards_seen == 1 and counter.running_count == 1
+    assert not counter.count_uncertain

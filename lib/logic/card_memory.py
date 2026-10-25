@@ -84,13 +84,15 @@ class CardMemory:
             return
         if card.reason:
             return  # a known ambiguity is never silently turned into a clean count
-        if card.counted and pred.get("name") != card.rank:
-            self._issue(card, "Rango cambiado; revisar carta")
-            return
         if pred.get("ambiguous") or pred.get("unstable") or pred.get("name") is None:
-            card.hits = 0
-            if card.counted:
-                self._issue(card, "Carta dudosa")
+            # A previously confirmed card does not become a new unread card
+            # because one observation is blurred. Keep its confirmed rank;
+            # unconfirmed candidates still need consecutive clean sightings.
+            if not card.counted:
+                card.hits = 0
+            return
+        if card.counted and pred["name"] != card.rank:
+            self._issue(card, "Rango cambiado; revisar carta")
             return
         if pred["name"] != card.rank:
             card.rank, card.hits = pred["name"], 0
