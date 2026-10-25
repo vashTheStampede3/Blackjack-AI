@@ -387,3 +387,29 @@ Three focused tests failed before the guard. All three now refuse to run while
 privacy tests explicitly disable that flag while mocking HTTP; they do not send
 real requests. Nineteen focused tests passed. The video recognition gate remains
 34/37 and RC +3 versus the labeled RC 0.
+
+## Overlapping dealer cards and detector-box jitter
+
+The saved trace showed the dealer's revealed 10 in four consecutive model
+outputs, but CardMemory matched it to the existing 7 and never created a 10.
+A regression reproduced that association. Matching now reserves a remembered
+card for a nearby observation of its own rank before considering a conflicting
+rank. This alone left the real-video replay at 34/37, RC +3 (`table_registry_05`):
+the 10 was created but its confirmation kept resetting.
+
+Numeric crop analysis found that 1-pixel detector-box shifts changed resized
+24x24 signatures by 13-22 gray levels on several stable-rank cards. Comparing
+the same native screen pixels in the intersection of successive boxes avoids
+that artifact without raising the 12-level image-change limit. A jitter
+regression failed before this change; 33 memory/evidence tests passed after it.
+The exact 113-frame, 111-call local replay (`table_registry_06`) then counted
+22/22 and 15/15 with RC +3 and final RC 0. Rank multiset comparison still
+found one missing 4 and one extra 2 in round 1; the matching Hi-Lo value hides
+that error. The shoe remains marked uncertain. No image was viewed, so physical
+identity at that overlap is not established.
+
+The original local player model `dey022/1`, run on the same schedule with the
+same memory, counted only 14/22 and 9/15. The unquantized rank model was also
+checked on 11 saved frames around the 2/4 conflict: it reported the same 2 and
+4 at the same locations. No model was promoted or replaced. These are video
+measurements, not held-out or live accuracy claims.

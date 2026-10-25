@@ -201,3 +201,16 @@ def test_distant_same_rank_players_are_not_assumed_to_be_one_card():
     ledger.observe([card("8", 500)], 3.)
     ledger.observe([card("8", 500)], 4.)
     assert counter.cards_seen == 2 and not counter.count_uncertain
+
+
+def test_new_dealer_rank_is_not_absorbed_by_moving_upcard():
+    counter, ledger = memory()
+    upcard = card("7", 400, "dealer")
+    for now in (1., 2.):
+        ledger.observe([upcard], now)
+    shifted = card("7", 380, "dealer")
+    revealed = card("10", 400, "dealer")
+    for now in (3., 4., 5.):
+        ledger.observe([shifted, revealed], now)
+    assert counter.cards_seen == 2
+    assert any(c.rank == "10" and c.counted for c in ledger.cards.values())

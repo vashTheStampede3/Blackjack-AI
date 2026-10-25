@@ -131,12 +131,24 @@ class CardMemory:
 
         choices, ambiguous = {}, {}
         original_ids = set(self.cards)
+        same_rank_near = {
+            key: any(
+                pred.get("name") == card.rank
+                and self._distance(card, pred, now) <= max(
+                    card.width, card.height, pred.get("width", 30), pred.get("height", 40))*.85
+                for pred in unique)
+            for key, card in self.cards.items() if card.rank is not None and not card.manual
+        }
         for index, pred in enumerate(unique):
             options = []
             for key, card in self.cards.items():
                 distance = self._distance(card, pred, now)
                 scale = max(card.width, card.height, pred.get("width", 30), pred.get("height", 40))
                 same = card.rank == pred.get("name") or card.manual or card.rank is None
+                if not same and same_rank_near.get(key, False):
+                    # When the old rank is still visible nearby, a different
+                    # overlapping rank can be a newly revealed card.
+                    continue
                 if distance <= scale*(.85 if same else .35):
                     options.append((distance + (0 if same else scale*.4), key))
             options.sort()

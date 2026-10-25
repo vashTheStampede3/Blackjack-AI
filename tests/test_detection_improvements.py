@@ -178,6 +178,16 @@ def test_local_motion_gate_ignores_moving_background_but_holds_changed_card():
     assert evidence.observe(frame, [box | {"cx": 88}])[0]["unstable"]
 
 
+def test_local_motion_gate_does_not_treat_box_jitter_as_card_motion():
+    from lib.logic.card_evidence import CardEvidence
+    frame = np.random.default_rng(7).integers(0, 256, (180, 240, 3), dtype=np.uint8)
+    box = pred("9", 100, 100) | {"width": 64., "height": 35.}
+    jittered = box | {"cx": 101., "width": 65., "height": 34.}
+    evidence = CardEvidence()
+    evidence.observe(frame, [box])
+    assert not evidence.observe(frame, [jittered])[0]["unstable"]
+
+
 def test_decode_preserves_runner_up_score_and_can_disable_abstention(monkeypatch):
     from lib.logic.models import OnnxModel
     model = object.__new__(OnnxModel)
