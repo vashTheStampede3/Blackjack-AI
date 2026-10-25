@@ -1,0 +1,225 @@
+"""Persisted runtime settings: table rules, game config, side bets, app tab.
+
+Every EV the app shows is conditional on the table rules, so they must be
+editable per table instead of hardcoded. The profile is a small JSON file in
+output/settings.json, loaded at startup (main.py) and written by the settings
+dialog. apply() mutates the live constants in place — every consumer
+(ev_engine.current_rules, deviations, sidebets.evaluate_all) reads them at
+call time, so changes take effect on the next snapshot after the engine's
+caches are invalidated (DetectionEngine.refresh_settings)."""
+
+import json
+import os
+import threading
+
+from . import constants
+
+SETTINGS_PATH = constants.OUTPUT_DIR / "settings.json"
+
+# App-level tunables from the settings dialog's "App" tab: module attribute
+# name -> (coerce, lo, hi). Applied via setattr — the engine/worker/GUI read
+# these attributes at call time, so a change takes effect on the next cycle.
+_APP_ATTRS = {
+    "EMPTY_FRAMES_FOR_RESET": (int, 3, 10),
+    "CUTTING_CARD_CONFIRM_FRAMES": (int, 1, 5),
+    "EV_ADVICE_TIMEOUT_S": (float, 1.0, 10.0),
+    "IDLE_REFRESH_GAP_S": (float, 10.0, 600.0),
+    "SNAPSHOT_POLL_MS": (int, 60, 500),
+    # Bool as 0/1: suit-aware dealer detection via the 52-class card model.
+    "DEALER_USE_PLAYER_MODEL": (int, 0, 1),
+}
+# OCR keys editable from the dialog (interval_s stays code-configured).
+_OCR_TOGGLES = ("enabled", "sync_bankroll", "sync_bet")
+
+
+def snapshot() -> dict:
+    """The current editable settings as a plain JSON-serializable dict."""
+    return {
+        "rules": dict(constants.RULES),
+        "deck_count": constants.DECK_COUNT,
+        "base_bet": constants.BASE_BET,
+        "betting": dict(constants.BETTING),
+        "side_bets": {key: {"enabled": bool(cfg.get("enabled")),
+                            "stake": float(cfg.get("stake") or 0.0)}
+                      for key, cfg in constants.SIDE_BETS.items()},
+        "ui": dict(constants.UI),
+        "app": {name: getattr(constants, name) for name in _APP_ATTRS},
+        "ocr": {key: constants.OCR[key] for key in _OCR_TOGGLES},
+        "phase": {"enabled": constants.PHASE["enabled"]},
+        "guardrails": dict(constants.GUARDRAILS),
+        # The API key persists in plaintext like every other local setting;
+        # ANTHROPIC_API_KEY overrides it without touching the file.
+        "vision": {key: constants.VISION[key]
+                   for key in ("enabled", "api_key", "model", "triage")},
+        # Mode and limits persist; the ARM state never does (it lives only
+        # in the running Executor and resets every session by design).
+        "executor": {key: constants.EXECUTOR[key]
+                     for key in ("mode", "max_bet_eur", "stop_loss_eur",
+                                 "stop_win_eur", "chips", "use_cdp",
+                                 "cdp_port", "cdp_url_match")},
+    }
+
+
+def apply(data: dict):
+    """Apply a settings dict onto the live constants (unknown keys ignored)."""
+    rules = data.get("rules", {})
+    for key in constants.RULES:
+        if key in rules:
+            constants.RULES[key] = rules[key]
+    if "deck_count" in data:
+        constants.DECK_COUNT = max(1, min(8, int(data["deck_count"])))
+    if "base_bet" in data:
+        constants.BASE_BET = max(1, float(data["base_bet"]))
+    betting = data.get("betting", {})
+    for key in constants.BETTING:
+        if key == "bet_table" or key not in betting:
+            continue
+        try:
+            constants.BETTING[key] = float(betting[key])
+        except (TypeError, ValueError):
+            pass
+    if "bet_table" in betting:
+        # Ramp-designer table: {str(floored_tc): bet_eur}; junk entries are
+        # dropped rather than poisoning the whole table.
+        table = {}
+        if isinstance(betting["bet_table"], dict):
+            for key, val in betting["bet_table"].items():
+                try:
+                    tc, bet = int(key), float(val)
+                except (TypeError, ValueError):
+                    continue
+                if -20 <= tc <= 20 and 0.0 <= bet <= 1_000_000.0:
+                    table[str(tc)] = bet
+        constants.BETTING["bet_table"] = table
+    for key, cfg in data.get("side_bets", {}).items():
+        if key not in constants.SIDE_BETS:
+            continue
+        if "enabled" in cfg:
+            constants.SIDE_BETS[key]["enabled"] = bool(cfg["enabled"])
+        if "stake" in cfg:
+            try:
+                constants.SIDE_BETS[key]["stake"] = max(0.0, float(cfg["stake"]))
+            except (TypeError, ValueError):
+                pass
+    ui = data.get("ui", {})
+    if "scale" in ui:
+        try:
+            pct = int(ui["scale"])
+        except (TypeError, ValueError):
+            pct = constants.UI["scale"]
+        # 0 = auto (per-monitor DPI); manual overrides clamp to the scaling
+        # module's 75-300% factor bounds.
+        constants.UI["scale"] = 0 if pct <= 0 else max(75, min(300, pct))
+    for key, lo, hi in (("round_x", -32000, 32000), ("round_y", -32000, 32000),
+                        ("round_opacity", .25, 1.0)):
+        if key in ui:
+            try:
+                constants.UI[key] = max(lo, min(hi, float(ui[key])))
+            except (TypeError, ValueError):
+                pass
+    app = data.get("app", {})
+    for name, (coerce, lo, hi) in _APP_ATTRS.items():
+        if name in app:
+            try:
+                setattr(constants, name, max(lo, min(hi, coerce(app[name]))))
+            except (TypeError, ValueError):
+                pass
+    ocr = data.get("ocr", {})
+    for key in _OCR_TOGGLES:
+        if key in ocr:
+            constants.OCR[key] = int(bool(ocr[key]))
+    phase_cfg = data.get("phase", {})
+    if "enabled" in phase_cfg:
+        constants.PHASE["enabled"] = int(bool(phase_cfg["enabled"]))
+    guard = data.get("guardrails", {})
+    if "enabled" in guard:
+        constants.GUARDRAILS["enabled"] = int(bool(guard["enabled"]))
+    for key, hi in (("stop_loss_eur", 1_000_000.0),
+                    ("stop_win_eur", 1_000_000.0)):
+        if key in guard:
+            try:
+                constants.GUARDRAILS[key] = max(0.0, min(hi, float(guard[key])))
+            except (TypeError, ValueError):
+                pass
+    if "max_rounds" in guard:
+        try:
+            constants.GUARDRAILS["max_rounds"] = max(0, min(
+                100_000, int(guard["max_rounds"])))
+        except (TypeError, ValueError):
+            pass
+    vision = data.get("vision", {})
+    for key in ("enabled", "triage"):
+        if key in vision:
+            constants.VISION[key] = int(bool(vision[key]))
+    if "api_key" in vision:
+        constants.VISION["api_key"] = str(vision["api_key"] or "")
+    if "model" in vision and str(vision["model"] or "").strip():
+        constants.VISION["model"] = str(vision["model"]).strip()
+    executor = data.get("executor", {})
+    if executor.get("mode") in ("off", "ghost", "assist"):
+        constants.EXECUTOR["mode"] = executor["mode"]
+    for key, hi in (("max_bet_eur", 100_000.0), ("stop_loss_eur", 1_000_000.0),
+                    ("stop_win_eur", 1_000_000.0)):
+        if key in executor:
+            try:
+                constants.EXECUTOR[key] = max(0.0, min(hi, float(executor[key])))
+            except (TypeError, ValueError):
+                pass
+    if "use_cdp" in executor:
+        constants.EXECUTOR["use_cdp"] = int(bool(executor["use_cdp"]))
+    if "cdp_port" in executor:
+        try:
+            constants.EXECUTOR["cdp_port"] = max(1, min(65535,
+                                                        int(executor["cdp_port"])))
+        except (TypeError, ValueError):
+            pass
+    if "cdp_url_match" in executor:
+        constants.EXECUTOR["cdp_url_match"] = str(executor["cdp_url_match"] or "")
+    if "chips" in executor:
+        # Accept a list or a comma-separated string ("0.5, 1, 5, 25").
+        # Per-token parsing: a trailing comma or one stray token must not
+        # silently discard the user's whole new chip set.
+        raw = executor["chips"]
+        parts = raw.split(",") if isinstance(raw, str) else (raw or [])
+        chips = set()
+        for token in parts:
+            text = str(token).strip().replace("€", "")
+            if not text:
+                continue
+            try:
+                value = float(text.replace(",", "."))
+            except ValueError:
+                continue
+            if value > 0:
+                chips.add(value)
+        if chips:
+            constants.EXECUTOR["chips"] = sorted(chips)
+
+
+# Serializes concurrent writers (the engine io thread and the Tk thread):
+# without it, two saves sharing the one tmp path collide and os.replace
+# raises PermissionError on Windows.
+_SAVE_LOCK = threading.Lock()
+
+
+def save(data: dict | None = None):
+    if data is None:
+        data = snapshot()
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic replace: a crash mid-write must never truncate the profile.
+    tmp = SETTINGS_PATH.with_suffix(".json.tmp")
+    with _SAVE_LOCK:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, SETTINGS_PATH)
+
+
+def load_and_apply() -> bool:
+    """Load the saved profile if one exists. Returns True when applied."""
+    if not SETTINGS_PATH.exists():
+        return False
+    try:
+        apply(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+        return True
+    except (OSError, ValueError) as e:
+        print(f"Settings profile unreadable ({e}); using defaults.")
+        return False

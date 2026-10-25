@@ -1,89 +1,99 @@
-# Blackjack AI
+Ronda inicial (0:48 - 0:54)
 
-Measured counter work: see [COUNTER_README.md](COUNTER_README.md).
-Use `powershell -File .\start.ps1` for the pinned Python 3.12 environment.
-Live accuracy remains unverified until the acceptance evidence in `reports/` is complete.
+    Jugador 1 (extremo derecho): 8 de Diamantes.
 
-Watches a live blackjack table on a chosen monitor or application window, detects the dealt cards
-with a YOLO model (local weights or the Roboflow hosted API), keeps a Hi-Lo
-card count across the shoe, and shows basic-strategy advice per seat in a
-desktop UI.
+    Jugador 2: 2 de Diamantes.
 
-## Quick start
+    Jugador 3: 9 de Diamantes.
 
-```powershell
-powershell -File .\start.ps1
-```
+    Jugador 4: 3 de Diamantes.
 
-On this configured PC, the desktop shortcut **Blackjack AI (local)** or
-`Open Blackjack AI.cmd` opens the app directly. It uses a local 13-rank ONNX
-model on CPU; **New Shoe** is manual. Recognition quality is for user review.
+    Jugador 5: 4 de Picas.
 
-1. The primary monitor is selected automatically — change it in the dropdown
-   if the casino stream is elsewhere.
-2. Press **Start Detection**. Models initialize in the background (the first
-   start takes a few seconds when using the hosted API).
-3. Cards appear on the felt as they are dealt; advice (Hit / Stand / Double /
-   Split / Surrender) shows under every active seat once the dealer's
-   up-card is known.
-4. Misread card? Click it and pick the right one. Click the dealer card to
-   correct the up-card. The **+** next to a seat adds a hit card manually.
+    Jugador 6: q de Diamantes.
 
-## What the panels show
+    Jugador 7 (extremo izquierdo): 8 de Corazones.
 
-* **Cards Seen** — per-rank totals for the current shoe (J/Q/K are grouped
-  with 10). The +/- buttons adjust both the totals and the running count.
-* **Game Info** — round number, Hi-Lo running count, true count (running ÷
-  decks remaining), decks remaining, and a bet-size hint from the true count.
-* **New Round** clears the table but keeps the shoe count. Rounds also
-  auto-advance when the table is cleared. **New Shoe** resets all counts —
-  use it after the shuffle (the app reminds you when it spots the cutting
-  card).
-* **Preview Regions** overlays the seat polygons, dealer area, and the raw
-  model detections on a live screenshot — useful to verify the stream lines
-  up with the configured regions.
+    Crupier: 7 de Diamantes.
 
-## Configuration
+    Jugador 1 (extremo derecho): 9 de Trebol (17 en total). 
 
-Everything lives in `lib/common/constants.py`: capture regions, model IDs,
-confidence thresholds, pacing, theme. The Roboflow API key can be overridden
-with the `ROBOFLOW_API_KEY` environment variable.
+    Jugador 2: 3 de Diamantes (5 en total).
 
-For lower latency, place local YOLO weights at `models/player_cards.pt` (and
-optionally `models/dealer_cards.pt`) and install `ultralytics` — the app
-prefers local weights automatically and falls back to the hosted API.
+    Jugador 3: q de Corazones (18 en total).
 
-## Project layout
+    Jugador 4: j de Diamantes (13 en total).
 
-```
-main.py                 entry point
-assets/                 card images + basic-strategy table (strategy.csv)
-lib/
-  common/               constants (paths, settings, theme), model class maps
-  logic/                engine, models, counting, strategy, capture — no Tk here
-  interfaces/           Tk UI: main window, table canvas, card picker, logs
-models/                 optional local YOLO weights (gitignored)
-output/, logs/          runtime artifacts (gitignored)
-archive/                everything not needed to run the app:
-                        legacy api/ scripts, ML training datasets, design docs,
-                        the old Tk GUI
-```
+    Jugador 5: a de Picas (15 en total).
 
-## Architecture notes
+    Jugador 6: 2 de Diamantes (12 en total).
 
-The detection engine (`lib/logic/engine.py`) runs on a worker thread and
-never touches Tkinter. Each cycle it captures the monitor in memory, skips
-inference when the frame hasn't changed, otherwise runs the player and
-dealer models in parallel, updates the game state, and publishes an
-immutable snapshot. The GUI polls that snapshot from the Tk event loop and
-only updates widgets whose content actually changed.
+    Jugador 7 (extremo izquierdo): 6 de Corazones. (14 en total)
 
-The dealer area is watched for the whole round: the up-card locks by
-multi-frame consensus, after which the dealer's playout cards are tracked and
-counted into the shoe (composition accuracy beats the old stop-after-lock
-optimization). Hosted-API uploads are downscaled to 1280px and statically
-unchanged frames are skipped before any inference happens.
+Decisiones de los jugadores y crupier (1:16 - 1:57)
 
-Exact-EV advice, side-bet EVs, and session persistence run on a dedicated
-advice thread — snapshot publishing stays at sub-millisecond cost and the Tk
-thread never computes.
+    Jugador 1: Se planta con 17.
+
+    Jugador 2: Pide y recibe un 7 de picas (12 en total), pide de vuelta y recibe un 4 de pica (16 en total), pide de vuelta y recibe un 9 de trebol (25 en total). Se pasa.
+
+    Jugador 3: Se planta con 19.
+
+    Jugador 4: Pide cartas y recibe un 8 de diamante (queda en 21)
+
+    Jugador 5: Pide y recibe un 2 de corazon (queda en 17).
+
+    Jugador 6: Pide y recibe un 8 de corazon (queda con 20).
+
+    Jugador 7: Se planta con 14.
+
+    Crupier: Revela su carta oculta, un 10 de Tréboles (17 en total).
+
+Segunda ronda completa (empieza en el minuto 2:20)
+
+    Jugador 1 (extremo derecho): vacío.
+
+    Jugador 2: 7 de Picas.
+
+    Jugador 3: K de Corazones.
+
+    Jugador 4: vacío.
+
+    Jugador 5: 7 de Diamantes.
+
+    Jugador 6: 8 de Diamantes.
+
+    Jugador 7 (extremo izquierdo): K de picas.
+
+    Crupier: Q de Treboles.
+
+    Jugador 1 (extremo derecho): vacío. 
+
+    Jugador 2: A de Corazones (18 en total).
+
+    Jugador 3: K de Picas (20 en total).
+
+    Jugador 4: vacío.
+
+    Jugador 5: 5 de Diamantes (12 en total).
+
+    Jugador 6: 5 de corazones (13 en total).
+
+    Jugador 7 (extremo izquierdo): 3 de Corazones. (13 en total)
+
+Decisiones de los jugadores y crupier (2:32 - 1:57)
+
+    Jugador 1: vacío
+
+    Jugador 2: Se planta (18 en total).
+
+    Jugador 3: Se planta con 20.
+
+    Jugador 4: vacío
+
+    Jugador 5: Pide y recibe un 8 de diamantes (queda en 20).
+
+    Jugador 6: Pide y recibe un 8 de Tréboles  (queda con 21).
+
+    Jugador 7: Pide y recibe un 9 de Diamantes (22 en total).
+
+    Crupier: Revela su carta oculta, una K de Tréboles (20 en total).
