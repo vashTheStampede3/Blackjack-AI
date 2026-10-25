@@ -76,17 +76,17 @@ class Seat:
 
 
 class DetectionEngine:
-    def __init__(self, log=print):
+    def __init__(self, log=print, *, provider=None, persist=True):
         self.log = _level_aware(log)
         self.capture = ScreenCapture()
         self._round_observation = RoundObservation()
         self._card_evidence = CardEvidence()
         self._unread_positions = {}
-        self.provider = ModelProvider.get()
+        self.provider = provider if provider is not None else ModelProvider.get()
         self.strategy = StrategyAdvisor()
         self.counter = CardCounter()
         try:
-            self.store = SessionStore()
+            self.store = SessionStore() if persist else None
         except Exception as e:  # a broken DB must never block detection
             self.store = None
             self.log(f"Session store unavailable: {e}")
@@ -213,7 +213,12 @@ class DetectionEngine:
 
     # ------------------------------------------------------------------ setup
 
-    def set_monitor(self, monitor):
+    def set_monitor(self, monitor, *, profile=None):
+        custom = None
+        if profile is not None:
+            custom = load_custom_regions((monitor.width, monitor.height), profile=profile)
+            if custom is None:
+                raise ValueError(f'Profile "{profile}" has no seven-seat layout at {monitor.width}x{monitor.height}.')
         with self._lock:
             self.capture.set_monitor(monitor)
             if self._unread_positions:
@@ -228,8 +233,9 @@ class DetectionEngine:
             self._round_observation = RoundObservation()
             self._round_observation.count_uncertain = previous_doubt
             res = self.capture.resolution
-            self.regions = scaled_player_regions(res)
-            self._dealer_rect = dealer_area_rect(res)
+            self.regions = ([Polygon(p) for p in custom["players"]] if custom
+                            else scaled_player_regions(res))
+            self._dealer_rect = tuple(custom["dealer"]) if custom else dealer_area_rect(res)
             sx, _ = scaling_factors(res)
             self._dist_scale = sx
             self._ocr_regions = ocr.load_regions(res)

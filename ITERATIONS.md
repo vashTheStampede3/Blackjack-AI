@@ -218,3 +218,15 @@ reload and ownership in both new modes; out-of-frame and overlapping zones are
 still rejected. User profile and label bytes were unchanged. No recognition,
 remote requests or assistant image inspection. The running editor is left open
 until restart approval so its unsaved drawing is not discarded automatically.
+
+## Production-path local video replay — measurement plumbing
+
+Added explicit provider injection, optional session persistence and exact named
+seven-seat profile selection to DetectionEngine. Existing defaults are unchanged.
+The replay tool uses the production capture/diff/inference/evidence/counting/
+snapshot path with the actual local ONNX model and real-time video position.
+Financial EV, OCR, phase/anchor detection, training and session writes are disabled
+for this measurement; socket connections are blocked. Labels only delimit scoring,
+never detection or round transitions. Only numeric traces are saved, no frames.
+Nineteen focused replay/engine tests passed in 2.22 seconds with generated frames;
+these verify plumbing, not recognition. The first real seven-seat run is separate.
