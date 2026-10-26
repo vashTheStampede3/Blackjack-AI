@@ -468,3 +468,11 @@ Decision: retain the repair. No model was replaced/trained and no desktop frame
 was persisted. These are functional and geometric measurements, not live vision
 accuracy. Opposing-corner geometry cannot prove orientation in every occlusion;
 GPU-browser freshness, live CPU and cycle p95 still require actual source data.
+
+## Stabilization audit - identity, overlay and repeat replay (2026-10-26)
+
+Hypothesis: current missing cards might be a regression introduced by the registry stabilization. Controlled comparison used the same local ONNX model, calibrated video regions and exact 113-frame schedule against both the starting revision and current working code. Both recorded 20/22 then 3/15 events and final RC +1; an older pre-ROI report recorded 22/22 then 15/15 and final RC 0. These are event totals, not rank-accuracy measurements.
+
+A repeated weak 4 proposal spans almost the entire mine ROI during the empty interval, preventing automatic round clearance and leaving second-round cards associated with the prior round. This is a concrete starting-revision limitation; no single-video threshold adjustment or model change was applied. Manual New Round remains available. More independent labelled footage and a safe uncertainty-preserving fix are needed.
+
+Changes: atomic contribution replacement, in-shoe history and manual location workflow, bounded card evidence telemetry, draggable overlay with verified Windows capture exclusion, and reproducible startup. Full suite: 1573 tests and 37 subtests passed; Tk smoke with synthetic input: 26 checks, no callback errors. No live-precision or soak claim is made.

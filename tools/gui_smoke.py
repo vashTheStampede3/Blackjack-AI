@@ -10,7 +10,7 @@ import tempfile
 import time
 import traceback
 import tkinter as tk
-from tkinter import messagebox,filedialog
+from tkinter import messagebox,filedialog,ttk
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +122,7 @@ def main():
             yield from widgets(child)
 
     def button(owner,text):
-        found=[w for w in widgets(owner) if isinstance(w,tk.Button) and text in str(w.cget("text"))]
+        found=[w for w in widgets(owner) if isinstance(w,(tk.Button,ttk.Button)) and text in str(w.cget("text"))]
         if not found: raise AssertionError(f"Button unavailable: {text}")
         return found[0]
 
@@ -227,7 +227,7 @@ def main():
         original=hero["cards"][0].card_identity
         corrected_rank="6" if original.get("rank")!="6" else "10"
         before=engine.counter.running_count
-        app.table._dispatch_card_identity(hero["cards"][0]);pump()
+        hero["cards"][0].event_generate("<Button-1>", x=4, y=4);pump()
         picker=getattr(app,"_card_correction_picker",None)
         live=app._current_display_snapshot()
         diagnostics={
@@ -269,7 +269,14 @@ def main():
         target=next(widget for widget in hero["cards"] if widget.card_identity["card_id"]!=original["card_id"])
         doomed=target.card_identity["card_id"]
         before_seen=engine.counter.cards_seen
-        app.table._dispatch_card_identity(target);pump()
+        mini = app.round_overlay
+        visual = next(item for item in mini._drawn_cards if item["identity"].get("card_id") == doomed)
+        x1, y1, x2, y2 = mini.canvas.coords(visual["item"])
+        x, y = round((x1+x2)/2), round((y1+y2)/2)
+        mini.canvas.event_generate("<Motion>", x=x, y=y)
+        mini.canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+        mini.canvas.event_generate("<ButtonRelease-1>", x=x, y=y)
+        pump()
         picker=app._card_correction_picker
         assert picker is not None and picker._card_identity["card_id"]==doomed
         assert app._finish_identity_correction("not_a_card",None,None,target.card_identity)
@@ -283,6 +290,58 @@ def main():
         deadline=time.monotonic()+5
         while app.controller._thread and app.controller._thread.is_alive() and time.monotonic()<deadline:pump(.1)
         assert not app.controller._thread or not app.controller._thread.is_alive()
+
+    def registry_history_workflow():
+        app.registry_btn.invoke();pump()
+        window=app._registry_window
+        assert window.winfo_exists()
+        row=next(card for card in engine.get_registry_inspection()["cards"]
+                 if card["status"]=="active" and card["counted"] and card["owner"]=="mine")
+        cid=row["id"]
+        window.tree.selection_set(cid)
+        click("Corregir seleccionada",window)
+        picker=app._card_correction_picker
+        assert picker.attributes("-topmost")
+        picker._set_rank("8");picker._save_button.invoke();pump()
+        assert engine.card_registry.cards[cid].rank=="8"
+        click("New Round")
+        window.refresh(engine.get_registry_inspection())
+        assert cid in engine.card_registry.archive
+        before=engine.counter.running_count;seen=engine.counter.cards_seen
+        window.tree.selection_set(cid);click("Corregir seleccionada",window)
+        picker=app._card_correction_picker
+        picker._set_rank("Ace");picker._save_button.invoke();pump()
+        assert engine.counter.running_count==before-1 and engine.counter.cards_seen==seen
+        assert engine.card_registry.archive[cid].rank=="Ace"
+        assert app._table_presentation==app.round_overlay._last_state
+        window.destroy()
+
+    def omitted_card_workflow():
+        click("Start Detection")
+        wait_registered_cards()
+        app.registry_btn.invoke();pump()
+        window=app._registry_window
+        before=engine.counter.cards_seen;rc=engine.counter.running_count
+        click("Anadir carta omitida",window)
+        location=app._manual_location_picker
+        assert location is not None and location.winfo_exists()
+        x=mx+(mr-mx)*.22;y=my+(mb-my)*.52
+        scale=location.scale
+        location.canvas.event_generate("<ButtonPress-1>",x=round((x-18)*scale),y=round((y-28)*scale))
+        location.canvas.event_generate("<B1-Motion>",x=round((x+18)*scale),y=round((y+28)*scale))
+        location.canvas.event_generate("<ButtonRelease-1>",x=round((x+18)*scale),y=round((y+28)*scale))
+        pump()
+        picker=app._card_correction_picker
+        assert picker is not None and picker.attributes("-topmost")
+        picker._set_rank("5");picker._save_button.invoke();pump(.4)
+        added=[c for c in engine.card_registry.cards.values() if c.manual_added]
+        assert len(added)==1 and added[0].rank=="5"
+        assert engine.counter.cards_seen==before+1 and engine.counter.running_count==rc+1
+        assert app._table_presentation==app.round_overlay._last_state
+        click("Stop Detection")
+        deadline=time.monotonic()+5
+        while app.controller._thread and app.controller._thread.is_alive() and time.monotonic()<deadline:pump(.1)
+        window.destroy()
 
     def resets():
         before=engine.counter.cards_seen
@@ -401,6 +460,8 @@ def main():
             for label in ["Calibrate Regions","OCR Regions","Capture Controls","Capture Anchors"]:
                 check(f"{label}: open/cancel",lambda label=label:open_window(label))
             check("physical detections and identity corrections",manual_cards)
+            check("registry inspector active and historical correction",registry_history_workflow)
+            check("manual omitted card from native location",omitted_card_workflow)
             check("new round and new shoe",resets)
             check("manual count +/-",counters)
             check("region preview open/close",preview)

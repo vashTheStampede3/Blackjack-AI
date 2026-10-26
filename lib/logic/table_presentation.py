@@ -34,7 +34,8 @@ _MESSAGES = {
 _CARD_FIELDS = (
     "card_id", "rank", "suit", "state", "owner", "hand", "legacy_ref",
     "reason", "center_norm", "bbox_norm", "ambiguous_seat", "first_seen",
-    "last_seen", "bbox", "cx", "cy", "confidence",
+    "last_seen", "bbox", "cx", "cy", "confidence", "manual", "counted",
+    "valid_observations", "confirmed_at", "counted_at",
 )
 _SOURCE_FIELDS = (
     "source_mode", "source_profile", "source_resolution", "source_backend",

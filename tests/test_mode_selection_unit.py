@@ -149,13 +149,15 @@ def test_controller_old_signature():
 def minimal_engine(monkeypatch):
     e = SimpleNamespace(_lock=RLock(), capture=SimpleNamespace(resolution=(320, 180), set_monitor=Mock()),
         _preview_cache_lock=RLock(), _preview_detection_cache={"old": True}, _last_frame=object(),
-        card_layout=None, card_registry=object(), counter=SimpleNamespace(cards_seen=12, shoe_id="shoe"),
+        card_layout=None, card_registry=None, counter=SimpleNamespace(cards_seen=12, shoe_id="shoe"),
         round_number=7, _active_mode="old", _active_profile="Old", _unread_positions=set(),
         seats=[SimpleNamespace(cards=[{"name": "Ace"}], split=True)], dealer_card="Ace",
         _round_observation=RoundObservation(), _pending_extra={}, _pending_positions={},
         _prev_seat_thumbs={0: object()}, _prev_thumb=object(), _prev_dealer_thumb=object(),
         regions=[object()], phase_detector=Mock(), log=Mock(), publish_snapshot=Mock())
     monkeypatch.setattr(engine_module.ocr, "load_regions", Mock(return_value=None))
+    e.card_registry = CardMemory(e.counter)
+    e.card_registry.round_number = e.round_number
     e._sync_registry_cards = MethodType(engine_module.DetectionEngine._sync_registry_cards, e)
     return e
 

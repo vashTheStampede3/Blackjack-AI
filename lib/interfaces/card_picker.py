@@ -37,13 +37,15 @@ class CardPicker(tk.Toplevel):
         self.title(title)
         self.configure(bg=C["bg_primary"])
         self.resizable(False, False)
-        self.transient(parent)
+        if getattr(parent, "state", lambda: "normal")() not in ("iconic", "withdrawn"):
+            self.transient(parent)
         self.grab_set()
         self._on_select = on_select
         self._hand_var = None
         self._card_identity = deepcopy(card_identity) if isinstance(card_identity, dict) else None
         self._on_close = on_close
         self._closed = False
+        self._allow_remove = allow_remove
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
         header = tk.Label(self, text=title, font=constants.FONT_SECTION,
@@ -56,6 +58,9 @@ class CardPicker(tk.Toplevel):
             x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
             y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
             self.geometry(f"+{max(0, x)}+{max(0, y)}")
+            self.attributes("-topmost", True)
+            self.lift()
+            self.focus_force()
             return
 
         if split_info and split_info.get("is_split"):
@@ -130,6 +135,7 @@ class CardPicker(tk.Toplevel):
         if current_suit_name not in constants.CARD_SUITS:
             current_suit_name = None
         self._current_rank = current_rank
+        self._needs_confirmation = card.get("state") != "confirmed" or bool(card.get("reason"))
         self._current_suit = _SUIT_CODES.get(current_suit_name) if current_suit_name else None
         self._chosen_rank = current_rank
         self._chosen_suit = None  # None means preserve the physical card's current suit.
@@ -142,7 +148,7 @@ class CardPicker(tk.Toplevel):
         hand_label = f"Mano {hand + 1}" if type(hand) is int and hand >= 0 else "mano sin etiqueta"
         details = (f"Carta actual: {rank_label} {suit_label}    "
                    f"Grupo: {group} / {hand_label}\n"
-                   f"card_id: {card.get('card_id', 'sin identidad')}")
+                   f"card_id: {card.get('card_id') or 'se asigna al guardar'}")
         tk.Label(self, text=details, justify=tk.LEFT, anchor="w",
                  font=constants.FONT_BODY, bg=C["bg_primary"],
                  fg=C["text_primary"]).pack(fill=tk.X, padx=14, pady=(0, 8))
@@ -183,10 +189,11 @@ class CardPicker(tk.Toplevel):
             bg=C["success"], fg="white", relief="flat", cursor="hand2",
             font=constants.FONT_BODY_BOLD, padx=10, pady=7)
         self._save_button.pack(side=tk.LEFT)
-        tk.Button(footer, text="Descartar Falsa Detección",
-                  command=self._discard_identity_card, bg=C["danger"], fg="white",
-                  relief="flat", cursor="hand2", font=constants.FONT_BODY,
-                  padx=8, pady=7).pack(side=tk.LEFT, padx=6)
+        if getattr(self, "_allow_remove", True):
+            tk.Button(footer, text="Descartar Falsa Detección",
+                      command=self._discard_identity_card, bg=C["danger"], fg="white",
+                      relief="flat", cursor="hand2", font=constants.FONT_BODY,
+                      padx=8, pady=7).pack(side=tk.LEFT, padx=6)
         tk.Button(footer, text="Cancelar", command=self._cancel,
                   bg=C["text_secondary"], fg="white", relief="flat",
                   cursor="hand2", font=constants.FONT_BODY,
@@ -215,13 +222,14 @@ class CardPicker(tk.Toplevel):
                         and self._chosen_suit != self._current_suit)
         self._save_button.configure(
             state=(tk.NORMAL if self._chosen_rank is not None
-                   and (rank_changed or suit_changed) else tk.DISABLED))
+                   and (rank_changed or suit_changed or getattr(self, "_needs_confirmation", False)) else tk.DISABLED))
 
     def _save_identity_correction(self):
         if self._chosen_rank is None:
             return
         if (self._chosen_rank == self._current_rank
-                and (self._chosen_suit is None or self._chosen_suit == self._current_suit)):
+                and (self._chosen_suit is None or self._chosen_suit == self._current_suit)
+                and not getattr(self, "_needs_confirmation", False)):
             return
         identity = deepcopy(self._card_identity)
         rank, suit = self._chosen_rank, self._chosen_suit

@@ -161,3 +161,57 @@ def test_random_repeated_corrections_equal_one_contribution_per_physical_card(en
         cards[cid]=rank
         assert engine.counter.cards_seen==len(cards)
         assert engine.counter.running_count==sum(hilo_delta(rank) for rank in cards.values())
+
+
+def test_corrections_and_archive_persist_to_real_sqlite_without_recount(engine, tmp_path):
+    from lib.logic.session_store import SessionStore
+    engine.store = SessionStore(tmp_path / "history.db")
+    cid = observe(engine, "6")
+    context = deepcopy(engine.card_registry.cards[cid].context)
+    engine.new_round()
+    result = engine.apply_historical_correction(cid, context, "set_rank", new_rank="10")
+    assert result.ok
+    engine._io_pool.submit(lambda: None).result(timeout=5)
+    saved = engine.store.load_recent_shoe_state()
+    assert saved["state"]["running_count"] == -1
+    assert saved["state"]["cards_seen"] == 1
+    archived = next(row for row in saved["state"]["card_memory"]["archive"] if row["id"] == cid)
+    assert archived["rank"] == "10" and archived["manual"]
+    engine.apply_shoe_state(saved)
+    assert engine.counter.running_count == -1 and engine.counter.cards_seen == 1
+    assert engine.card_registry.archive[cid].context == context
+
+
+def test_late_suit_observation_updates_shoe_composition_once(engine):
+    cid = observe(engine, "6")
+    for now in (10., 11., 12.):
+        engine.card_registry.observe([{"name": "6", "suit": "H", "owner": "mine",
+            "cx": 80., "cy": 200., "width": 20., "height": 30., "confidence": .96}], now)
+    card = engine.card_registry.cards[cid]
+    assert card.suit == "H" and card.counted_name == "6 of Hearts"
+    assert engine.counter.running_count == 1 and engine.counter.cards_seen == 1
+    assert engine.counter.rank_seen_nosuit["6"] == 0
+    assert engine.counter.suit_seen["6 of Hearts"] == 1
+
+
+def test_manual_unknown_suit_cannot_be_overwritten_by_later_model(engine):
+    cid = observe(engine, "6")
+    assert engine.apply_correction(cid, engine.round_number, "set_rank", new_rank="10").ok
+    for now in (10., 11., 12.):
+        engine.card_registry.observe([{"name": "6", "suit": "H", "owner": "mine",
+            "cx": 80., "cy": 200., "width": 20., "height": 30., "confidence": .99}], now)
+    card = engine.card_registry.cards[cid]
+    assert card.rank == "10" and card.suit is None and card.counted_name == "10"
+    assert engine.counter.running_count == -1 and engine.counter.cards_seen == 1
+    assert engine.counter.rank_seen_nosuit["10"] == 1
+
+
+def test_displaced_observation_near_manually_added_card_remains_uncertain(engine):
+    result, cid = engine.add_manual_card(engine.correction_context(), [70, 185, 90, 215], "10")
+    assert result.ok
+    engine.card_registry.observe([{"name": "6", "owner": "mine", "cx": 90., "cy": 200.,
+        "width": 20., "height": 30., "confidence": .99}], 10.)
+    assert engine.counter.cards_seen == 1 and engine.counter.running_count == -1
+    assert engine.counter.count_uncertain
+    pending = [c for c in engine.card_registry.cards.values() if c.id != cid]
+    assert len(pending) == 1 and pending[0].possible_ids == [cid] and not pending[0].counted

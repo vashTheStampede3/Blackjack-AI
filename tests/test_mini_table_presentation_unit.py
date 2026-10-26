@@ -116,6 +116,20 @@ def test_rank_suit_and_uncertain_cards_are_rendered_without_invention(mini, rank
     assert len(mini._drawn_cards) == 1
 
 
+@pytest.mark.parametrize("state,reason,manual,color", [
+    ("confirmed", None, False, "#38BDF8"),
+    ("confirmed", None, True, "#22C55E"),
+    ("pending", None, False, "#F97316"),
+    ("confirmed", "conflict", True, "#EF4444"),
+])
+def test_card_outline_distinguishes_confirmed_manual_pending_and_conflict(mini, state, reason, manual, color):
+    c = card(state=state, reason=reason)
+    c["manual"] = manual
+    mini.update_from_presentation(presentation(cards=[c], dealer=[]))
+    item = mini.canvas.items[mini._drawn_cards[0]["item"]]
+    assert item["outline"] == color
+
+
 def test_multiple_dealer_cards_keep_ids_order_and_no_hidden_card(mini):
     cards = [card("d1", "8"), card("d2", "8"), card("d3", "Ace")]
     mini.update_from_presentation(presentation(cards=[], dealer=cards))

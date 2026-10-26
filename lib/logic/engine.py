@@ -867,16 +867,24 @@ class DetectionEngine:
             resolution = list(self.capture.resolution)
         except (AttributeError, ValueError):
             resolution = None
+        source_id = getattr(self, "_configuration_source_identity", None)
         return {"round_id": self.round_number, "shoe_id": self.counter.shoe_id,
                 "profile_name": getattr(self, "_active_profile", None),
                 "mode": getattr(self, "_active_mode", None), "resolution": resolution,
-                "source_id": deepcopy(getattr(self, "_configuration_source_identity", None)),
+                # JSON round trips must preserve equality of saved contexts.
+                "source_id": list(source_id) if source_id is not None else None,
                 "source_ref": deepcopy(getattr(self, "_configuration_source_descriptor", None))}
 
     def _persist_registry_state(self):
         if getattr(self, "store", None) is not None:
             state, round_id, cutting = self._shoe_state(), self.round_number, self.cutting_card_seen
-            self._io_pool.submit(self.store.save_shoe_state, state, round_id, cutting)
+            self._io_pool.submit(self._persist_registry_job, state, round_id, cutting)
+
+    def _persist_registry_job(self, state, round_id, cutting):
+        try:
+            self.store.save_shoe_state(state, round_id, cutting)
+        except Exception as error:
+            self.log(f"No se pudo guardar el registro del mazo: {error}", level="ERROR")
 
     def get_registry_inspection(self):
         with self._lock:
@@ -897,6 +905,19 @@ class DetectionEngine:
                 DetectionEngine._persist_registry_state(self)
                 self.publish_snapshot()
             return result
+
+    def apply_inspected_correction(self, card_id, expected_context, action, *,
+                                   historical=False, new_rank=None, new_suit=None):
+        with self._lock:
+            if historical:
+                return self.apply_historical_correction(card_id, expected_context, action,
+                    new_rank=new_rank, new_suit=new_suit)
+            record = self.card_registry.cards.get(card_id) if self.card_registry is not None else None
+            if (record is None or expected_context != self.correction_context()
+                    or record.context != expected_context):
+                return CorrectionResult(False, "source_context_changed")
+            return self.apply_correction(card_id, self.round_number, action,
+                                         new_rank=new_rank, new_suit=new_suit)
 
     def add_manual_card(self, expected_context, bbox, rank, suit=None):
         with self._lock:
@@ -3144,6 +3165,9 @@ class DetectionEngine:
                     "closed_by_double": group.closed_by_double,
                     "cards": [{
                         "card_id": card.id,
+                        "manual": card.manual, "counted": card.counted,
+                        "confidence": card.confidence, "valid_observations": card.valid_observations,
+                        "confirmed_at": card.confirmed_at, "counted_at": card.counted_at,
                         "rank": card.rank if card.counted and not card.reason else None,
                         "suit": card.suit,
                         "ambiguous_seat": card.ambiguous_seat,
@@ -3186,6 +3210,9 @@ class DetectionEngine:
                     } for seat in self.seats if seat.cards]),
                 "dealer_cards": ([{
                     "card_id": card.id,
+                    "manual": card.manual, "counted": card.counted,
+                    "confidence": card.confidence, "valid_observations": card.valid_observations,
+                    "confirmed_at": card.confirmed_at, "counted_at": card.counted_at,
                     "rank": card.rank if card.counted and not card.reason else None,
                     "suit": card.suit,
                     "state": card.state,

@@ -21,7 +21,7 @@
 
 ## Startup and installation checkpoint
 
-- Checked the existing Python 3.12 environment and frozen uv lock (37 packages); `start.ps1 -CheckOnly` succeeds without reinstalling packages. The desktop shortcut points to this checkout?s pythonw and launcher.
+- Checked the existing Python 3.12 environment and frozen uv lock (37 packages); `start.ps1 -CheckOnly` succeeds without reinstalling packages. The desktop shortcut points to this checkout's pythonw and launcher.
 - Launcher preflight reports a missing environment or local model; Tcl/Tk discovery uses the actual Python installation when Windows exposes an invalid alias. The CMD and PowerShell launch paths use the same guarded entry point.
 - Validation: 29 launcher and Tk runtime unit tests passed. No dependencies or models were downloaded.
 - Next: finish overlay, inspector and replay checkpoints; repeat full regression and Tk smoke.
@@ -32,3 +32,18 @@
 - The canvas reuses items, avoids redundant native ShowWindow/topmost calls, and uses a verified Windows capture exclusion for MSS. Unsupported capture paths hide and restore on the Tk thread; external PrintWindow sources are independent of this window.
 - Validation: 236 overlay, mode and GUI sections tests passed, including real Tk capture exclusion with synthetic pixels. Full continuous live capture and physical multi-monitor movement remain unmeasured.
 - Next: finish the registry inspector and complete the original-code replay comparison.
+
+## Identity corrections and inspection integration
+
+- Main table and Mini Mesa route card selection to the engine by physical ID; the picker stays above the overlay and can manually confirm a pending reading. The inspector exposes confidence, valid observations, states, times and bounded transition events.
+- Current-shoe history can be corrected with its original context. Omitted cards require an explicit native-image location in a calibrated region; ambiguous associations remain uncertain. Later detector observations cannot override a manual rank or unknown suit.
+- Fixed source identity serialization after SQLite restore and kept late-suit observations consistent with the existing counter contribution. Hi-Lo and shoe composition changes remain atomic.
+- Validation: 196 related presentation/identity tests, 109 memory/correction tests, and 26 real-Tk smoke checks with synthetic capture passed. SQLite round-trip and historical correction were tested. Full regression is running; live accuracy remains unverified.
+- Recorded-video replay found 23/37 counted events and final RC +1 on the current pipeline, compared with 37/37 and RC 0 in an older report. A repeat from this mission starting revision is running because the pipelines differ.
+
+## Full regression and recorded video comparison
+
+- Complete tests/: 1573 passed and 37 subtests passed; zero failures or skips. An earlier run exposed four stale test fixtures, which were updated to reflect the actual memory and lock contracts.
+- The exact 113-frame video replay using local ONNX and the same calibration/schedule produced 20/22 then 3/15 counted events and final RC +1 on both the starting revision and the stabilized working code. A much older report recorded 22/22 and 15/15, RC 0, using a different inference pipeline.
+- Numeric trace: during the empty interval a below-threshold 4 box fills almost the entire mine crop and repeatedly prevents round clearance; second-hand detections are then associated with the prior round. This was already present at the starting revision. No confidence or geometry rule was changed based on this one recording. Use manual New Round if necessary and treat live accuracy as unverified.
+- Next: finish native input-event smoke, publish the GUI/registry checkpoint and video replay repair; remove only task-owned temporary worktrees and test directories.

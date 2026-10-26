@@ -344,7 +344,8 @@ def test_mini_table_options_keep_opacity_and_position_without_activation(sidebar
     g, widgets, _ = sidebar
     monkeypatch.setattr(gui_module.constants, "UI", deepcopy(gui_module.constants.UI))
     g.round_enabled.set(enabled)
-    overlay = SimpleNamespace(editing=False, set_opacity=Mock(), set_editing=Mock(), remember_position=Mock())
+    overlay = SimpleNamespace(editing=False, set_opacity=Mock(), set_editing=Mock(),
+                              set_locked=Mock(), remember_position=Mock())
     g.round_overlay = overlay if enabled else None
     g._round_options = None
     top = Mock()
@@ -368,6 +369,7 @@ def test_mini_table_options_keep_opacity_and_position_without_activation(sidebar
     position.options["command"]()
     if enabled:
         overlay.set_editing.assert_called_once_with(True)
+        overlay.set_locked.assert_called_once_with(False)
     else:
         assert not position.options["variable"].get()
         assert "botón superior" in g.set_status.call_args.args[0]
@@ -378,6 +380,7 @@ def test_mini_table_options_keep_opacity_and_position_without_activation(sidebar
     finish.options["command"]()
     if enabled:
         overlay.set_editing.assert_called_with(False)
+        overlay.set_locked.assert_called_with(True)
         overlay.remember_position.assert_called_once_with()
         assert g.round_overlay is overlay
     assert g.round_enabled.get() is enabled

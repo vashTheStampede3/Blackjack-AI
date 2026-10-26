@@ -252,6 +252,9 @@ class TableView:
                 else:
                     widget, rendered = tk.Label(self.canvas, bg=C["bg_canvas"], bd=0, cursor=""), None
             widget.card_data = deepcopy(card)
+            border = ("#EF4444" if card.get("reason") else "#22C55E" if card.get("manual")
+                      else "#F59E0B" if card.get("state") != "confirmed" else "#38BDF8")
+            widget.config(highlightbackground=border, highlightthickness=1)
             identity_fields = (
                 "card_id", "legacy_ref", "rank", "suit", "state", "reason",
                 "hand", "owner", "group_id", "round_id", "shoe_id",

@@ -59,6 +59,7 @@ class RememberedCard:
     context: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
     manual_added: bool = False
+    last_model_rank: str | None = None
 
     @property
     def card_id(self):
@@ -201,7 +202,9 @@ class CardMemory:
         return card
 
     def _update(self, card, pred, now):
+        pred = self._normalize(pred)
         before = self._decision(card)
+        card.last_model_rank = pred.get("name")
         card.observations += 1
         if type(pred.get("confidence")) in (float, int):
             card.confidence = float(pred["confidence"])
@@ -225,8 +228,6 @@ class CardMemory:
         card.trajectory.append((now, card.cx, card.cy))
         if len(card.trajectory) > 12:
             del card.trajectory[:-12]
-        if card.suit is None and pred.get("suit"):
-            card.suit = pred["suit"]
         if card.state in ("rejected", "retired"):
             return
         if card.manual:
@@ -244,6 +245,19 @@ class CardMemory:
         if card.counted and pred["name"] != card.rank:
             self._issue(card, "Rango cambiado; revisar carta")
             return
+        suit = pred.get("suit")
+        if card.suit is None and suit in ("S", "H", "D", "C"):
+            if card.counted:
+                # A late suit observation must move the existing contribution,
+                # not create a second card or desynchronize shoe composition.
+                name = self._counted_name(card.rank, suit)
+                try:
+                    self.counter.replace_contribution(card.counted_name or card.rank, name)
+                except ValueError:
+                    self._issue(card, "No se pudo actualizar el palo contabilizado")
+                    return
+                card.counted_name = name
+            card.suit = suit
         if pred["name"] != card.rank:
             card.rank, card.hits = pred["name"], 0
         card.hits += 1
@@ -365,7 +379,7 @@ class CardMemory:
             stable_same_rank = pred.get("name") == card.rank and card.rank is not None
             jitter = max(4., min(card.width, card.height,
                                  pred.get("width", 30), pred.get("height", 40))*.35)
-            if (stable_same_rank and card.counted
+            if ((stable_same_rank or card.manual_added) and card.counted
                     and shift > jitter and not card.reason):
                 # Once counted, a displaced same-rank box may be a moved card
                 # or a second card after occlusion. A one-frame candidate is

@@ -57,6 +57,8 @@ def format_model_runtime_hint(metadata):
 
 class ModernBlackjackGUI(tk.Tk):
     def __init__(self, log_manager=None):
+        from .tk_runtime import configure_tk_runtime
+        configure_tk_runtime()
         super().__init__()
         # Scaling first: every widget below picks up the live FONT_* objects
         # and px() sizes resolved for this monitor's DPI.
@@ -87,7 +89,8 @@ class ModernBlackjackGUI(tk.Tk):
         self.round_overlay = None
         self.hud = None  # compatibility alias for the same Mini Mesa window
         from .capture_guard import CaptureGuard
-        self._capture_guard = CaptureGuard(self, lambda: self.round_overlay)
+        self._capture_guard = CaptureGuard(self, lambda: self.round_overlay,
+                                          source_fn=lambda: self.controller.engine.capture.monitor)
         self.controller.engine.capture.guard = self._capture_guard
         self._last_seq = -1
         self._last_table_signature = None
@@ -417,6 +420,9 @@ class ModernBlackjackGUI(tk.Tk):
                     "Mesa general, Mi mano y Crupier en Multijugador")
         self.calibrate_btn.pack(fill=tk.X, pady=4)
         self.calibrate_btn.config(state="disabled")
+        self.registry_btn = ttk.Button(section, text="Lecturas / Corregir / Anadir",
+                                      command=lambda: ModernBlackjackGUI._open_registry(self))
+        self.registry_btn.pack(fill=tk.X, pady=4)
         self.advanced_tools_open = tk.BooleanVar(value=False)
         self.advanced_tools_btn = ttk.Button(section, text="Advanced tools ▸", command=self._toggle_advanced_tools)
         self.advanced_tools_btn.pack(fill=tk.X, pady=(8, 2))
@@ -1244,13 +1250,27 @@ class ModernBlackjackGUI(tk.Tk):
             self, "Corregir carta", self.table.card_image,
             self._finish_identity_correction, card_identity=identity,
             on_close=self._clear_identity_picker)
+        overlay = getattr(self, "round_overlay", None)
+        if overlay is not None:
+            overlay.raise_blocked = True
         return True
 
     def _clear_identity_picker(self):
         self._card_correction_picker = None
+        overlay = getattr(self, "round_overlay", None)
+        if overlay is not None:
+            overlay.raise_blocked = False
+            restore = getattr(overlay, "_show_noactivate", None)
+            if callable(restore) and not getattr(self, "_closing", False):
+                restore()
 
     def _invalidate_card_picker(self):
         """Close an identity dialog before its captured registry context expires."""
+        location = getattr(self, "_manual_location_picker", None)
+        if location is not None:
+            if location.winfo_exists():
+                location.destroy()
+            self._manual_location_picker = None
         picker = getattr(self, "_card_correction_picker", None)
         if picker is None:
             return
@@ -1517,6 +1537,89 @@ class ModernBlackjackGUI(tk.Tk):
         self.ui_actions.complete(self._preview_action, f"Falló la vista previa: {error}", error=True)
         self._preview_action = None
 
+    def _open_registry(self):
+        from .registry_window import RegistryWindow
+        window = getattr(self, "_registry_window", None)
+        if window is None or not window.winfo_exists():
+            window = self._registry_window = RegistryWindow(
+                self, self._correct_inspected_card, self._add_omitted_card)
+        window.refresh(self.controller.engine.get_registry_inspection())
+        window.lift()
+
+    def _correct_inspected_card(self, record):
+        self._invalidate_card_picker()
+        identity = deepcopy(record) | {"card_id": record["id"],
+            "group_id": record.get("seat_id") or record["owner"],
+            "historical": record["status"] == "archived"}
+        self._card_correction_picker = CardPicker(self, "Corregir lectura del mazo", self.table.card_image,
+            self._finish_inspected_correction, card_identity=identity, on_close=self._clear_identity_picker)
+        if self.round_overlay is not None:
+            self.round_overlay.raise_blocked = True
+
+    def _finish_inspected_correction(self, action, rank, suit, identity):
+        result = self.controller.engine.apply_inspected_correction(
+            identity["card_id"], identity.get("context"), action,
+            historical=identity.get("historical", False), new_rank=rank, new_suit=suit)
+        if not result.ok:
+            self.set_status(f"Correccion rechazada: {result.reason}", error=True)
+            return False
+        self.set_status(f"Carta corregida. Cambio RC: {result.rc_delta:+d}")
+        snapshot = self._current_display_snapshot()
+        if snapshot is not None:
+            self._render(snapshot)
+        else:
+            ModernBlackjackGUI._render_table(self, None)
+        return True
+
+    def _add_omitted_card(self):
+        from .registry_window import ManualCardLocation
+        engine = self.controller.engine
+        cached = engine.get_region_preview_cache(max_age_s=2.)
+        if not self.controller.running or cached is None or not self._source_configured:
+            self.set_status("Inicia la lectura de una fuente calibrada para marcar la carta omitida.", error=True)
+            return False
+        self._invalidate_card_picker()
+        context = engine.correction_context()
+        def selected(bbox):
+            self._manual_location_picker = None
+            identity = {"context": context, "bbox": bbox, "state": "pending", "rank": None,
+                        "group_id": "region marcada", "card_id": None}
+            self._card_correction_picker = CardPicker(self, "Anadir carta omitida", self.table.card_image,
+                self._finish_manual_add, card_identity=identity, allow_remove=False,
+                on_close=self._clear_identity_picker)
+            if self.round_overlay is not None:
+                self.round_overlay.raise_blocked = True
+        self._manual_location_picker = ManualCardLocation(
+            self, cached["frame"], selected, on_close=self._clear_location_picker)
+        if self.round_overlay is not None:
+            self.round_overlay.raise_blocked = True
+        return True
+
+    def _clear_location_picker(self):
+        self._manual_location_picker = None
+        overlay = getattr(self, "round_overlay", None)
+        if overlay is not None:
+            overlay.raise_blocked = False
+            restore = getattr(overlay, "_show_noactivate", None)
+            if callable(restore) and not getattr(self, "_closing", False):
+                restore()
+
+    def _finish_manual_add(self, action, rank, suit, identity):
+        if action != "set_rank":
+            return False
+        result, card_id = self.controller.engine.add_manual_card(
+            identity["context"], identity["bbox"], rank, suit)
+        if not result.ok:
+            self.set_status(f"No se pudo anadir la carta: {result.reason}", error=True)
+            return False
+        self.set_status(f"Carta incorporada: {card_id}. Cambio RC: {result.rc_delta:+d}")
+        snapshot = self._current_display_snapshot()
+        if snapshot is not None:
+            self._render(snapshot)
+        else:
+            ModernBlackjackGUI._render_table(self, None)
+        return True
+
     def _open_logs(self):
         if getattr(self, "logging_window", None) is not None and self.logging_window.winfo_exists():
             self.logging_window.lift()
@@ -1567,6 +1670,12 @@ class ModernBlackjackGUI(tk.Tk):
                         error=state == "error")
                     self._detection_action = None
             self._last_render_error = None
+            registry_window = getattr(self, "_registry_window", None)
+            if registry_window is not None and registry_window.winfo_exists():
+                now = time.monotonic()
+                if now-getattr(self, "_registry_refreshed_at", 0.) >= .5:
+                    registry_window.refresh(self.controller.engine.get_registry_inspection())
+                    self._registry_refreshed_at = now
         except Exception as e:
             # A render error must never kill the update loop.
             if str(e) != getattr(self, "_last_render_error", None):
@@ -1871,6 +1980,7 @@ class ModernBlackjackGUI(tk.Tk):
                     self, "_on_identity_card_click", None)
                 self.round_overlay.identity_corrections_enabled = callable(
                     self.round_overlay.on_correct_card)
+                self.round_overlay.on_preferences_changed = lambda: ModernBlackjackGUI._save_overlay_preferences(self)
             self.hud = self.round_overlay
             ModernBlackjackGUI._render_table(
                 self, ModernBlackjackGUI._current_display_snapshot(self))
@@ -1884,6 +1994,12 @@ class ModernBlackjackGUI(tk.Tk):
         if hasattr(self, "hud_nav_btn"):
             self.hud_nav_btn.config(fg=(C["accent"] if self.round_enabled.get()
                                         else C["text_primary"]))
+
+    def _save_overlay_preferences(self):
+        if not getattr(self, "_closing", False):
+            save = getattr(self.controller.engine, "persist_settings_async", None)
+            if callable(save):
+                save()
 
     def _round_overlay_options(self):
         existing = getattr(self, "_round_options", None)
@@ -1910,12 +2026,15 @@ class ModernBlackjackGUI(tk.Tk):
                 self.set_status("Activá Mini Mesa desde el botón superior para ajustar su posición.")
                 return
             if self.round_overlay:
+                if editing.get():
+                    self.round_overlay.set_locked(False)
                 self.round_overlay.set_editing(editing.get())
-        tk.Checkbutton(top, text="Ajustar posici?n (desmarcar para bloquear)",
+        tk.Checkbutton(top, text="Ajustar posición (desmarcar para bloquear)",
                        variable=editing, command=set_editing).pack(padx=12, pady=8)
         def finish():
             if self.round_overlay:
                 self.round_overlay.set_editing(False)
+                self.round_overlay.set_locked(True)
                 self.round_overlay.remember_position()
             self.controller.engine.persist_settings_async()
             top.destroy()

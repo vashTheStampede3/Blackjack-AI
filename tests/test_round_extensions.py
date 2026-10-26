@@ -200,6 +200,11 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         overlay.update_from_presentation(changed_presentation, running=True)
         assert tuple(overlay.canvas.find_all()) == original_items, \
             "Canvas items were replaced during an incremental presentation refresh"
+        for _ in range(4):
+            overlay.update_from_presentation(_overlay_presentation(empty=True), running=True)
+            overlay.update_from_presentation(state, running=True)
+            assert set(overlay._item_state) == set(overlay.canvas.find_all()), \
+                "Removed canvas items must not accumulate in the redraw cache"
         root.update()
         time.sleep(.15)
         root.update()

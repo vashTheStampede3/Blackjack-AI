@@ -289,13 +289,16 @@ class MiniTableOverlay:
             self._text(WIDTH / 2, 264, notice, "#FEE2E2", 9, "center")
         if active:
             self._show_window()  # capture/activation guards remain authoritative
-            self.win.attributes("-alpha", self.opacity)
+            if getattr(self, "_applied_opacity", None) != self.opacity:
+                self.win.attributes("-alpha", self.opacity)
+                self._applied_opacity = self.opacity
         else:
             self.win.withdraw()
         for kind, pool in self._item_pools.items():
             used = self._item_pool_cursors[kind]
             for item in pool[used:]:
                 self.canvas.delete(item)
+                getattr(self, "_item_state", {}).pop(item, None)
             del pool[used:]
 
     def _item(self, kind, coords, **options):
@@ -394,6 +397,10 @@ class MiniTableOverlay:
         label = self._rank(rank) + SUIT_SYMBOLS.get(card.get("suit"), "") if confirmed else "?"
         fill, edge, fg = (("#F8FAFC", "#38BDF8", "#0F172A") if confirmed else
                           ("#7C2D12", "#F97316", "#FFEDD5"))
+        if card.get("reason"):
+            edge = "#EF4444"
+        elif confirmed and card.get("manual"):
+            edge = "#22C55E"
         tag = f"physical-card-{len(self._drawn_cards)}"
         item = self._item("rectangle", (x, y, x + card_w, y + card_h),
                           fill=fill, outline=edge, width=2, tags=(tag,))
@@ -521,6 +528,7 @@ class MiniTableOverlay:
         self.opacity = max(.25, min(1., float(opacity)))
         constants.UI["round_opacity"] = self.opacity
         self.win.attributes("-alpha", self.opacity)
+        self._applied_opacity = self.opacity
         if getattr(self, "_items", None) is not None:
             self._draw()
         self._persist_preferences()

@@ -1,50 +1,47 @@
-﻿# Guía práctica de Blackjack AI
+# Guía práctica de Blackjack AI
 
 ## Abrir y diagnosticar
 
-Hacé doble clic en **Blackjack AI** en el escritorio. El acceso directo inicia `scripts/launch_blackjack.py` con el Python del entorno `.venv312`, sin abrir una consola.
+Hacé doble clic en **Blackjack AI** en el escritorio o en **Open Blackjack AI.cmd** dentro del proyecto. Para verificar la instalación sin abrir la aplicación, ejecutá `./start.ps1 -CheckOnly` en PowerShell. La guía de instalación está en `docs/INSTALLATION.md`.
 
-Si la aplicación no inicia, revisá `logs/startup_errors.log`. En instalaciones sin permiso de escritura en el repositorio, el launcher utiliza `%LOCALAPPDATA%\Blackjack-AI\startup_errors.log`.
-
-Para diagnosticar desde PowerShell y ver excepciones en la consola:
+Si la aplicación no inicia, revisá `logs/startup_errors.log` o, si el proyecto no permite escribir, `%LOCALAPPDATA%\Blackjack-AI\startup_errors.log`. Para diagnosticar desde PowerShell:
 
 ```powershell
 cd "C:\ruta\al\repositorio\Blackjack-AI"
 .\.venv312\Scripts\python.exe -B scripts\launch_blackjack.py
 ```
 
-## Elegir modo y calibrar
+## Fuente, modo y calibración
 
-- **Individual**: calibrá `mine` (tu zona) y `dealer`.
-- **Multijugador**: calibrá `table` (mesa general), `mine` y `dealer`.
+Seleccioná el monitor o ventana, el perfil y uno de los dos modos:
 
-Seleccioná la fuente de captura, el perfil y el modo. Presioná **Calibrate Regions**, dibujá las regiones requeridas y guardá la calibración en el perfil activo. Una resolución o fuente diferente puede necesitar calibración propia. Usá **Preview Regions** para revisar las regiones antes de iniciar.
+- **Individual** requiere las regiones `mine` y `dealer`.
+- **Multijugador** requiere `table`, `mine` y `dealer`.
 
-## Iniciar y leer el HUD
+Presioná **Calibrate Regions**, dibujá las regiones y guardalas en el perfil activo. Una fuente o resolución diferente puede necesitar otra calibración. Revisá las regiones con **Preview Regions** y presioná **Start Detection**. **Stop** detiene la lectura y retira las cartas obsoletas de la mesa.
 
-Presioná **Start Detection** solo después de que la calibración válida esté aplicada. **Stop** detiene el worker y retira las cartas obsoletas de la mesa.
+## Lecturas, conteo y consejos
 
-El banner muestra:
+El banner muestra Running Count (`RC`), True Count (`TC`), cartas vistas, mazos restantes estimados y una alerta de lectura dudosa. Solo se presenta consejo cuando hay información suficiente sobre la mano propia y el crupier. Si hay split, cada mano conserva su consejo; el seguro se indica cuando corresponde.
 
-- `RC` (Running Count) y `TC` (True Count).
-- Cartas vistas y mazos restantes estimados.
-- Una alerta cuando hay lecturas o conteo inciertos.
-- El consejo de `Yo`, si la mano física está confirmada; si hay split, cada mano conserva su consejo.
-- `SEGURO / INSURANCE` cuando corresponda.
-- Ronda, modo y estado del motor.
+Un `?` indica un rango pendiente. En la mesa principal, el borde naranja señala una lectura pendiente, el rojo una contradicción y el verde una corrección manual. Revisá la alerta de incertidumbre aunque el RC parezca correcto.
 
-Un `?` representa una lectura sin rango confirmado. Una lectura pendiente no debe tratarse como carta confirmada.
+Abrí **Lecturas / Corregir / Anadir** para consultar identidad, grupo, confianza, observaciones válidas, estado, momentos y cambios de cada carta del mazo. Los tiempos de seguimiento son valores de reloj monotónico, útiles para comparar eventos dentro de la sesión. Por defecto hacen falta dos observaciones válidas consecutivas del mismo rango para confirmar y contar una candidata; una lectura ambigua o una corrección manual siguen reglas distintas. La confirmación no garantiza que el modelo haya leído la carta real correctamente.
 
-## Corregir una carta
+## Corregir, añadir o descartar una carta
 
-Hacé clic en una carta con identidad física válida (`card_id`) en la mesa principal o en Mini Mesa. En el selector podés elegir directamente un rango, opcionalmente cambiar el palo, guardar, descartar una falsa detección o cancelar. Cambiar solo el rango conserva el palo conocido o desconocido existente. Las correcciones se validan contra el registro actual; una carta obsoleta se rechaza.
+Hacé clic en una carta con identidad física en la mesa principal o Mini Mesa. En el selector elegí el rango, cambiá el palo si corresponde y guardá; también podés descartar una falsa detección o cancelar. Si cambiás solo el rango, se conserva el palo conocido o desconocido. Una observación sin identidad verificable no admite corrección por clic.
 
-Una observación transitoria sin `card_id` se puede mostrar, pero no se puede corregir manualmente hasta que tenga identidad verificable.
+Para agregar una carta omitida, abrí **Lecturas / Corregir / Anadir** y elegí **Anadir carta omitida** con la detección activa. Arrastrá un rectángulo sobre su índice en la imagen reciente y elegí rango y palo opcional. La ubicación debe estar dentro de una región calibrada; una asociación ambigua se rechaza para evitar un doble conteo.
+
+En la misma lista podés seleccionar una carta de una ronda anterior del mazo actual y corregirla o descartarla. El historial se invalida al iniciar un mazo nuevo. Tras guardar, verificá RC, TC y vistas: cambiar un 6 por un 10 reduce RC en 2 y mantiene la cantidad de cartas vistas; descartar una falsa detección revierte su contribución y reduce vistas en 1.
 
 ## Mini Mesa
 
-Activá **Mini Mesa** desde el interruptor principal. Arrastrala desde su zona de movimiento; un desplazamiento del cursor no debe abrir el selector de cartas. Ajustá la opacidad con el control de la ventana. CaptureGuard la oculta temporalmente durante capturas compatibles para evitar que la mesa se detecte a sí misma. Cerrarla con `X` sincroniza el único interruptor de activación.
+Activá **Mini Mesa** desde el interruptor principal. Arrastrala desde la barra **DRAG TO MOVE**. **LOCKED / UNLOCKED** bloquea o habilita el movimiento y **− / +** ajusta la opacidad. La posición y el bloqueo se guardan; si la ventana quedó fuera de pantalla, se recupera una posición accesible al abrirla. Un clic sobre una carta abre su selector; un arrastre no lo abre.
+
+CaptureGuard usa exclusión de captura de Windows cuando está disponible y oculta temporalmente la ventana como alternativa. Una fuente que no permita una captura limpia puede producir pausas o parpadeos durante esa alternativa. Cerrarla con `X` sincroniza el interruptor de activación.
 
 ## Ronda y zapato
 
-Al terminar la mano actual, presioná **New Round**: borra las cartas de esa ronda y conserva el conteo acumulado del zapato. Presioná **New Shoe** cuando se baraje o cambie el zapato: reinicia el conteo y sus identidades activas. Si todavía hay cartas visibles al reiniciar, el sistema puede marcar incertidumbre; despejá la mesa antes de empezar el nuevo zapato.
+Al terminar la mano, presioná **New Round**: se limpian las cartas de la ronda y se conserva el conteo acumulado. Presioná **New Shoe** cuando se baraje o cambie el zapato: se reinician conteo e identidades. Si aún hay cartas visibles, el sistema puede marcar incertidumbre; despejá la mesa antes de empezar el nuevo zapato.
