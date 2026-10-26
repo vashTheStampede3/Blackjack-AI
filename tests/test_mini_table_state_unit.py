@@ -7,18 +7,20 @@ from lib.interfaces.round_overlay import (MiniTableOverlay, card_chip_position,
 
 
 class MiniTableState(unittest.TestCase):
-    def test_stopped_and_confirmed_clean_table_hide(self):
+    def test_stopped_and_confirmed_clean_table_remain_visible(self):
         self.assertEqual(overlay_visibility({"card_groups": [{"cards": [1]}]}, False),
-                         (False, ""))
+                         (True, "DETECCIÓN DETENIDA"))
         self.assertEqual(overlay_visibility({"reading": {"table_clean_confirmed": True},
                                              "card_groups": [{"cards": [1]}]}, True),
-                         (False, ""))
+                         (True, "ESPERANDO CARTAS"))
 
-    def test_idle_without_cards_hides_unless_editing(self):
+    def test_idle_without_cards_remains_visible_and_editing_has_priority(self):
         snap = {"reading": {}, "card_groups": []}
-        self.assertEqual(overlay_visibility(snap, True), (False, ""))
+        self.assertEqual(overlay_visibility(snap, True), (True, "ESPERANDO CARTAS"))
         self.assertEqual(overlay_visibility(snap, True, editing=True),
                          (True, "AJUSTE DE POSICIÓN"))
+        self.assertEqual(overlay_visibility(snap, True, editing=True, hud_on=False),
+                         (False, ""))
 
     def test_uncertain_reading_shows_warning_not_advice(self):
         snap = {"count": {"count_uncertain": True}, "card_groups": [{"cards": [{}]}]}

@@ -261,9 +261,21 @@ class ModernBlackjackGUI(tk.Tk):
         self._build_monitor_section(inner)
         self._build_controls_section(inner)
         self._build_executor_section(inner)
-        self._build_counters_section(inner)
-        self._build_game_info_section(inner)
-        self._build_sidebets_section(inner)
+        self._build_hidden_sidebar_sections(inner)
+
+    def _build_hidden_sidebar_sections(self, parent):
+        self._hidden_sidebar_sections = {}
+        sections = (
+            ("cards_seen", self._build_counters_section),
+            ("game_info", self._build_game_info_section),
+            ("side_bets", self._build_sidebets_section),
+        )
+        for key, builder in sections:
+            section = builder(parent)
+            if section is None:
+                raise RuntimeError(f"La sección {key} no devolvió su contenedor")
+            section.pack_forget()
+            self._hidden_sidebar_sections[key] = section
 
     def _scrollbar_style(self):
         """Arrowless flat scrollbar matching the sidebar; returns the style
@@ -336,20 +348,11 @@ class ModernBlackjackGUI(tk.Tk):
                                        bg=C["bg_secondary"], fg=C["text_secondary"],
                                        justify=tk.LEFT, anchor="w", wraplength=240)
         self.monitor_status.pack(fill=tk.X, pady=(0, 4))
-        self.calibration_action_btn = self._button(
-            section, "Calibrate Regions", self._calibrate_regions, C["bg_canvas_soft"],
-            tooltip="Abrir las zonas de la fuente seleccionada para esta resolucion")
-        self.calibration_action_btn.pack(fill=tk.X, pady=(0, 4))
         section.bind("<Configure>", lambda event: self.monitor_status.config(
             wraplength=max(80, event.width - 16)), add="+")
-        row = tk.Frame(section, bg=C["bg_secondary"])
-        row.pack(fill=tk.X, pady=(6, 0))
         self.round_enabled = tk.BooleanVar(value=True)
-        tk.Checkbutton(row, text="Cartel de ronda", variable=self.round_enabled,
-                       command=self._toggle_round_overlay, bg=C["bg_secondary"],
-                       fg=C["text_primary"], selectcolor=C["bg_secondary"],
-                       font=constants.FONT_BODY).pack(side=tk.LEFT)
-        ttk.Button(row, text="Ajustes", command=self._round_overlay_options).pack(side=tk.RIGHT)
+        ttk.Button(section, text="Ajustes Mini Mesa", command=self._round_overlay_options).pack(
+            fill=tk.X, pady=(6, 0))
 
 
     def _build_controls_section(self, parent):
@@ -393,19 +396,20 @@ class ModernBlackjackGUI(tk.Tk):
 
         self._button(section, "↺  New Round", self._new_round, C["warning"],
                      fg=C["text_primary"],
-                     tooltip="Clear all seats and the dealer card (shoe count is kept)"
+                     tooltip="Clear the current hands and dealer cards (shoe count is kept)"
                      ).pack(fill=tk.X, pady=4)
         self._button(section, "🂠  New Shoe", self._new_shoe, C["accent"], hover=C["accent_hover"],
                      tooltip="Reset the running count and per-card totals after a shuffle"
                      ).pack(fill=tk.X, pady=4)
         self.regions_btn = self._button(
             section, "⬚  Preview Regions", self._preview_regions, C["bg_canvas_soft"],
-            tooltip="Capture the table and show the detected cards + seat regions")
+            tooltip="Mostrar las cartas detectadas y las regiones del modo activo")
         self.regions_btn.pack(fill=tk.X, pady=4)
         self.regions_btn.config(state="normal")
         self.calibrate_btn = self._button(
             section, "✥  Calibrate Regions", self._calibrate_regions, C["bg_canvas_soft"],
-            tooltip="Drag the seat polygons and dealer area over a live screenshot")
+            tooltip="Calibrar las regiones del modo seleccionado: Mi mano y Crupier en Individual; "
+                    "Mesa general, Mi mano y Crupier en Multijugador")
         self.calibrate_btn.pack(fill=tk.X, pady=4)
         self.calibrate_btn.config(state="disabled")
         self.advanced_tools_open = tk.BooleanVar(value=False)
@@ -606,6 +610,7 @@ class ModernBlackjackGUI(tk.Tk):
                           command=lambda k=key, d=delta: self._adjust_counter(k, d)
                           ).pack(side=tk.LEFT, padx=2, pady=2)
             self.counter_vars[key] = var
+        return section
 
     def _build_game_info_section(self, parent):
         section = self._section(parent, "Game Info")
@@ -667,6 +672,7 @@ class ModernBlackjackGUI(tk.Tk):
                  font=constants.FONT_SMALL, bg=C["bg_secondary"],
                  fg=C["text_secondary"], wraplength=240, justify="left"
                  ).pack(anchor="w", pady=(4, 0))
+        return section
 
     def _build_sidebets_section(self, parent):
         """Live pre-deal EV per enabled side bet; green when the bet is +EV
@@ -698,6 +704,7 @@ class ModernBlackjackGUI(tk.Tk):
                            anchor="w", bg=C["bg_secondary"], fg=C["text_primary"])
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
             self.sidebet_rows[key] = (row, var, lbl)
+        return section
 
     def _set_side_bet_stake(self, key):
         var = self.sidebet_stake_vars[key]
@@ -1300,14 +1307,18 @@ class ModernBlackjackGUI(tk.Tk):
 
     # --------------------------------------------------------------- polling
 
+    def _current_display_snapshot(self):
+        snapshot = self.controller.engine.get_snapshot()
+        expected = getattr(self, "_applied_mode_context", None)
+        if (not self._source_configured or expected is None or snapshot is None
+                or (snapshot.get("source_profile"), snapshot.get("source_mode"),
+                    tuple(snapshot.get("source_resolution") or ())) != expected):
+            return None
+        return snapshot
+
     def _poll_snapshot(self):
         try:
-            snapshot = self.controller.engine.get_snapshot()
-            expected = getattr(self, "_applied_mode_context", None)
-            if (not self._source_configured or expected is None or snapshot is None
-                    or (snapshot.get("source_profile"), snapshot.get("source_mode"),
-                        tuple(snapshot.get("source_resolution") or ())) != expected):
-                snapshot = None
+            snapshot = ModernBlackjackGUI._current_display_snapshot(self)
             if snapshot is not None and snapshot["seq"] != self._last_seq:
                 self._last_seq = snapshot["seq"]
                 self._render(snapshot)
@@ -1362,7 +1373,7 @@ class ModernBlackjackGUI(tk.Tk):
         self.table.update(snap)
         hud = getattr(self, "hud", None)
         if hud is not None and hud.winfo_exists():
-            hud.update_from_snapshot(snap)
+            hud.update_from_snapshot(snap, running=self.controller.running)
 
         count = snap["count"]
         for key, var in self.counter_vars.items():
@@ -1562,7 +1573,7 @@ class ModernBlackjackGUI(tk.Tk):
                     self, self._correct_overlay_card, on_close=self._on_hud_closed)
             self.hud = self.round_overlay
             self.round_overlay.update_from_snapshot(
-                self.controller.engine.get_snapshot(), self.controller.running)
+                ModernBlackjackGUI._current_display_snapshot(self), self.controller.running)
             self.round_overlay.ensure_on_screen()
             self.round_overlay._show_noactivate()
         elif self.round_overlay is not None:
@@ -1580,9 +1591,10 @@ class ModernBlackjackGUI(tk.Tk):
             existing.lift()
             return
         top = self._round_options = tk.Toplevel(self)
-        top.title("Cartel de ronda")
-        tk.Checkbutton(top, text="Mostrar cartel", variable=self.round_enabled,
-                       command=self._toggle_round_overlay).pack(anchor="w", padx=12, pady=8)
+        top.title("Ajustes Mini Mesa")
+        if not self.round_enabled.get():
+            tk.Label(top, text="Activá Mini Mesa desde el botón superior para ajustar su posición.").pack(
+                padx=12, pady=8)
         opacity = tk.DoubleVar(value=float(constants.UI.get("round_opacity", .85))*100)
         def set_opacity(value):
             constants.UI["round_opacity"] = float(value)/100
@@ -1594,8 +1606,9 @@ class ModernBlackjackGUI(tk.Tk):
         editing = tk.BooleanVar(value=bool(self.round_overlay and self.round_overlay.editing))
         def set_editing():
             if editing.get() and not self.round_enabled.get():
-                self.round_enabled.set(True)
-                self._toggle_round_overlay()
+                editing.set(False)
+                self.set_status("Activá Mini Mesa desde el botón superior para ajustar su posición.")
+                return
             if self.round_overlay:
                 self.round_overlay.set_editing(editing.get())
         tk.Checkbutton(top, text="Ajustar posici?n (desmarcar para bloquear)",

@@ -16,30 +16,31 @@ WIDTH, HEIGHT = 1000, 310
 
 
 def overlay_visibility(snapshot, running, editing=False, hud_on=True):
-    """Return (visible, notice); fail closed for stopped/clean/idle tables."""
+    """Keep a requested overlay visible; describe why no current advice is available."""
     if not hud_on:
         return False, ""
     if editing:
         return True, "AJUSTE DE POSICIÓN"
     if not running:
-        return False, ""
+        return True, "DETECCIÓN DETENIDA"
     snap = snapshot or {}
+    if snap.get("error") or snap.get("source_error"):
+        return True, "ERROR DE DETECCIÓN"
     reading = snap.get("reading") or {}
     groups = snap.get("card_groups") or []
     dealer = snap.get("dealer_cards") or []
-    uncertain = bool((snap.get("count") or {}).get("count_uncertain"))
+    count = snap.get("count") or {}
     phase = (snap.get("phase") or {}).get("phase")
     clean = reading.get("table_clean_confirmed") or reading.get("clean_table_confirmed")
     waiting = reading.get("waiting_for_deal") or reading.get("phase") in ("waiting", "betting_open")
-    if clean or waiting or phase in ("waiting", "betting_open"):
-        return False, ""
-    if groups or dealer or reading.get("present"):
-        if uncertain or reading.get("count_pending") or reading.get("stale"):
-            return True, "LECTURA INCIERTA · SIN CONSEJO"
-        if phase == "unknown" or reading.get("ambiguous"):
-            return True, "LECTURA DUDOSA · SIN CONSEJO"
-        return True, ""
-    return False, ""
+    if (count.get("count_uncertain") or reading.get("count_uncertain")
+            or reading.get("count_pending") or reading.get("stale") or reading.get("ambiguous")
+            or phase == "unknown" or any(group.get("is_ambiguous") for group in groups)):
+        return True, "LECTURA INCIERTA · SIN CONSEJO"
+    present = any(group.get("cards") for group in groups) or dealer or reading.get("present")
+    if clean or waiting or phase in ("waiting", "betting_open") or not present:
+        return True, "ESPERANDO CARTAS"
+    return True, ""
 
 
 def confirmed_slot(group):
@@ -205,6 +206,9 @@ class MiniTableOverlay:
             return
         self._last_state = snap or {}
         self._running = bool(running)
+        if snap is None or not self._running:
+            self._selected_id = self._selected_round = self._selected_ref = None
+            self._selected_suit = self._selected_expected_name = None
         round_id = int(self._last_state.get("round", 0))
         shoe_id = self._last_state.get("shoe_id") or (self._last_state.get("context") or {}).get("shoe_id")
         if (self._selected_round is not None and self._selected_round != round_id) or (
@@ -243,6 +247,10 @@ class MiniTableOverlay:
         c = self.canvas
         c.delete("all")
         state = self._last_state or {}
+        active, notice = overlay_visibility(state, self._running, self.editing, self.enabled)
+        self._active = active
+        if not self._running or notice in ("ESPERANDO CARTAS", "ERROR DE DETECCIÓN"):
+            state = state | {"card_groups": [], "dealer_cards": [], "dealer": {}, "seats": []}
         count = state.get("count", {})
         rc, tc = count.get("running", 0), count.get("true", 0.)
         pending = bool((state.get("reading") or {}).get("count_pending"))
@@ -258,7 +266,7 @@ class MiniTableOverlay:
                 self._draw_card(340+index*30, 10, card)
         elif dealer.get("card"):
             self._text(325, 27, self._rank(dealer.get("card")), "#F8FAFC", 10, "w")
-        advice = self._advice_text(state)
+        advice = self._advice_text(state, running=self._running)
         self._rect(WIDTH-310, 13, WIDTH-18, 43,
                    "#7F1D1D" if uncertain else "#14532D", "#475569")
         self._text(WIDTH-164, 28, advice, "#F8FAFC", 9, "center")
@@ -274,18 +282,17 @@ class MiniTableOverlay:
         for index, group in enumerate(groups):
             self._draw_group(group, index)
         if not groups:
-            self._text(WIDTH/2, 108, "Mesa compacta · esperando cartas reconocidas", "#94A3B8", 11, "center")
+            self._text(WIDTH/2, 108, "Detección detenida" if not self._running else "Esperando cartas",
+                       "#94A3B8", 11, "center")
         close_tag = "close"
         c.create_text(WIDTH-22, 28, text="×", fill="#CBD5E1", font=("Segoe UI", 13, "bold"), tags=(close_tag,))
         c.tag_bind(close_tag, "<Button-1>", lambda _event: self._close_by_user())
-        if self._selected_id or self._selected_ref:
+        if self._running and (self._selected_id or self._selected_ref):
             self._draw_picker(state)
-        if self._notice:
+        notice = self._notice or notice
+        if notice:
             self._rect(8, 232, WIDTH-8, 260, "#7F1D1D", "#FCA5A5")
-            self._text(WIDTH/2, 246, self._notice, "#FEE2E2", 9, "center")
-        reading = state.get("reading") or {}
-        active, _ = overlay_visibility(state, self._running, self.editing, self.enabled)
-        self._active = active
+            self._text(WIDTH/2, 246, notice, "#FEE2E2", 9, "center")
         if active:
             self._show_window()
             self.win.attributes("-alpha", self.opacity)
@@ -439,18 +446,25 @@ class MiniTableOverlay:
         return value
 
     @staticmethod
-    def _advice_text(state):
-        reading = state.get("reading") or {}
-        if (state.get("count", {}).get("count_uncertain")
-                or reading.get("count_pending") or reading.get("stale")
-                or reading.get("ambiguous")
-                or (state.get("phase") or {}).get("phase") == "unknown"
-                or any(group.get("is_ambiguous") for group in state.get("card_groups", []))):
+    def _advice_text(state, running=True):
+        state = state or {}
+        _, notice = overlay_visibility(state, running)
+        if notice == "DETECCIÓN DETENIDA":
+            return "Detección detenida"
+        if notice == "ERROR DE DETECCIÓN":
+            return "ERROR DE DETECCIÓN · SIN CONSEJO"
+        if "SIN CONSEJO" in notice:
             return "SIN CONSEJO · lectura dudosa"
+        if notice == "ESPERANDO CARTAS":
+            return "Esperando cartas"
+        reading = state.get("reading") or {}
         mine = next((seat for seat in state.get("seats", []) if seat.get("mine")), None)
         if mine and mine.get("advice_withdrawn_reason"):
             return "SIN CONSEJO · lectura dudosa"
-        return (mine or {}).get("optimal") or (mine or {}).get("advice") or "Esperando mano propia"
+        if (not reading.get("inferred_at") or not reading.get("present")
+                or not reading.get("dealer_ok") or not (mine or {}).get("cards")):
+            return "Esperando cartas"
+        return mine.get("optimal") or mine.get("advice") or "Esperando mano propia"
 
     def _canvas_click(self, event):
         if 8 <= event.y <= 48 and event.x < 240:
@@ -515,7 +529,7 @@ class MiniTableOverlay:
         self._draw()
 
     def _show_window(self):
-        if not self.win.winfo_exists() or self._capture_hidden or not self._active:
+        if not self.enabled or not self.win.winfo_exists() or self._capture_hidden or not self._active:
             return
         if self.hwnd:
             ctypes.windll.user32.ShowWindow(self.hwnd, 4)
@@ -548,6 +562,8 @@ class MiniTableOverlay:
 
     def set_capture_hidden(self, hidden):
         self._capture_hidden = bool(hidden)
+        if not self.win.winfo_exists():
+            return
         if hidden:
             self.win.withdraw()
         elif self.enabled:
@@ -585,6 +601,8 @@ class MiniTableOverlay:
             self.on_close()
 
     def close(self):
+        self.enabled = False
+        self._active = False
         if self.win.winfo_exists():
             try:
                 self.win.after_cancel(self._topmost_job)
