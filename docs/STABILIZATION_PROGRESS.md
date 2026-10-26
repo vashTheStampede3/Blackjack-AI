@@ -39,7 +39,7 @@
 - Current-shoe history can be corrected with its original context. Omitted cards require an explicit native-image location in a calibrated region; ambiguous associations remain uncertain. Later detector observations cannot override a manual rank or unknown suit.
 - Fixed source identity serialization after SQLite restore and kept late-suit observations consistent with the existing counter contribution. Hi-Lo and shoe composition changes remain atomic.
 - Validation: 196 related presentation/identity tests, 109 memory/correction tests, and 26 real-Tk smoke checks with synthetic capture passed. SQLite round-trip and historical correction were tested. Full regression is running; live accuracy remains unverified.
-- Recorded-video replay found 23/37 counted events and final RC +1 on the current pipeline, compared with 37/37 and RC 0 in an older report. A repeat from this mission starting revision is running because the pipelines differ.
+- Initial recorded-video replay produced 23/37 events and RC +1, compared with 37/37 and RC 0 in an older report. A controlled repeat against the mission starting revision is complete; see the measured comparison below.
 
 ## Full regression and recorded video comparison
 
@@ -52,3 +52,12 @@
 
 - Fixed the local replay tool after its normal live `set_monitor` path correctly rejected the saved video calibration. Replay now has a separate binding path that requires an exact-resolution official layout explicitly reviewed on the same video, sets its source provenance to video, and never calls the live monitor gate. It does not substitute the old seven-seat layout.
 - Validation: 3 replay contract tests reject missing/wrong source references and verify official-mode setup; 15 registry/replay tests pass. The 113-frame synthetic/user-video replay completed, but remained 23/37 and RC +1, matching the same result at the mission baseline.
+
+## Handoff status (2026-10-26)
+
+- Published commits: `fb6b06f` (shoe history and atomic corrections), `56e285a` (startup), `7596d12` (overlay/capture), `837df4a` (inspection/manual UI and guide), `3826607` (replay source boundary). All were pushed by fast-forward.
+- Full automated suite: 1573 passed, 37 subtests passed, zero failures/skips. Final focused UI/replay/memory run after the full suite: 120 passed. Startup subset: 29 passed.
+- `tools/gui_smoke.py`: 26/26 checks passed, no Tk callback errors, executor off; synthetic isolated profile/capture. The Windows-native overlay test checked focus, capture exclusion, monitor recovery, and a real fixture pixel. No casino/window was interacted with.
+- The local video replay completed for both baseline and current code. It scored 23/37 counted events against 37 labelled and ended RC +1 in each; this replay is not a live-accuracy certification.
+- Branch `counter-vision` was fetched after each push and remained synchronized. Worktree temporary directories created for pytest and the detached baseline comparison were removed. Generated numeric replay outputs remain under the ignored user-video data folder; no images were saved.
+- Live held-out accuracy, correction testing during a real game, 30-minute soak and the weak empty-ROI 4 false candidate remain open. If the last issue recurs, use New Round and inspect/discard the pending false detection; do not treat the count as reliable while uncertainty is shown.
