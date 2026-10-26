@@ -55,6 +55,7 @@ class TableView:
         self._preload_gen = 0
         self._last_snapshot = None  # compatibility name: a presentation
         self._resize_job = None
+        self._last_rendered_size = None
         self._preview_item = None
         self._preview_photo = None
         self._preview_close_btn = None
@@ -295,10 +296,21 @@ class TableView:
 
     # -------------------------------------------------------------- geometry
 
-    def _on_resize(self, _event):
+    def _on_resize(self, event=None):
+        if event is not None:
+            w = getattr(event, "width", None)
+            h = getattr(event, "height", None)
+            if w is not None and h is not None:
+                if (w, h) == getattr(self, "_last_rendered_size", None):
+                    return
+                self._last_rendered_size = (w, h)
         if self._resize_job is not None:
-            self.canvas.after_cancel(self._resize_job)
-        self._resize_job = self.canvas.after(120, self._relayout)
+            try:
+                self.canvas.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        delay = 120 if event is None else 16
+        self._resize_job = self.canvas.after(delay, self._relayout)
 
     def _place_hand(self, hand, x, top, *, dealer=False):
         cw, ch = hand.get("render_size", scaling.size(

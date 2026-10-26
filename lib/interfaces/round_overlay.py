@@ -90,11 +90,22 @@ class MiniTableOverlay:
         self._drag_origin = None
         self._pointer_start = None
         self._pressed_identity = None
+        self._pointer_down = False
+        self._is_dragging = False
+        self._start_mouse_x = 0
+        self._start_mouse_y = 0
+        self._start_win_x = 0
+        self._start_win_y = 0
+        self._drag_allowed = True
+        self._pending_snapshot = None
+        self._last_rendered_size = None
+        self._configure_job = None
         self.win.geometry(f"{WIDTH}x{HEIGHT}{int(constants.UI.get('round_x', 60)):+d}{int(constants.UI.get('round_y', 60)):+d}")
         self.canvas.bind("<ButtonPress-1>", self._control_press, add="+")
         self.canvas.bind("<ButtonPress-1>", self._pointer_press, add="+")
         self.canvas.bind("<ButtonRelease-1>", self._pointer_release, add="+")
         self.canvas.bind("<B1-Motion>", self._drag_move, add="+")
+        self.win.bind("<Configure>", self._on_configure, add="+")
         self.win.update_idletasks()
         if sys.platform == "win32":
             try:
@@ -106,6 +117,10 @@ class MiniTableOverlay:
         self._draw()
         self._show_noactivate()
         self._topmost_job = self.win.after(1500, self._keep_topmost)
+
+    @property
+    def is_dragging(self):
+        return bool(getattr(self, "_is_dragging", False) or getattr(self, "_pointer_down", False))
 
     def _apply_win_styles(self):
         if not self.hwnd:
@@ -193,7 +208,8 @@ class MiniTableOverlay:
         self._selected_suit = self._selected_expected_name = None
         if not changed:
             return
-        if getattr(self, "_pointer_start", None) is not None:
+        if getattr(self, "_pointer_down", False) or getattr(self, "_is_dragging", False) or getattr(self, "_pointer_start", None) is not None:
+            self._pending_snapshot = (deepcopy(state), bool(running), deepcopy(aggregates))
             self._pending_draw = True
             return
         self._last_state = deepcopy(state)
@@ -201,6 +217,10 @@ class MiniTableOverlay:
         self._running = bool(running)
         self._notice = overlay_visibility(state, self._running, self.editing, self.enabled)[1]
         self._draw()
+
+    def update_snapshot(self, presentation, *args, **kwargs):
+        """Compatibility alias for update_from_presentation."""
+        return self.update_from_presentation(presentation, *args, **kwargs)
 
     def _selection_exists(self, ref):
         """Check card and displayed source context before forwarding a click."""
@@ -462,42 +482,63 @@ class MiniTableOverlay:
         return None
 
     def _pointer_press(self, event):
-        self._pointer_start = (event.x_root, event.y_root)
+        self._pointer_down = True
+        self._is_dragging = False
+        self._start_mouse_x = getattr(event, "x_root", 0)
+        self._start_mouse_y = getattr(event, "y_root", 0)
+        try:
+            self._start_win_x = self.win.winfo_x()
+            self._start_win_y = self.win.winfo_y()
+        except Exception:
+            self._start_win_x = 0
+            self._start_win_y = 0
+        self._pointer_start = (self._start_mouse_x, self._start_mouse_y)
         self._pressed_identity = self._identity_at_pointer(event)
-        current = self.canvas.find_withtag("current")
-        tags = self.canvas.gettags(current[0]) if current else ()
-        self._drag_origin = ((event.x_root - self.win.winfo_x(),
-                              event.y_root - self.win.winfo_y())
-                             if (not getattr(self, "locked", False) and not any(tag in tags for tag in
-                                 ("close", "lock-control", "opacity-control"))
-                                 and 8 <= event.y <= 52 and event.x < WIDTH - 245)
-                             else None)
+        if getattr(self, "_drag_allowed", True) and not getattr(self, "locked", False):
+            self._drag_origin = (self._start_mouse_x - self._start_win_x,
+                                 self._start_mouse_y - self._start_win_y)
+        else:
+            self._drag_origin = None
 
     def _pointer_release(self, event):
-        start = self._pointer_start
-        identity = self._pressed_identity
-        drag_origin = self._drag_origin
-        self._pointer_start = self._pressed_identity = self._drag_origin = None
-        if start is not None and math.hypot(event.x_root-start[0], event.y_root-start[1]) >= 5:
-            if drag_origin is not None and callable(getattr(self.win, "update_idletasks", None)):
+        was_dragging = bool(getattr(self, "_is_dragging", False))
+        pointer_start = getattr(self, "_pointer_start", None)
+        identity = getattr(self, "_pressed_identity", None)
+
+        self._pointer_down = False
+        self._is_dragging = False
+        self._pointer_start = None
+        self._pressed_identity = None
+        self._drag_allowed = True
+        self._drag_origin = None
+
+        x_root = getattr(event, "x_root", pointer_start[0] if pointer_start else 0)
+        y_root = getattr(event, "y_root", pointer_start[1] if pointer_start else 0)
+        dist = math.hypot(x_root - pointer_start[0], y_root - pointer_start[1]) if pointer_start is not None else 0.0
+
+        if was_dragging or dist >= 5.0:
+            if callable(getattr(self.win, "update_idletasks", None)):
                 self.ensure_on_screen()
-            if drag_origin is not None:
-                self.remember_position()
-                self._persist_preferences()
-            if getattr(self, "_pending_draw", False):
+            self.remember_position()
+            self._persist_preferences()
+            if getattr(self, "_pending_snapshot", None) is not None:
+                pending_snap, pending_running, pending_metrics = self._pending_snapshot
+                self._pending_snapshot = None
+                self.update_from_presentation(pending_snap, running=pending_running, metrics=pending_metrics)
+            elif getattr(self, "_pending_draw", False):
                 self._pending_draw = False
                 self._draw()
             return
-        if start is None or math.hypot(event.x_root - start[0], event.y_root - start[1]) >= 5:
-            if getattr(self, "_pending_draw", False):
-                self._pending_draw = False
-                self._draw()
-            return
+
         released = self._identity_at_pointer(event)
         target = released or identity
         if target is not None and target.get("card_id"):
             self._dispatch_identity(target)
-        if getattr(self, "_pending_draw", False):
+        if getattr(self, "_pending_snapshot", None) is not None:
+            pending_snap, pending_running, pending_metrics = self._pending_snapshot
+            self._pending_snapshot = None
+            self.update_from_presentation(pending_snap, running=pending_running, metrics=pending_metrics)
+        elif getattr(self, "_pending_draw", False):
             self._pending_draw = False
             self._draw()
 
@@ -550,14 +591,58 @@ class MiniTableOverlay:
         return " · ".join(parts) if parts else "SIN CONSEJO"
 
     def _drag_move(self, event):
-        if not getattr(self, "locked", False) and self._drag_origin:
-            if (self._pointer_start is None
-                    or math.hypot(event.x_root - self._pointer_start[0],
-                                  event.y_root - self._pointer_start[1]) < 5):
+        if getattr(self, "locked", False) or not getattr(self, "_drag_allowed", True):
+            return
+        if not getattr(self, "_pointer_down", False) and not getattr(self, "_drag_origin", None):
+            return
+        x_root = getattr(event, "x_root", getattr(self, "_start_mouse_x", 0))
+        y_root = getattr(event, "y_root", getattr(self, "_start_mouse_y", 0))
+        dx = x_root - getattr(self, "_start_mouse_x", 0)
+        dy = y_root - getattr(self, "_start_mouse_y", 0)
+        if not getattr(self, "_is_dragging", False):
+            if abs(dx) < 5 and abs(dy) < 5:
                 return
-            x = event.x_root-self._drag_origin[0]
-            y = event.y_root-self._drag_origin[1]
-            self.win.geometry(f"{WIDTH}x{HEIGHT}{x:+d}{y:+d}")
+            self._is_dragging = True
+        new_x = getattr(self, "_start_win_x", 0) + dx
+        new_y = getattr(self, "_start_win_y", 0) + dy
+        w = WIDTH
+        h = HEIGHT
+        try:
+            if callable(getattr(self.win, "winfo_width", None)):
+                w = self.win.winfo_width() or WIDTH
+        except Exception:
+            w = WIDTH
+        try:
+            if callable(getattr(self.win, "winfo_height", None)):
+                h = self.win.winfo_height() or HEIGHT
+        except Exception:
+            h = HEIGHT
+        try:
+            self.win.geometry(f"{w}x{h}{new_x:+d}{new_y:+d}")
+        except Exception:
+            pass
+
+    def _on_configure(self, event):
+        w = getattr(event, "width", None)
+        h = getattr(event, "height", None)
+        if w is None or h is None:
+            return
+        last_size = getattr(self, "_last_rendered_size", None)
+        if last_size == (w, h):
+            # Only x or y moved (window dragging) -> ignore completely!
+            return
+        self._last_rendered_size = (w, h)
+        if getattr(self, "_configure_job", None) is not None:
+            try:
+                self.win.after_cancel(self._configure_job)
+            except Exception:
+                pass
+        self._configure_job = self.win.after(16, self._on_size_change)
+
+    def _on_size_change(self):
+        self._configure_job = None
+        if not getattr(self, "_pointer_down", False) and not getattr(self, "_is_dragging", False):
+            self._draw()
 
     def set_opacity(self, opacity):
         self.opacity = max(.25, min(1., float(opacity)))
@@ -576,10 +661,16 @@ class MiniTableOverlay:
 
     def _control_press(self, event):
         # Controls are actionable; their presses cannot begin a window drag.
-        current = self.canvas.find_withtag("current")
-        tags = self.canvas.gettags(current[0]) if current else ()
+        try:
+            current = self.canvas.find_withtag("current")
+            tags = self.canvas.gettags(current[0]) if current else ()
+        except (AttributeError, tk.TclError, IndexError):
+            tags = ()
         if any(tag in tags for tag in ("close", "lock-control", "opacity-control")):
+            self._drag_allowed = False
             self._drag_origin = None
+        else:
+            self._drag_allowed = True
 
     def _opacity_click(self, event):
         self.set_opacity(self.opacity + (.05 if event.x >= WIDTH - 190 else -.05))
@@ -662,8 +753,16 @@ class MiniTableOverlay:
         return self.win.attributes(*args)
 
     def _drag_start(self, event):
-        self._drag_origin = (event.x_root-self.win.winfo_x(),
-                             event.y_root-self.win.winfo_y())
+        self._start_mouse_x = getattr(event, "x_root", 0)
+        self._start_mouse_y = getattr(event, "y_root", 0)
+        try:
+            self._start_win_x = self.win.winfo_x()
+            self._start_win_y = self.win.winfo_y()
+        except Exception:
+            self._start_win_x = 0
+            self._start_win_y = 0
+        self._drag_origin = (self._start_mouse_x - self._start_win_x,
+                             self._start_mouse_y - self._start_win_y)
 
     def _close_by_user(self):
         self.close()

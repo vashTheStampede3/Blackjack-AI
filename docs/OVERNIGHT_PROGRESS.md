@@ -107,3 +107,34 @@
   - `lib/interfaces/modern_gui.py`: verificación de estado locked en hud y correcciones.
   - `tests/test_card_latch_persistence_and_overlay_click_unit.py`: 16 pruebas unitarias integradas.
   - `tests/test_card_memory.py`, `tests/test_registry_engine.py`, `tests/test_round_extensions.py`: alineación de contratos.
+
+## Etapa 7B - Eliminación de Teletransporte y Cortes Visuales al Arrastrar la Mini Mesa y Redimensionar
+
+- Fecha: 2026-10-26. Rama: `counter-vision`.
+- Estado: Implementación y validación completadas al 100% de forma autónoma.
+- Problema resuelto: Eliminación definitiva de saltos de coordenadas (teletransporte) y cortes visuales/redibujados parpadeantes al arrastrar la `Mini Mesa` (`RoundOverlay` / `MiniTableOverlay`) o redimensionar la mesa principal (`TableView`).
+- Implementación técnica:
+  1. Cálculo de arrastre exclusivamente con coordenadas globales de pantalla (`event.x_root`, `event.y_root`):
+     - Anclaje exacto en `<ButtonPress-1>` (`_start_mouse_x`, `_start_mouse_y`, `_start_win_x`, `_start_win_y`).
+     - Cálculo en `<B1-Motion>` como `start_win + (x_root - start_mouse)`, impidiendo saltos causados por `event.x` / `event.y` relativos cuando el cursor pasa por widgets hijos o controles internos.
+     - Preservación íntegra de las dimensiones de la ventana (`width`, `height`) durante el movimiento, con soporte para coordenadas multimonitor y negativas.
+  2. Congelamiento de redibujados y de `CaptureGuard` durante el arrastre:
+     - Durante el estado de arrastre (`is_dragging` / `_pointer_down`), las presentaciones entrantes (`update_from_presentation` / `update_snapshot`) se retienen en `_pending_snapshot` sin destruir ni alterar el Canvas a mitad de movimiento.
+     - Al soltar el mouse (`<ButtonRelease-1>`), se aplica inmediatamente el último snapshot pendiente acumulado.
+     - En `CaptureGuard` (`lib/interfaces/capture_guard.py`), si el overlay reporta arrastre activo (`is_dragging`), se omiten las llamadas a `set_capture_hidden(True)` y `set_capture_hidden(False)`, evitando que el ciclo de captura de pantalla de Windows interrumpa el loop de mouse capture de Win32.
+  3. Desambiguación precisa entre arrastre y clic:
+     - Si el desplazamiento total supera el umbral ($\ge 5$ px), se confirma arrastre y se inhibe estrictamente la apertura accidental de `CardPicker`.
+     - Clics estáticos o con micro-vibración ($< 5$ px) sobre hitboxes de cartas despachan de forma instantánea la identidad para edición.
+  4. Filtrado y debounce en eventos `<Configure>`:
+     - En `RoundOverlay` y `TableView`, los eventos `<Configure>` donde las dimensiones `(width, height)` coinciden con el último tamaño renderizado (indicando desplazamiento de ventana únicamente) son descartados sin provocar relayout ni parpadeo.
+     - Cambios reales de geometría aplican debounce corto (`after(16, ...)` o `after(120, ...)` según llamada) para evitar desgarro o corte visual.
+- Validación y Pruebas:
+  - Nueva suite unitaria: `tests/test_drag_stability_and_geometry_unit.py` (24/24 pruebas aprobadas).
+  - Suite completa de pytest: 1612 aprobados, 1 saltado (BitBlt en entorno headless), 37 subtests aprobados, 0 fallos.
+  - Smoke test GUI: `tools/gui_smoke.py` ejecutado y aprobado (26 funciones, 0 fallos, 0 errores de callback, 0 errores reportados).
+  - `git diff --check`: 0 advertencias de formato o espacios.
+- Archivos modificados/creados:
+  - `lib/interfaces/round_overlay.py`: cálculo de arrastre por deltas globales, congelamiento de snapshot, filtro de configure y compatibilidad con `update_snapshot`.
+  - `lib/interfaces/capture_guard.py`: omisión de ocultamiento durante arrastre activo para proteger la captura de puntero de Windows.
+  - `lib/interfaces/table_view.py`: filtrado de configure para ignorar desplazamientos de posición y debounce ante cambios de tamaño.
+  - `tests/test_drag_stability_and_geometry_unit.py`: 24 pruebas unitarias que cubren estabilidad de arrastre, congelamiento, hitbox y eventos configure.

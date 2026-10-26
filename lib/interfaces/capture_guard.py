@@ -76,6 +76,11 @@ class CaptureGuard:
         try:
             def hide():
                 overlay = self.overlay_fn()
+                if overlay and (getattr(overlay, "is_dragging", False)
+                                or getattr(overlay, "_is_dragging", False)
+                                or getattr(overlay, "_pointer_down", False)):
+                    # During user drag, skip temporary window hide/restore so as not to interrupt Windows drag loop.
+                    return False
                 if overlay and not self.force_hide and self._external_window_source():
                     # PrintWindow renders only the external target HWND's client
                     # area. A separate top-level overlay cannot be in that image.
