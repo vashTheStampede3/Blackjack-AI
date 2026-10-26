@@ -1531,6 +1531,8 @@ class ModernBlackjackGUI(tk.Tk):
                 presentation["message"] = "Sin lectura válida de la configuración actual"
             count = snapshot.get("count", {}) if snapshot is not None and valid_configuration else {}
             self._table_metrics = {key: count[key] for key in ("running", "true", "count_uncertain") if key in count}
+            if presentation.get("count_has_pending_uncertainty"):
+                self._table_metrics["count_uncertain"] = True
             if table is not None:
                 table.remember_snapshot(presentation)
                 table.update(presentation)

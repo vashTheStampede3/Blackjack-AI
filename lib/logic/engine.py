@@ -2663,6 +2663,252 @@ class DetectionEngine:
             return "Lectura de mano o crupier incompleta o dudosa"
         return None
 
+    def _physical_group_advice(self, snapshot):
+        """Build advice only from confirmed registry-backed physical groups.
+
+        This deliberately does not inspect ``snapshot['seats']`` or use a
+        seat index. Group/card IDs correlate this result with the same
+        publication in TablePresentation.
+        """
+        groups = snapshot.get("card_groups") or []
+        dealer_cards = snapshot.get("dealer_cards") or []
+        round_id = snapshot.get("round")
+        shoe_id = snapshot.get("shoe_id")
+        count = snapshot.get("count") or {}
+        reading = snapshot.get("reading") or {}
+        ev_per_rank = dict(count.get("per_rank") or {})
+        registry_rows = snapshot.get("card_registry") or []
+        registry = {row.get("id"): row for row in registry_rows
+                    if isinstance(row, dict) and isinstance(row.get("id"), str)}
+
+        def current_card(card):
+            card_id = card.get("card_id")
+            record = registry.get(card_id)
+            prefix = f"{shoe_id}:{round_id}:"
+            return bool(
+                isinstance(card_id, str) and card_id.startswith(prefix)
+                and record is not None and record.get("round_id") == round_id
+                and record.get("status") == "active"
+                and record.get("state") not in ("rejected", "retired")
+                and (card.get("state") != "confirmed"
+                     or record.get("rank") == card.get("rank"))
+                and record.get("owner") == card.get("owner")
+                and ("hand" not in card or record.get("hand") == card.get("hand")))
+
+        # The exact-EV path needs cards still visible after a mid-shoe reset.
+        # Fold only current registry records back into its composition; never
+        # use the historical seven-seat array for this input.
+        active_prefix = f"{shoe_id}:{round_id}:"
+        for record in registry.values():
+            rank = record.get("rank")
+            if (not record.get("id", "").startswith(active_prefix)
+                    or record.get("round_id") != round_id
+                    or record.get("status") != "active" or record.get("counted")
+                    or record.get("state") != "confirmed" or record.get("reason")
+                    or rank not in constants.CARD_RANKS):
+                continue
+            suit = record.get("suit")
+            name = (f"{rank} of {suit}" if suit in constants.CARD_SUITS else rank)
+            key = counter_key(name)
+            ev_per_rank[key] = ev_per_rank.get(key, 0) + 1
+
+        active_cards = [card for group in groups if isinstance(group, dict)
+                        for card in (group.get("cards") or [])
+                        if isinstance(card, dict)] + [
+            card for card in dealer_cards if isinstance(card, dict)]
+        count_pending = bool(
+            count.get("count_uncertain") or reading.get("count_uncertain")
+            or reading.get("count_pending")
+            or any(group.get("is_ambiguous")
+                   or str(group.get("seat_id", "")).startswith("TMP_")
+                   for group in groups if isinstance(group, dict))
+            or any(card.get("state") != "confirmed" or card.get("reason")
+                   or card.get("ambiguous_seat") or not current_card(card)
+                   for card in active_cards)
+            or any(row.get("status") == "active"
+                   and (row.get("state") != "confirmed" or not row.get("counted")
+                        or row.get("reason") or row.get("ambiguous_seat"))
+                   for row in registry.values())
+        )
+
+        hero_groups = [group for group in groups
+                       if isinstance(group, dict) and group.get("is_hero") is True]
+        hero = {
+            "identified": len(hero_groups) == 1,
+            "ambiguous": len(hero_groups) != 1,
+            "group_id": None,
+            "card_ids": [],
+            "status": "no_advice",
+            "reason": ("HERO_IDENTITY_CONFLICT" if len(hero_groups) > 1
+                       else "NO_HERO_GROUP"),
+            "hands": [],
+        }
+
+        upcard = dealer_cards[0] if dealer_cards else None
+        dealer_rank = None
+        dealer_reason = "WAITING_DEALER"
+        if upcard is not None:
+            if (upcard.get("state") == "confirmed" and not upcard.get("reason")
+                    and not upcard.get("ambiguous_seat")
+                    and upcard.get("owner") in (None, "dealer")
+                    and isinstance(upcard.get("card_id"), str)
+                    and upcard["card_id"].strip()
+                    and current_card(upcard)
+                    and upcard.get("rank") in constants.CARD_RANKS):
+                dealer_rank = upcard["rank"]
+                dealer_reason = None
+            else:
+                dealer_reason = "DEALER_UNCERTAIN"
+
+        if len(hero_groups) == 1:
+            group = hero_groups[0]
+            hero["group_id"] = group.get("seat_id")
+            hero_cards = [card for card in (group.get("cards") or [])
+                          if isinstance(card, dict)]
+            hero["card_ids"] = [card.get("card_id") for card in hero_cards]
+            group_ambiguous = bool(group.get("is_ambiguous"))
+            ids = hero["card_ids"]
+            ids_well_formed = all(isinstance(card_id, str) and card_id.strip()
+                                  for card_id in ids)
+            if (group_ambiguous or not ids_well_formed
+                    or (ids_well_formed and len(ids) != len(set(ids)))
+                    or any(not current_card(card) for card in hero_cards)
+                    or any(card.get("owner") != "mine" for card in hero_cards)):
+                hero["ambiguous"] = True
+                hero["reason"] = "HERO_AMBIGUOUS"
+            elif not hero_cards:
+                hero["reason"] = "INCOMPLETE_HAND"
+            else:
+                tags = {card.get("hand") for card in hero_cards
+                        if type(card.get("hand")) is int}
+                split = bool(group.get("has_split") or len(tags) > 1)
+                if split:
+                    hero["hands"] = DetectionEngine._physical_hands_advice(
+                        self,
+                        hero_cards, dealer_rank, dealer_reason, split=True,
+                        true_count=count.get("true", 0.0),
+                        count_pending=count_pending, per_rank=ev_per_rank)
+                    hero["status"] = ("ready" if any(
+                        hand["status"] == "ready" for hand in hero["hands"])
+                                      else "no_advice")
+                    hero["reason"] = (None if hero["status"] == "ready"
+                                      else "SPLIT_HANDS_UNAVAILABLE")
+                else:
+                    hand = DetectionEngine._physical_hands_advice(
+                        self,
+                        hero_cards, dealer_rank, dealer_reason, split=False,
+                        true_count=count.get("true", 0.0),
+                        count_pending=count_pending, per_rank=ev_per_rank)[0]
+                    hero["hands"] = [hand]
+                    hero["status"] = hand["status"]
+                    hero["reason"] = hand["reason"]
+
+        insurance = None
+        if upcard is not None and cards.dealer_strategy_rank(dealer_rank) == "A":
+            if dealer_reason is not None:
+                insurance = {"status": "no_advice", "reason": dealer_reason,
+                             "take": None, "text": "SEGURO: SIN CONSEJO"}
+            else:
+                info = self._insurance_advice(dealer_rank, ev_per_rank)
+                if info is not None:
+                    insurance = {
+                        "status": "ready", "reason": None,
+                        "take": bool(info["take"]), "ev": info.get("ev"),
+                        "p_ten": info.get("p_ten"),
+                        "true_count": count.get("true"),
+                        "count_has_pending_uncertainty": count_pending,
+                        "text": f"INSURANCE: {'SÍ' if info['take'] else 'NO'}",
+                    }
+                else:
+                    insurance = {"status": "no_advice", "reason": "INSURANCE_UNAVAILABLE",
+                                 "take": None, "text": "SEGURO: SIN CONSEJO"}
+
+        return {
+            "round_id": round_id,
+            "shoe_id": shoe_id,
+            "count_has_pending_uncertainty": count_pending,
+            "hero": hero,
+            "insurance": insurance,
+        }
+
+    def _physical_hands_advice(self, hero_cards, dealer_rank, dealer_reason, *,
+                               split, true_count, count_pending, per_rank):
+        """Calculate each observed hero hand independently; never regroup cards."""
+        if split:
+            # Preserve both expected split slots without fabricating cards.
+            hand_tags = (0, 1, None) if any(
+                type(card.get("hand")) is not int or card.get("hand") not in (0, 1)
+                for card in hero_cards) else (0, 1)
+        else:
+            tags = [None]
+            hand_tags = (None,)
+
+        result = []
+        for hand_tag in hand_tags:
+            cards_in_hand = ([card for card in hero_cards if card.get("hand") == hand_tag]
+                             if split and hand_tag is not None else
+                             [card for card in hero_cards
+                              if type(card.get("hand")) is not int
+                              or card.get("hand") not in (0, 1)]
+                             if split else list(hero_cards))
+            ids = [card.get("card_id") for card in cards_in_hand]
+            reason = dealer_reason
+            if reason is None and split and hand_tag is None:
+                reason = "SPLIT_HAND_AMBIGUOUS"
+            if reason is None and any(
+                    card.get("state") != "confirmed" or card.get("reason")
+                    or card.get("ambiguous_seat") or card.get("owner") != "mine"
+                    or not isinstance(card.get("rank"), str)
+                    or card.get("rank") not in constants.CARD_RANKS
+                    or not isinstance(card.get("card_id"), str)
+                    or not card.get("card_id", "").strip()
+                    for card in cards_in_hand):
+                reason = "HERO_UNCERTAIN"
+            if reason is None and len(cards_in_hand) < 2:
+                reason = "INCOMPLETE_HAND"
+
+            advice = None
+            status = "no_advice"
+            if reason is None:
+                names = [card["rank"] for card in cards_in_hand]
+                action, text, color = self.strategy.advice(
+                    names, dealer_rank, post_split=split)
+                index_text, index_color = ("", constants.ACTION_COLORS["-"])
+                optimal, optimal_color, optimal_action = (
+                    "", constants.ACTION_COLORS["-"], None)
+                if not count_pending and not split:
+                    index_text, index_color = self._index_advice(
+                        names, dealer_rank, true_count)
+                if not count_pending:
+                    split_aces_locked = (split and cards.rank_of(names[0]) == "Ace"
+                                         and not constants.RULES["hit_split_aces"])
+                    if not split_aces_locked and hasattr(self, "_advice_lock"):
+                        optimal, optimal_color, optimal_action = self._optimal_advice(
+                            names, dealer_rank, per_rank, action,
+                            book=(text, color), post_split=split)
+                if action or text:
+                    advice = {
+                        "action": action, "text": text, "color": color,
+                        "index_advice": index_text,
+                        "index_color": index_color,
+                        "optimal": optimal,
+                        "optimal_action": optimal_action,
+                        "optimal_color": optimal_color,
+                    }
+                    status = "ready"
+                else:
+                    reason = "STRATEGY_UNAVAILABLE"
+            result.append({
+                "hand": hand_tag,
+                "hand_id": "hero" if hand_tag is None else f"hero:hand:{hand_tag}",
+                "split_index": hand_tag,
+                "card_ids": ids,
+                "status": status,
+                "reason": reason,
+                "advice": advice,
+            })
+        return result
+
     def publish_snapshot(self):
         with self._lock:
             source_resolution = (self.capture.resolution
@@ -2856,9 +3102,10 @@ class DetectionEngine:
                                    "hand": c.get("hand", 0), "suit": c.get("suit"),
                                    "legacy_ref": {"seat_index": seat.index, "card_index": index},
                                    "bbox": c.get("bbox"), "cx": c.get("cx"), "cy": c.get("cy"),
-                                   "center_norm": ([c["cx"] / self.capture.resolution[0],
-                                                    c["cy"] / self.capture.resolution[1]]
-                                                   if c.get("cx") is not None and c.get("cy") is not None
+                                   "center_norm": ([c["cx"] / source_resolution[0],
+                                                    c["cy"] / source_resolution[1]]
+                                                   if source_resolution is not None
+                                                   and c.get("cx") is not None and c.get("cy") is not None
                                                    else None),
                                    "confidence": c.get("confidence")}
                                   for index, c in enumerate(seat.cards)]
@@ -2894,6 +3141,8 @@ class DetectionEngine:
                     } for index, card in enumerate(self.dealer_extras)]),
                 "model_refresh_ts": self._model_refresh_ts,
             }
+            snapshot["physical_advice"] = DetectionEngine._physical_group_advice(
+                self, snapshot)
             if self.card_registry is not None:
                 snapshot["count"]["count_uncertain"] = self.counter.count_uncertain
                 hero_groups = [g for g in self.card_registry.group_tracker.ordered_groups()

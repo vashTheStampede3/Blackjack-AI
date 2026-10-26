@@ -86,13 +86,15 @@ def _player(group=None, *, individual=False, issues, identity_context=None):
     group = group or {}
     cards = _records(group.get("cards"), "cards", issues)
     group_id = "hero" if individual else deepcopy(group.get("seat_id"))
+    hand_tags = {card.get("hand") for card in cards
+                 if type(card.get("hand")) is int and card.get("hand") >= 0}
     result = {
         "id": "hero" if individual else deepcopy(group.get("seat_id")),
         "seat_id": deepcopy(group.get("seat_id")),
         "label": "Yo" if individual or group.get("is_hero") else deepcopy(group.get("seat_id")),
         "is_hero": True if individual else bool(group.get("is_hero")),
         "is_ambiguous": bool(group.get("is_ambiguous")),
-        "has_split": bool(group.get("has_split")),
+        "has_split": bool(group.get("has_split") or len(hand_tags) > 1),
         "closed_by_double": bool(group.get("closed_by_double")),
         "cards": [_normalize_card(card, identity_context=identity_context,
                                    group_id=group_id) for card in cards],
@@ -235,6 +237,175 @@ def _reading_status(snapshot, groups, players, dealer, issues):
     return "ready"
 
 
+def _attach_physical_advice(result, snapshot):
+    """Attach only engine advice bound to this exact physical publication."""
+    count = _mapping(snapshot.get("count"))
+    reading = _mapping(snapshot.get("reading"))
+    raw_groups = snapshot.get("card_groups")
+    raw_groups = raw_groups if isinstance(raw_groups, (list, tuple)) else []
+    raw_dealer = snapshot.get("dealer_cards")
+    raw_dealer = raw_dealer if isinstance(raw_dealer, (list, tuple)) else []
+    pending = bool(count.get("count_uncertain") or reading.get("count_uncertain")
+                   or reading.get("count_pending"))
+    for group in raw_groups:
+        if not isinstance(group, Mapping):
+            continue
+        pending |= (bool(group.get("is_ambiguous"))
+                    or str(group.get("seat_id", "")).startswith("TMP_"))
+        group_cards = group.get("cards")
+        if not isinstance(group_cards, (list, tuple)):
+            pending |= bool(group_cards)
+            continue
+        pending |= any(isinstance(card, Mapping) and (
+            card.get("state") != "confirmed" or card.get("reason")
+            or card.get("ambiguous_seat")
+        ) for card in group_cards)
+    pending |= any(isinstance(card, Mapping) and (
+        card.get("state") != "confirmed" or card.get("reason")
+        or card.get("ambiguous_seat")
+    ) for card in raw_dealer)
+    result["count_has_pending_uncertainty"] = bool(pending)
+    result["insurance"] = None
+    result["advice_available"] = False
+    payload = _mapping(snapshot.get("physical_advice"))
+    same_context = (
+        type(result.get("round_id")) is int
+        and result.get("round_id") == payload.get("round_id")
+        and isinstance(result.get("shoe_id"), str)
+        and result.get("shoe_id") == payload.get("shoe_id")
+    )
+    if not same_context or result.get("status") in (
+            "stopped", "error", "needs_calibration", "source_mismatch"):
+        return
+
+    result["count_has_pending_uncertainty"] = bool(
+        result["count_has_pending_uncertainty"]
+        or payload.get("count_has_pending_uncertainty"))
+    insurance = payload.get("insurance")
+    if (isinstance(insurance, Mapping)
+            and ((insurance.get("status") == "ready"
+                  and type(insurance.get("take")) is bool)
+                 or insurance.get("status") == "no_advice")
+            and isinstance(insurance.get("text"), str)):
+        result["insurance"] = deepcopy(insurance)
+    hero_advice = _mapping(payload.get("hero"))
+    if hero_advice.get("identified") is not True:
+        return
+    group_id = hero_advice.get("group_id")
+    physical_ids = hero_advice.get("card_ids")
+    if (not isinstance(group_id, (str, int)) or not isinstance(physical_ids, list)
+            or not physical_ids
+            or any(not isinstance(card_id, str) or not card_id.strip()
+                   for card_id in physical_ids)
+            or len(physical_ids) != len(set(physical_ids))):
+        return
+
+    matches = []
+    for player in result.get("players", []):
+        if not player.get("is_hero"):
+            continue
+        player_ids = [card.get("card_id") for card in player.get("cards", [])]
+        if (all(isinstance(card_id, str) and card_id.strip() for card_id in player_ids)
+                and player.get("seat_id") == group_id
+                and len(player_ids) == len(physical_ids)
+                and set(player_ids) == set(physical_ids)):
+            matches.append(player)
+    if len(matches) != 1:
+        return
+
+    player = matches[0]
+    if hero_advice.get("ambiguous") is True:
+        player["advice"] = "SIN CONSEJO"
+        player["advice_reason"] = deepcopy(hero_advice.get("reason") or "HERO_AMBIGUOUS")
+        return
+    hand_payloads = hero_advice.get("hands")
+    if not isinstance(hand_payloads, list):
+        return
+    attached = []
+    for hand_payload in hand_payloads:
+        if not isinstance(hand_payload, Mapping):
+            continue
+        hand = hand_payload.get("hand")
+        hand_ids = hand_payload.get("card_ids")
+        if (not isinstance(hand_ids, list)
+                or any(not isinstance(card_id, str) or not card_id.strip()
+                       for card_id in hand_ids)
+                or len(hand_ids) != len(set(hand_ids))):
+            continue
+        if player.get("has_split"):
+            if hand is None:
+                expected = [card.get("card_id") for card in player.get("cards", [])
+                            if type(card.get("hand")) is not int
+                            or card.get("hand") not in (0, 1)]
+            elif type(hand) is int and hand in (0, 1):
+                expected = [card.get("card_id") for card in player.get("cards", [])
+                            if card.get("hand") == hand]
+            else:
+                continue
+        else:
+            if hand not in (None, 0):
+                continue
+            expected = [card.get("card_id") for card in player.get("cards", [])]
+        if (any(not isinstance(card_id, str) or not card_id.strip()
+                for card_id in expected)
+                or len(expected) != len(hand_ids) or set(expected) != set(hand_ids)):
+            continue
+        advice = hand_payload.get("advice")
+        valid_action = (isinstance(advice, Mapping)
+                        and advice.get("action") in (None, "H", "S", "D", "P", "R",
+                                                       "H/S", "D/H", "R/H"))
+        safe_advice = (deepcopy(advice) if valid_action
+                       and isinstance(advice.get("text"), str)
+                       and hand_payload.get("status") == "ready" else None)
+        attached.append({
+            "hand": hand,
+            "hand_id": deepcopy(hand_payload.get("hand_id")),
+            "split_index": deepcopy(hand_payload.get("split_index")),
+            "card_ids": deepcopy(hand_ids),
+            "status": ("ready" if safe_advice is not None else "no_advice"),
+            "reason": (None if safe_advice is not None
+                       else deepcopy(hand_payload.get("reason"))),
+            "advice": safe_advice,
+        })
+    if len(attached) != len(hand_payloads) or not attached:
+        return
+    attached_tags = [hand["hand"] for hand in attached]
+    all_hand_ids = [card_id for hand in attached for card_id in hand["card_ids"]]
+    if len(attached_tags) != len(set(attached_tags)) or len(all_hand_ids) != len(set(all_hand_ids)):
+        return
+    if set(all_hand_ids) != set(physical_ids):
+        return
+    if player.get("has_split"):
+        expected_tags = {0, 1}
+        if any(type(card.get("hand")) is not int or card.get("hand") not in (0, 1)
+               for card in player.get("cards", [])):
+            expected_tags.add(None)
+        if set(attached_tags) != expected_tags:
+            return
+    elif len(attached) != 1:
+        return
+    player["hands"] = attached
+    display = []
+    for item in attached:
+        number = (item["hand"] + 1 if type(item["hand"]) is int else None)
+        label = (f"Mano {number}: " if number is not None else
+                 "Mano sin identificar: " if player.get("has_split") else "")
+        if item["advice"]:
+            text = item["advice"].get("text") or "SIN CONSEJO"
+            optimal = item["advice"].get("optimal")
+            if optimal:
+                text = f"{text} · {optimal}"
+            index_text = item["advice"].get("index_advice")
+            if index_text:
+                text = f"{text} · {index_text}"
+            display.append(label + text)
+            result["advice_available"] = True
+        else:
+            display.append(label + "SIN CONSEJO")
+    player["advice"] = "\n".join(display)
+    player["advice_reason"] = deepcopy(hero_advice.get("reason"))
+
+
 def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> dict:
     """Build independent presentation data without mutating or consulting state.
 
@@ -298,4 +469,5 @@ def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> 
         status = _reading_status(snap, groups, result["players"], result["dealer"]["cards"], issues)
     result["status"] = status
     result["message"] = _MESSAGES[status]
+    _attach_physical_advice(result, snap)
     return result

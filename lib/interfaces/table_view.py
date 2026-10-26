@@ -287,6 +287,15 @@ class TableView:
         blocked = presentation.get("status") in ("stopped", "error", "needs_calibration", "source_mismatch")
         dealer_cards = [] if blocked else presentation.get("dealer", {}).get("cards", [])
         self._update_hand(self.dealer, dealer_cards, presentation, dealer=True)
+        insurance = presentation.get("insurance") or {}
+        dealer_advice = (insurance.get("text", "")
+                         if not blocked and insurance.get("status") == "ready"
+                         else "SEGURO: SIN CONSEJO"
+                         if not blocked and insurance.get("status") == "no_advice"
+                         else "")
+        if dealer_advice and presentation.get("count_has_pending_uncertainty"):
+            dealer_advice += " · TC INCIERTO"
+        self.dealer["advice"].config(text=dealer_advice)
         self.status_label.config(text=presentation.get("message", ""),
                                  fg=C["warning"] if presentation.get("status") in
                                  ("uncertain", "error", "needs_calibration", "source_mismatch") else C["text_on_felt"])
@@ -309,8 +318,14 @@ class TableView:
             seat["split_notice"].config(text="Split incierto: etiquetas de mano incompletas"
                                         if split and cards and not seat["split_valid"] else "")
             advice = player.get("advice")
-            seat["advice"].config(text=advice if not blocked and presentation.get("advice_available")
-                                  and isinstance(advice, str) else "")
+            advice_text = (advice if not blocked
+                           and (presentation.get("advice_available") is True
+                                or isinstance(player.get("hands"), list)
+                                or player.get("advice_reason"))
+                           and isinstance(advice, str) else "")
+            if advice_text and presentation.get("count_has_pending_uncertainty"):
+                advice_text += "\nTC INCIERTO"
+            seat["advice"].config(text=advice_text)
         self._relayout()
 
     # ---------------------------------------------------------------- preview

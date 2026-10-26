@@ -200,7 +200,8 @@ class MiniTableOverlay:
         rc, tc = metrics.get("running"), metrics.get("true")
         rc_text = f"{rc:+d}" if rc is not None else "—"
         tc_text = f"{tc:+.1f}" if tc is not None else "—"
-        marker = " · INCIERTO" if metrics.get("count_uncertain") else ""
+        marker = (" · INCIERTO" if metrics.get("count_uncertain")
+                  or state.get("count_has_pending_uncertainty") else "")
         self._rect(8, 8, WIDTH - 8, 48, "#111827", "#64748B")
         self._text(22, 27, f"RC {rc_text}   TC {tc_text}{marker}", "#F8FAFC", 12, "w")
         self._text(WIDTH - 180, 28, self._advice_text(state, self._running), "#F8FAFC", 9, "center")
@@ -340,13 +341,31 @@ class MiniTableOverlay:
     @staticmethod
     def _advice_text(presentation, running=True):
         state = presentation or {}
-        if not running or state.get("status") != "ready" or state.get("advice_available") is not True:
+        blocked = state.get("status") in (
+            "stopped", "error", "needs_calibration", "source_mismatch")
+        if not running or blocked:
             return "SIN CONSEJO"
         heroes = [p for p in state.get("players", []) if p.get("is_hero")]
-        if len(heroes) != 1 or heroes[0].get("is_ambiguous") or not heroes[0].get("cards"):
-            return "SIN CONSEJO"
-        advice = heroes[0].get("advice")
-        return advice.strip() if isinstance(advice, str) and advice.strip() else "SIN CONSEJO"
+        parts = []
+        if (len(heroes) == 1 and not heroes[0].get("is_ambiguous")
+                and heroes[0].get("cards")
+                and (state.get("advice_available") is True
+                     or isinstance(heroes[0].get("hands"), list)
+                     or heroes[0].get("advice_reason"))):
+            hero = heroes[0]
+            # Non-ready table status can reflect another player's uncertain
+            # card. In that case, only a hands list attached by
+            # TablePresentation proves this advice is bound to our group.
+            linked = (state.get("status") == "ready"
+                      or isinstance(hero.get("hands"), list)
+                      or hero.get("advice_reason"))
+            advice = hero.get("advice")
+            if linked and isinstance(advice, str) and advice.strip():
+                parts.append(advice.strip())
+        insurance = state.get("insurance") or {}
+        if insurance.get("status") == "ready" and insurance.get("text"):
+            parts.append(insurance["text"])
+        return " · ".join(parts) if parts else "SIN CONSEJO"
 
     def _drag_move(self, event):
         if self.editing and self._drag_origin:
