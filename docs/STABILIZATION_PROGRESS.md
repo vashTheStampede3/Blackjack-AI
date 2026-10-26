@@ -11,3 +11,10 @@
 - Constraints: casino/browser/VM read-only, executor off, inference local, no model replacement, no private frames persisted. Existing user data preserved.
 - Next: validate and checkpoint each completed implementation stage; run source replays when available, full regression and real-Tk smoke before handoff.
 - Accuracy/performance: real live precision and soak criteria remain unmeasured.
+
+## Registry checkpoint
+
+- Implemented persistent in-shoe card archive, context-bound historical correction, manual addition from an explicit native bounding box, and bounded per-card transition events/confidence/confirmation timestamps. Active stale selections still reject after round changes.
+- Counter contribution replacement is atomic under one counter lock; no Tk widget computes Hi-Lo. New-round archive survives state restore and source reconfiguration; New Shoe clears the historical correction space.
+- Tests: 132 related engine/memory/counting tests passed, including randomized repeated corrections, suit composition, historical pending confirmation and false-positive retraction, restore without recount, and manual-add deduplication.
+- Next: connect the inspector/history/manual-location picker to the main GUI, then integrate overlay changes.

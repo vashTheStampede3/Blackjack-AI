@@ -14,6 +14,8 @@ Performance design (vs. the old implementation):
 """
 
 import inspect
+import math
+from copy import deepcopy
 import threading
 import time
 from collections import deque
@@ -323,11 +325,17 @@ class DetectionEngine:
 
     def _replace_card_registry(self, *, enabled=True):
         """Called under the engine lock; never recycle IDs on source changes."""
+        previous = getattr(self, "card_registry", None)
+        archive = {}
+        if previous is not None:
+            previous.archive_current()
+            archive = previous.archive
         self._registry_serial = max(getattr(self, "_registry_serial", 0),
                                     getattr(self.card_registry, "serial", 0))
         self.card_registry = (CardMemory(
             self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
-            empty_frames=constants.EMPTY_FRAMES_FOR_RESET, serial=self._registry_serial)
+            empty_frames=constants.EMPTY_FRAMES_FOR_RESET, serial=self._registry_serial,
+            archive=archive)
             if enabled else None)
         if self.card_registry is not None:
             self.card_registry.round_number = self.round_number
@@ -711,7 +719,9 @@ class DetectionEngine:
 
     def _observe_registry(self, predictions):
         now = getattr(self.capture.monitor, "timestamp", time.monotonic())
-        observations = [p | {"name": PLAYER_CLASS_MAP.get(p["class"])} for p in predictions]
+        context = DetectionEngine.correction_context(self)
+        observations = [p | {"name": PLAYER_CLASS_MAP.get(p["class"]), "context": context}
+                        for p in predictions]
         self.card_registry.observe(observations, now)
         self._sync_registry_cards()
         q = self._round_observation
@@ -835,6 +845,7 @@ class DetectionEngine:
                 new_suit=new_suit, new_seat_id=new_seat_id)
             if not result.ok:
                 return result
+            DetectionEngine._persist_registry_state(self)
             self._sync_registry_cards()
             self._round_observation.count_uncertain = self.counter.count_uncertain
             self._round_observation.count_pending = self.card_registry.pending
@@ -849,6 +860,67 @@ class DetectionEngine:
                 for s in self.seats}
             self.publish_snapshot()
         return result
+
+    def correction_context(self):
+        """Exact source identity captured with each physical observation."""
+        try:
+            resolution = list(self.capture.resolution)
+        except (AttributeError, ValueError):
+            resolution = None
+        return {"round_id": self.round_number, "shoe_id": self.counter.shoe_id,
+                "profile_name": getattr(self, "_active_profile", None),
+                "mode": getattr(self, "_active_mode", None), "resolution": resolution,
+                "source_id": deepcopy(getattr(self, "_configuration_source_identity", None)),
+                "source_ref": deepcopy(getattr(self, "_configuration_source_descriptor", None))}
+
+    def _persist_registry_state(self):
+        if getattr(self, "store", None) is not None:
+            state, round_id, cutting = self._shoe_state(), self.round_number, self.cutting_card_seen
+            self._io_pool.submit(self.store.save_shoe_state, state, round_id, cutting)
+
+    def get_registry_inspection(self):
+        with self._lock:
+            return {"context": self.correction_context(), "count": self.counter.snapshot(),
+                    "cards": self.card_registry.inspection() if self.card_registry is not None else []}
+
+    def apply_historical_correction(self, card_id, expected_context, action, *, new_rank=None, new_suit=None):
+        with self._lock:
+            memory = self.card_registry
+            record = memory.archive.get(card_id) if memory is not None else None
+            if (record is None or not isinstance(expected_context, dict)
+                    or record.context != expected_context or not expected_context
+                    or expected_context.get("shoe_id") != self.counter.shoe_id):
+                return CorrectionResult(False, "historical_context_changed")
+            result = memory.historical_correction(card_id, expected_context.get("round_id"),
+                action, new_rank=new_rank, new_suit=new_suit)
+            if result.ok:
+                DetectionEngine._persist_registry_state(self)
+                self.publish_snapshot()
+            return result
+
+    def add_manual_card(self, expected_context, bbox, rank, suit=None):
+        with self._lock:
+            if (self.card_registry is None or not isinstance(expected_context, dict)
+                    or expected_context != self.correction_context() or self.card_layout is None):
+                return CorrectionResult(False, "source_context_changed"), None
+            try:
+                if len(bbox) != 4 or any(type(v) not in (float, int) or not math.isfinite(v) for v in bbox):
+                    raise ValueError
+                left, top, right, bottom = bbox
+                width, height = self.card_layout.resolution
+                if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+                    raise ValueError
+            except (TypeError, ValueError):
+                return CorrectionResult(False, "invalid_bbox"), None
+            owner = self.card_layout.owner_at((left+right)/2, (top+bottom)/2)
+            if owner is None:
+                return CorrectionResult(False, "outside_calibration"), None
+            result, identity = self.card_registry.add_manual(rank, suit, owner, bbox, expected_context)
+            if result.ok:
+                self._sync_registry_cards()
+                DetectionEngine._persist_registry_state(self)
+                self.publish_snapshot()
+            return result, identity
 
     # --------------------------------------------------------------- dealer
 

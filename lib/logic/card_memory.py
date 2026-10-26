@@ -51,6 +51,14 @@ class RememberedCard:
     manual_seat_override: str | None = None
     ambiguous_seat: bool = False
     status: str = "active"
+    confidence: float | None = None
+    observations: int = 0
+    valid_observations: int = 0
+    confirmed_at: float | None = None
+    counted_at: float | None = None
+    context: dict = field(default_factory=dict)
+    events: list = field(default_factory=list)
+    manual_added: bool = False
 
     @property
     def card_id(self):
@@ -94,14 +102,16 @@ TrackedCard = RememberedCard
 
 
 class CardMemory:
-    def __init__(self, counter, *, confirmations=2, empty_frames=5, serial=0):
+    def __init__(self, counter, *, confirmations=2, empty_frames=5, serial=0, archive=None):
         self.counter = counter
         self.confirmations = confirmations
         self.required_empty = empty_frames
         self.cards = {}
+        self.archive = deepcopy(archive or {})
         # Engine replacements hand off the high-water mark, including IDs of
         # cards no longer in this round. Persist it even for an empty ledger.
-        self.serial = max(serial, self._identity_serials(getattr(counter, "uncertainties", {})))
+        self.serial = max(serial, self._identity_serials(getattr(counter, "uncertainties", {})),
+                          self._identity_serials(self.archive))
         self.round_number = 1
         self.empty_frames = 0
         self.empty_since = None
@@ -109,6 +119,28 @@ class CardMemory:
         self.split_roots = []
         self.now = 0.
         self.group_tracker = TableGroupTracker()
+
+    @staticmethod
+    def _decision(card):
+        return {key: deepcopy(getattr(card, key)) for key in (
+            "rank", "suit", "state", "counted", "manual", "reason", "status")}
+
+    def _note(self, card, kind, before=None):
+        after = self._decision(card)
+        if before != after:
+            card.events.append({"at": self.now, "kind": kind,
+                                "before": before, "after": after})
+            del card.events[:-16]
+
+    def archive_current(self):
+        """Keep the current shoe's identities without keeping them on the table."""
+        for key, card in self.cards.items():
+            if key.startswith(self.counter.shoe_id + ":"):
+                record = deepcopy(card)
+                before = self._decision(record)
+                record.status = "archived"
+                self._note(record, "archived", before)
+                self.archive[key] = record
 
     def _identity_serials(self, identities):
         high = 0
@@ -121,9 +153,11 @@ class CardMemory:
         return high
 
     def _issue(self, card, reason):
+        before = self._decision(card)
         card.reason, card.state = reason, "doubtful"
         self.counter.mark_uncertainty(card.id, {"reason": reason, "rank": card.rank,
                                                "counted": card.counted, "round": self.round_number})
+        self._note(card, "uncertain", before)
 
     @staticmethod
     def _normalize(pred):
@@ -157,6 +191,8 @@ class CardMemory:
             pred["owner"], pred["owner"], possible_ids=list(possible_ids), initial_cx=pred["cx"],
             round_id=self.round_number, suit=pred.get("suit"))
         self.cards[key] = card
+        card.context = deepcopy(pred.get("context") or {})
+        self._note(card, "detected")
         self.counter.mark_uncertainty(key, {"reason": reason or "Carta sin leer / pendiente",
                                            "rank": card.rank, "counted": False, "round": self.round_number})
         if reason:
@@ -165,6 +201,20 @@ class CardMemory:
         return card
 
     def _update(self, card, pred, now):
+        before = self._decision(card)
+        card.observations += 1
+        if type(pred.get("confidence")) in (float, int):
+            card.confidence = float(pred["confidence"])
+        if not pred.get("ambiguous") and not pred.get("unstable") and pred.get("name"):
+            card.valid_observations += 1
+        self._update_observation(card, pred, now)
+        if card.state == "confirmed" and card.confirmed_at is None:
+            card.confirmed_at = now
+        if card.counted and card.counted_at is None:
+            card.counted_at = now
+        self._note(card, "observation", before)
+
+    def _update_observation(self, card, pred, now):
         pred = self._normalize(pred)
         dt = now-card.last_seen
         if dt > 0:
@@ -450,6 +500,18 @@ class CardMemory:
             return CorrectionResult(False, "already_discarded")
         if card.state == "retired" or card.status != "active":
             return CorrectionResult(False, "card_retired")
+        before = self._decision(card)
+        result = self._correct_record(card, action, new_rank, new_suit, new_seat_id)
+        if result.ok:
+            if card.counted and card.counted_at is None:
+                card.counted_at = self.now
+            if card.state == "confirmed" and card.confirmed_at is None:
+                card.confirmed_at = self.now
+            self._note(card, "manual_correction", before)
+        return result
+
+    def _correct_record(self, card, action, new_rank, new_suit, new_seat_id):
+        identity = card.id
         if action == "change_seat":
             if not isinstance(new_seat_id, str) or new_seat_id not in {f"J{i}" for i in range(1, 8)}:
                 return CorrectionResult(False, "invalid_seat")
@@ -466,7 +528,10 @@ class CardMemory:
                 return CorrectionResult(False, "invalid_action")
             before = self.counter.running_count
             if card.counted:
-                self.counter.uncount_card(card.counted_name or card.counted_rank or card.rank)
+                try:
+                    self.counter.replace_contribution(card.counted_name or card.counted_rank or card.rank, None)
+                except ValueError as exc:
+                    return CorrectionResult(False, str(exc))
             card.counted, card.counted_rank, card.counted_name = False, None, None
             card.manual, card.rank = True, None
             card.state, card.status, card.reason = "rejected", "not_a_card", None
@@ -492,9 +557,10 @@ class CardMemory:
         # Even a same-rank manual confirmation must update suit accounting if
         # that contribution was previously recorded without (or with another) suit.
         if old_name != name:
-            if old_name is not None:
-                self.counter.uncount_card(old_name)
-            self.counter.count_card(name)
+            try:
+                self.counter.replace_contribution(old_name, name)
+            except ValueError as exc:
+                return CorrectionResult(False, str(exc))
         card.rank, card.suit = rank, suit
         card.counted_rank, card.counted_name = rank, name
         card.counted, card.manual = True, True
@@ -503,7 +569,60 @@ class CardMemory:
         self._group_hands()
         return CorrectionResult(True, "rank_updated", self.counter.running_count - before)
 
+    def historical_correction(self, identity, expected_round, action, *, new_rank=None, new_suit=None):
+        card = self.archive.get(identity)
+        if not isinstance(identity, str) or not identity.startswith(self.counter.shoe_id + ":"):
+            return CorrectionResult(False, "shoe_changed")
+        if type(expected_round) is not int or card is None or card.round_id != expected_round:
+            return CorrectionResult(False, "historical_card_not_found")
+        if action not in ("set_rank", "not_a_card"):
+            return CorrectionResult(False, "invalid_action")
+        if card.state == "rejected":
+            return CorrectionResult(False, "already_discarded")
+        before = self._decision(card)
+        result = self._correct_record(card, action, new_rank, new_suit, None)
+        card.status = "archived"
+        if result.ok:
+            card.confirmed_at = card.confirmed_at if card.confirmed_at is not None else self.now
+            if card.counted and card.counted_at is None:
+                card.counted_at = self.now
+            self._note(card, "historical_correction", before)
+        return result
+
+    def add_manual(self, rank, suit, owner, bbox, context):
+        try:
+            rank, suit = self._correction_values(rank, suit)
+        except ValueError as exc:
+            return CorrectionResult(False, str(exc)), None
+        left, top, right, bottom = bbox
+        x, y = (left+right)/2, (top+bottom)/2
+        nearby = [card for card in self.cards.values() if card.status == "active"
+                  and card.owner == owner and math.hypot(card.cx-x, card.cy-y)
+                  <= max(3., min(card.width, card.height, right-left, bottom-top)*.5)]
+        if len(nearby) > 1:
+            return CorrectionResult(False, "ambiguous_existing_identity"), None
+        if nearby:
+            result = self.apply_correction(nearby[0].id, self.round_number, "set_rank",
+                                           new_rank=rank, new_suit=suit)
+            return result, nearby[0].id
+        before_rc = self.counter.running_count
+        card = self._new({"name": rank, "suit": suit, "owner": owner,
+            "cx": x, "cy": y, "width": right-left, "height": bottom-top,
+            "confidence": 1., "context": context}, self.now)
+        if card is None:
+            return CorrectionResult(False, "memory_capacity"), None
+        card.manual_added = True
+        self.apply_correction(card.id, self.round_number, "set_rank", new_rank=rank, new_suit=suit)
+        return CorrectionResult(True, "manual_added", self.counter.running_count-before_rc), card.id
+
+    def inspection(self):
+        records = {**self.archive, **self.cards}
+        return [asdict(card) | {"required_observations": self.confirmations}
+                for card in sorted(records.values(), key=lambda c: (c.round_id, c.first_seen, c.id))
+                if card.id.startswith(self.counter.shoe_id + ":")]
+
     def detach_shoe(self):
+        self.archive.clear()
         for card in self.cards.values():
             card.counted, card.manual = False, True
             card.state, card.reason = "retired", None
@@ -513,6 +632,7 @@ class CardMemory:
 
     def clear_round(self):
         # Unresolved issues already live in the shoe; clearing cannot erase them.
+        self.archive_current()
         self.cards.clear()
         self.split_roots.clear()
         self.empty_frames, self.empty_since, self.had_cards = 0, None, False
@@ -524,7 +644,8 @@ class CardMemory:
 
     def get_state(self):
         return {"round_number": self.round_number, "serial": self.serial,
-                "cards": self.snapshot(), "split_roots": list(self.split_roots)}
+                "cards": self.snapshot(), "split_roots": list(self.split_roots),
+                "archive": [asdict(card) for card in self.archive.values()]}
 
     def apply_state(self, state):
         allowed = RememberedCard.__dataclass_fields__
@@ -546,9 +667,18 @@ class CardMemory:
                 raise ValueError("La carta guardada no pertenece a la ronda activa")
         serial = max(self.serial, serial, self._identity_serials(c.id for c in restored),
                      self._identity_serials(self.counter.uncertainties))
+        restored_ids = {c.id for c in restored}
+        archived = [RememberedCard(**{k: deepcopy(v) for k, v in row.items() if k in allowed})
+                    for row in state.get("archive", [])]
+        if any(not isinstance(c.id, str) or not c.id.startswith(self.counter.shoe_id+":")
+               or c.round_id < 1 or c.id in restored_ids for c in archived):
+            raise ValueError("Historial de otro mazo o identidad duplicada")
+        if len({c.id for c in archived}) != len(archived):
+            raise ValueError("Identidad historica duplicada")
         self.cards = {c.id: c for c in restored}
+        self.archive = {c.id: c for c in archived}
         self.round_number = round_number
-        self.serial = serial
+        self.serial = max(serial, self._identity_serials(self.archive))
         self.split_roots = [key for key in state.get("split_roots", []) if key in self.cards]
         self.had_cards = bool(self.cards)
         self.group_tracker = TableGroupTracker()

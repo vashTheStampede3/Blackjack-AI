@@ -94,6 +94,22 @@ class CardCounter:
             self.per_rank[key] = max(0, self.per_rank[key] - 1)
             self._track_identity(card_name, -1)
 
+    def replace_contribution(self, old_name, new_name):
+        """Atomically replace one physical contribution, including suit totals."""
+        changes = [(name, sign, counter_key(name), cards.hilo_delta(name))
+                   for name, sign in ((old_name, -1), (new_name, 1)) if name is not None]
+        with self._lock:
+            if old_name is not None:
+                store = self.suit_seen if " of " in old_name else self.rank_seen_nosuit
+                key = old_name if " of " in old_name else cards.rank_of(old_name)
+                if self.per_rank[counter_key(old_name)] < 1 or store.get(key, 0) < 1:
+                    raise ValueError("contribution_missing")
+            for name, sign, key, delta in changes:
+                self.running_count += sign * delta
+                self.cards_seen += sign
+                self.per_rank[key] += sign
+                self._track_identity(name, sign)
+
     def adjust_manual(self, rank_key: str, delta: int):
         """Manual +/- from the UI; keeps running count and shoe totals consistent."""
         if rank_key not in self.per_rank:
