@@ -1,6 +1,7 @@
-"""Mini Mesa renders the shared TablePresentation; card editing is deferred."""
+"""Mini Mesa renders and selects cards by their physical registry identity."""
 from copy import deepcopy
 import ctypes
+import math
 import sys
 import tkinter as tk
 import screeninfo
@@ -46,10 +47,11 @@ WS_EX_TOPMOST = 0x00000008
 
 
 class MiniTableOverlay:
-    """One overlay window. Cards are display-only until identity editing is connected."""
+    """One overlay window with card correction routed through the GUI callback."""
     def __init__(self, parent, on_correct_card=None, on_close=None):
         self.parent = parent
-        self.on_correct_card = on_correct_card or (lambda *_args, **_kwargs: None)
+        self.on_correct_card = on_correct_card
+        self.identity_corrections_enabled = callable(on_correct_card)
         self.on_close = on_close
         self.win = tk.Toplevel(parent)
         self.win.withdraw()
@@ -80,9 +82,12 @@ class MiniTableOverlay:
         self._notice = ""
         self._active = False
         self._drag_origin = None
+        self._pointer_start = None
+        self._pressed_identity = None
         self.win.geometry(f"{WIDTH}x{HEIGHT}+{int(constants.UI.get('round_x', 60))}+{int(constants.UI.get('round_y', 60))}")
-        self.canvas.bind("<Button-1>", self._canvas_click)
-        self.canvas.bind("<B1-Motion>", self._drag_move)
+        self.canvas.bind("<ButtonPress-1>", self._pointer_press, add="+")
+        self.canvas.bind("<ButtonRelease-1>", self._pointer_release, add="+")
+        self.canvas.bind("<B1-Motion>", self._drag_move, add="+")
         self.win.update_idletasks()
         if sys.platform == "win32":
             try:
@@ -165,18 +170,23 @@ class MiniTableOverlay:
         self._draw()
 
     def _selection_exists(self, ref):
-        """Identity lookup only; no visible selection or correction is enabled."""
+        """Check card and displayed source context before forwarding a click."""
         state = self._last_state or {}
-        if any(ref.get(key) is not None and ref[key] != state.get(key)
-               for key in ("round_id", "shoe_id")):
+        context_keys = ("round_id", "shoe_id", "profile_name", "mode", "resolution",
+                        "source_id", "source_ref")
+        if any(key in ref and ref[key] != state.get(key) for key in context_keys):
             return False
         cards = list((state.get("dealer") or {}).get("cards") or [])
         for player in state.get("players") or []:
             cards.extend(player.get("cards") or [])
         if ref.get("card_id") is not None:
-            return any(card.get("card_id") == ref["card_id"] for card in cards)
-        return bool(ref.get("legacy_ref")) and any(
-            card.get("legacy_ref") == ref["legacy_ref"] for card in cards)
+            return any(
+                card.get("card_id") == ref["card_id"]
+                and card.get("state") not in ("rejected", "retired")
+                and all(key not in ref or key not in card or card.get(key) == ref[key]
+                        for key in context_keys)
+                for card in cards)
+        return False
 
     def _draw(self):
         self.canvas.delete("all")
@@ -256,15 +266,65 @@ class MiniTableOverlay:
         label = self._rank(rank) + SUIT_SYMBOLS.get(card.get("suit"), "") if confirmed else "?"
         fill, edge, fg = (("#F8FAFC", "#38BDF8", "#0F172A") if confirmed else
                           ("#7C2D12", "#F97316", "#FFEDD5"))
+        tag = f"physical-card-{len(self._drawn_cards)}"
         item = self.canvas.create_rectangle(x, y, x + card_w, y + card_h,
-                                             fill=fill, outline=edge, width=2)
+                                             fill=fill, outline=edge, width=2,
+                                             tags=(tag,))
         self.canvas.create_text(x + card_w / 2, y + card_h / 2, text=label,
-                                fill=fg, font=("Segoe UI", 7, "bold"))
-        identity = {key: deepcopy(card[key]) for key in ("card_id", "legacy_ref") if key in card}
-        identity.update(round_id=(self._last_state or {}).get("round_id"),
-                        shoe_id=(self._last_state or {}).get("shoe_id"))
-        self._drawn_cards.append({"item": item, "card": deepcopy(card), "identity": identity})
-        # No card tag bindings, picker, rank/suit editor or J1–J7 controls.
+                                fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
+        identity_fields = (
+            "card_id", "legacy_ref", "rank", "suit", "state", "reason", "owner",
+            "hand", "group_id", "round_id", "shoe_id", "profile_name", "mode",
+            "resolution", "source_id", "source_ref",
+        )
+        identity = {key: deepcopy(card[key]) for key in identity_fields if key in card}
+        self._drawn_cards.append({"item": item, "tag": tag,
+                                  "card": deepcopy(card), "identity": identity})
+        if (getattr(self, "identity_corrections_enabled", False)
+                and callable(self.on_correct_card)
+                and isinstance(identity.get("card_id"), str)
+                and identity["card_id"].strip()):
+            self.canvas.tag_bind(tag, "<ButtonPress-1>",
+                                 lambda _event, ref=deepcopy(identity): self._remember_pressed_identity(ref))
+
+    def _remember_pressed_identity(self, identity):
+        self._pressed_identity = deepcopy(identity)
+
+    def _identity_at_pointer(self, event):
+        try:
+            current = self.canvas.find_withtag("current")
+            tags = self.canvas.gettags(current[0]) if current else ()
+        except (AttributeError, tk.TclError, IndexError):
+            return None
+        for record in self._drawn_cards:
+            if record.get("tag") in tags:
+                return deepcopy(record["identity"])
+        return None
+
+    def _pointer_press(self, event):
+        self._pointer_start = (event.x_root, event.y_root)
+        self._pressed_identity = self._identity_at_pointer(event)
+        self._drag_origin = ((event.x_root - self.win.winfo_x(),
+                              event.y_root - self.win.winfo_y())
+                             if self.editing and 8 <= event.y <= 48 and event.x < 240
+                             else None)
+
+    def _pointer_release(self, event):
+        start = self._pointer_start
+        identity = self._pressed_identity
+        self._pointer_start = self._pressed_identity = self._drag_origin = None
+        if start is None or math.hypot(event.x_root - start[0], event.y_root - start[1]) >= 5:
+            return
+        released = self._identity_at_pointer(event)
+        if (identity is not None and released is not None
+                and identity.get("card_id") == released.get("card_id")):
+            self._dispatch_identity(identity)
+
+    def _dispatch_identity(self, identity):
+        if (getattr(self, "identity_corrections_enabled", False)
+                and callable(self.on_correct_card)
+                and self._selection_exists(identity)):
+            self.on_correct_card(deepcopy(identity))
 
     def _rect(self, x1, y1, x2, y2, fill, outline):
         self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=1)
@@ -288,13 +348,12 @@ class MiniTableOverlay:
         advice = heroes[0].get("advice")
         return advice.strip() if isinstance(advice, str) and advice.strip() else "SIN CONSEJO"
 
-    def _canvas_click(self, event):
-        if 8 <= event.y <= 48 and event.x < 240:
-            self._drag_origin = (event.x_root-self.win.winfo_x(),
-                                 event.y_root-self.win.winfo_y())
-
     def _drag_move(self, event):
         if self.editing and self._drag_origin:
+            if (self._pointer_start is None
+                    or math.hypot(event.x_root - self._pointer_start[0],
+                                  event.y_root - self._pointer_start[1]) < 5):
+                return
             x = event.x_root-self._drag_origin[0]
             y = event.y_root-self._drag_origin[1]
             self.win.geometry(f"{WIDTH}x{HEIGHT}{x:+d}{y:+d}")

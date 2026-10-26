@@ -70,18 +70,22 @@ def _records(value, name, issues):
     return records
 
 
-def _normalize_card(card):
+def _normalize_card(card, *, identity_context=None, group_id=None):
     result = {key: deepcopy(card[key]) for key in _CARD_FIELDS if key in card}
     result["rank"] = (deepcopy(card.get("rank"))
                       if card.get("state") == "confirmed" and not card.get("reason")
                       else None)
     result["suit"] = deepcopy(card.get("suit")) or None
+    if identity_context is not None:
+        result.update(deepcopy(identity_context))
+        result["group_id"] = deepcopy(group_id)
     return result
 
 
-def _player(group=None, *, individual=False, issues):
+def _player(group=None, *, individual=False, issues, identity_context=None):
     group = group or {}
     cards = _records(group.get("cards"), "cards", issues)
+    group_id = "hero" if individual else deepcopy(group.get("seat_id"))
     result = {
         "id": "hero" if individual else deepcopy(group.get("seat_id")),
         "seat_id": deepcopy(group.get("seat_id")),
@@ -90,7 +94,8 @@ def _player(group=None, *, individual=False, issues):
         "is_ambiguous": bool(group.get("is_ambiguous")),
         "has_split": bool(group.get("has_split")),
         "closed_by_double": bool(group.get("closed_by_double")),
-        "cards": [_normalize_card(card) for card in cards],
+        "cards": [_normalize_card(card, identity_context=identity_context,
+                                   group_id=group_id) for card in cards],
         "advice": None,
     }
     if "slot_index" in group:
@@ -114,7 +119,7 @@ def _card_doubts(card, issues):
         issues.append("Carta propia sin mano identificada")
 
 
-def _build_players(groups, mode, issues):
+def _build_players(groups, mode, issues, identity_context=None):
     heroes = [group for group in groups if group.get("is_hero")]
     if len(heroes) > 1:
         issues.append("Múltiples grupos propios incompatibles: "
@@ -134,7 +139,8 @@ def _build_players(groups, mode, issues):
                 issues.append("La propiedad de la carta contradice is_hero")
     if mode == INDIVIDUAL:
         player = _player(heroes[0] if len(heroes) == 1 else None,
-                         individual=True, issues=issues)
+                         individual=True, issues=issues,
+                         identity_context=identity_context)
         if len(heroes) > 1:
             player["is_ambiguous"] = True
         return [player]
@@ -148,7 +154,29 @@ def _build_players(groups, mode, issues):
         seen.append(seat_id)
     # Keep publication order. Excess groups are reported, never accepted as an
     # eighth player or silently merged into another hand.
-    return [_player(group, issues=issues) for group in groups[:7]]
+    return [_player(group, issues=issues, identity_context=identity_context)
+            for group in groups[:7]]
+
+
+def _identity_context(snapshot, result, mode):
+    source_context = _mapping(snapshot.get("source_context"))
+    resolution = deepcopy(result.get("source_resolution"))
+    profile_name = deepcopy(result.get("source_profile"))
+    source_ref = {
+        "profile_name": deepcopy(profile_name),
+        "mode": mode,
+        "resolution": deepcopy(resolution),
+        "source_context": deepcopy(snapshot.get("source_context")),
+    }
+    return {
+        "round_id": deepcopy(result.get("round_id")),
+        "shoe_id": deepcopy(result.get("shoe_id")),
+        "profile_name": profile_name,
+        "mode": mode,
+        "resolution": resolution,
+        "source_id": _identifier(source_context.get("source_id")),
+        "source_ref": source_ref,
+    }
 
 
 def _complete_player(player):
@@ -236,6 +264,11 @@ def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> 
     for key in _SOURCE_FIELDS:
         if key in snap:
             result[key] = deepcopy(snap[key])
+    result["profile_name"] = deepcopy(result.get("source_profile"))
+    result["resolution"] = deepcopy(result.get("source_resolution"))
+    identity_context = _identity_context(snap, result, mode)
+    result["source_id"] = identity_context["source_id"]
+    result["source_ref"] = deepcopy(identity_context["source_ref"])
     if not running:
         status = "stopped"
     elif selected_mode is not None and source_mode is not None and source_mode != selected_mode:
@@ -253,13 +286,15 @@ def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> 
         if snapshot is not None and not isinstance(snapshot, Mapping):
             issues.append("Snapshot inválido")
         groups = _records(snap.get("card_groups"), "card_groups", issues)
-        result["players"] = _build_players(groups, mode, issues)
+        result["players"] = _build_players(groups, mode, issues, identity_context)
         dealer_records = _records(snap.get("dealer_cards"), "dealer_cards", issues)
         for card in dealer_records:
             _card_doubts(card, issues)
             if card.get("owner") not in (None, "dealer"):
                 issues.append("Carta ajena en la mano del crupier")
-        result["dealer"]["cards"] = [_normalize_card(card) for card in dealer_records]
+        result["dealer"]["cards"] = [
+            _normalize_card(card, identity_context=identity_context, group_id="dealer")
+            for card in dealer_records]
         status = _reading_status(snap, groups, result["players"], result["dealer"]["cards"], issues)
     result["status"] = status
     result["message"] = _MESSAGES[status]

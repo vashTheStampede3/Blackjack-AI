@@ -10,6 +10,7 @@ ever touched from the worker thread.
 import threading
 import time
 import tkinter as tk
+from copy import deepcopy
 from tkinter import ttk, messagebox, filedialog
 
 import screeninfo
@@ -728,9 +729,9 @@ class ModernBlackjackGUI(tk.Tk):
         wrapper.grid(row=1, column=1, sticky="nsew", padx=12, pady=12)
         wrapper.rowconfigure(0, weight=1)
         wrapper.columnconfigure(0, weight=1)
-        # Index-based corrections/inspectors cannot identify physical cards.
-        # Keep them disconnected until the identity correction integration.
+        # Main-table card clicks carry the physical card_id, never a seat slot.
         self.table = TableView(wrapper)
+        self.table.on_card_identity_click = getattr(self, "_on_identity_card_click", None)
         self.table.canvas.grid(row=0, column=0, sticky="nsew")
         # Clicking the felt parks keyboard focus back on the window — an
         # Entry otherwise keeps focus for the whole session after one click
@@ -1176,6 +1177,133 @@ class ModernBlackjackGUI(tk.Tk):
                        hand_index=hand_idx),
                    allow_remove=slot < n_cards, split_info=split_info)
 
+    def _on_identity_card_click(self, identity):
+        """Open a picker bound to the exact physical card from the view."""
+        identity = deepcopy(identity) if isinstance(identity, dict) else None
+        if not identity or not identity.get("card_id"):
+            return False
+        active_picker = getattr(self, "_card_correction_picker", None)
+        if active_picker is not None:
+            try:
+                if active_picker.winfo_exists():
+                    active_picker.lift()
+                    return False
+            except (AttributeError, tk.TclError):
+                pass
+        if not ModernBlackjackGUI._identity_is_current(self, identity):
+            self.set_status("La carta ya no pertenece a la lectura actual.", error=True)
+            return False
+        self._card_correction_picker = CardPicker(
+            self, "Corregir carta", self.table.card_image,
+            self._finish_identity_correction, card_identity=identity,
+            on_close=self._clear_identity_picker)
+        return True
+
+    def _clear_identity_picker(self):
+        self._card_correction_picker = None
+
+    def _identity_is_current(self, identity):
+        presentation = getattr(self, "_table_presentation", None) or {}
+        if (identity.get("round_id") != presentation.get("round_id")
+                or identity.get("shoe_id") != presentation.get("shoe_id")):
+            return False
+        for key in ("profile_name", "mode", "resolution", "source_id", "source_ref"):
+            if key in identity and identity.get(key) != presentation.get(key):
+                return False
+        if hasattr(self, "_source_configured"):
+            try:
+                mode = ModernBlackjackGUI._selected_app_mode(self)
+            except (AttributeError, ValueError):
+                return False
+            profile_var = getattr(self, "profile_var", None)
+            profile = profile_var.get() if profile_var is not None else None
+            monitor = getattr(self, "monitor", None)
+            resolution = (getattr(monitor, "width", None),
+                          getattr(monitor, "height", None))
+            if (not self._source_configured
+                    or presentation.get("mode") != mode
+                    or getattr(self, "_applied_mode_context", None)
+                    != (profile, mode, resolution)):
+                return False
+            current = ModernBlackjackGUI._current_display_snapshot(self)
+            if (current is None or current.get("seq") != presentation.get("seq")):
+                return False
+            expected_context = (identity.get("source_ref") or {}).get("source_context")
+            if expected_context != current.get("source_context"):
+                return False
+        cards = list((presentation.get("dealer") or {}).get("cards") or [])
+        for player in presentation.get("players") or []:
+            cards.extend(player.get("cards") or [])
+        return any(card.get("card_id") == identity.get("card_id")
+                   and card.get("state") not in ("rejected", "retired")
+                   for card in cards)
+
+    def _finish_identity_correction(self, action, new_rank, new_suit, identity):
+        return self._apply_identity_correction(
+            identity, action, new_rank=new_rank, new_suit=new_suit)
+
+    def _apply_identity_correction(self, card_identity, action, *, new_rank=None,
+                                   new_suit=None):
+        """Submit a correction only through the registry's physical ID API."""
+        identity = deepcopy(card_identity) if isinstance(card_identity, dict) else {}
+        card_id = identity.get("card_id")
+        round_id = identity.get("round_id")
+        aliases = {"J": "Jack", "Q": "Queen", "K": "King", "A": "Ace"}
+        rank = aliases.get(new_rank, new_rank)
+        if (action not in ("set_rank", "not_a_card")
+                or (action == "set_rank" and rank not in constants.CARD_RANKS)
+                or (action == "not_a_card" and (new_rank is not None or new_suit is not None))
+                or not card_id or type(round_id) is not int
+                or not ModernBlackjackGUI._identity_is_current(self, identity)):
+            self.set_status("Corrección rechazada: la identidad está vencida o no está disponible.",
+                            error=True)
+            return False
+        engine = self.controller.engine
+        if identity.get("shoe_id") != getattr(engine.counter, "shoe_id", None):
+            self.set_status("Corrección rechazada: el mazo cambió.", error=True)
+            return False
+        if new_suit is not None and new_suit not in (
+                "S", "H", "D", "C", "Spades", "Hearts", "Diamonds", "Clubs",
+                "♠", "♥", "♦", "♣"):
+            self.set_status("Corrección rechazada: el palo elegido no es válido.", error=True)
+            return False
+        lock = getattr(engine, "_lock", None)
+        if lock is not None:
+            with lock:
+                registry = getattr(engine, "card_registry", None)
+                record = getattr(registry, "cards", {}).get(card_id) if registry else None
+                valid_record = (record is not None and record.id == card_id
+                                and record.round_id == round_id
+                                and record.status == "active"
+                                and record.state not in ("rejected", "retired"))
+        else:
+            registry = getattr(engine, "card_registry", None)
+            record = getattr(registry, "cards", {}).get(card_id) if registry else None
+            valid_record = (record is not None and record.id == card_id
+                            and record.round_id == round_id
+                            and record.status == "active"
+                            and record.state not in ("rejected", "retired"))
+        if not valid_record:
+            self.set_status("Corrección rechazada: la carta ya no existe en el registro activo.",
+                            error=True)
+            return False
+        try:
+            result = engine.apply_correction(card_id, round_id, action,
+                                             new_rank=rank if action == "set_rank" else None,
+                                             new_suit=new_suit)
+        except (ValueError, RuntimeError) as error:
+            self.set_status(f"No se pudo corregir la carta: {error}", error=True)
+            return False
+        if not getattr(result, "ok", False):
+            self.set_status(f"Corrección rechazada: {getattr(result, 'reason', 'sin detalle')}.",
+                            error=True)
+            return False
+        self.ui_actions.record("CARD_CORRECTION_APPLIED", "Corrección aplicada a la identidad física.",
+                               details={"card_id": card_id, "round_id": round_id,
+                                        "action": action, "rank": rank, "suit": new_suit})
+        self.set_status("Carta corregida.")
+        return True
+
     def _on_dealer_click(self):
         snapshot = self.controller.engine.get_snapshot()
         round_at_click = snapshot["round"] if snapshot else None
@@ -1615,6 +1743,10 @@ class ModernBlackjackGUI(tk.Tk):
                 from .round_overlay import MiniTableOverlay
                 self.round_overlay = MiniTableOverlay(
                     self, on_close=self._on_hud_closed)
+                self.round_overlay.on_correct_card = getattr(
+                    self, "_on_identity_card_click", None)
+                self.round_overlay.identity_corrections_enabled = callable(
+                    self.round_overlay.on_correct_card)
             self.hud = self.round_overlay
             ModernBlackjackGUI._render_table(
                 self, ModernBlackjackGUI._current_display_snapshot(self))
@@ -1673,34 +1805,14 @@ class ModernBlackjackGUI(tk.Tk):
     def _correct_overlay_card(self, card_id, round_id, action,
                               new_rank=None, new_suit=None, new_seat_id=None,
                               reference=None, shoe_id=None, expected_name=None):
-        details = {"card_id": card_id, "expected_round": round_id, "action": action,
-                   "rank": new_rank, "suit": new_suit, "seat_id": new_seat_id}
-        if reference is not None:
-            details.update(legacy_ref=reference, expected_shoe=shoe_id)
-        self.ui_actions.record("CARD_CORRECTION_REQUEST", "Mini Table correction requested.", details=details)
-        try:
-            engine = self.controller.engine
-            if reference is not None:
-                if action not in ("set_rank", "not_a_card"):
-                    self.set_status("This reference correction does not support seat or suit changes.", error=True)
-                    return False
-                result = engine.correct_legacy_card(
-                    reference, expected_round=round_id, expected_shoe=shoe_id,
-                    expected_name=expected_name, action=action, new_rank=new_rank)
-            else:
-                result = engine.correct_tracked_card(
-                    card_id, new_rank, expected_round=round_id, action=action,
-                    new_suit=new_suit, new_seat_id=new_seat_id)
-            if result is False or (reference is not None and result is None):
-                self.set_status("Correction rejected because the table changed or the reference is stale.", error=True)
-                return False
-            reason = getattr(result, "reason", "legacy reference accepted")
-            self.ui_actions.record("CARD_CORRECTION_APPLIED", f"CONFIRMED: correction applied: {reason}.", details=details)
-            self.set_status("Card corrected.")
-            return True
-        except (ValueError, RuntimeError) as error:
-            self.set_status(f"Card was not corrected: {error}", error=True)
+        # Compatibility entry point: legacy references and seat-index changes
+        # are deliberately refused. New actions remain bound to a card_id.
+        if reference is not None or new_seat_id is not None or not card_id:
+            self.set_status("Corrección rechazada: requiere una identidad física vigente.", error=True)
             return False
+        return self._apply_identity_correction(
+            {"card_id": card_id, "round_id": round_id, "shoe_id": shoe_id},
+            action, new_rank=new_rank, new_suit=new_suit)
     def _on_hud_closed(self):
         """The close control hides the one overlay and clears both references."""
         self.hud = None

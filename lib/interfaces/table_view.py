@@ -1,9 +1,4 @@
-"""Draw TablePresentation data without engine or historical seat indices.
-
-Corrections, add, split, seat selection and advice inspection remain unbound
-until callbacks can use verified identities. Widgets retain card identities
-and reading data for that future integration.
-"""
+"""Draw TablePresentation data without engine or historical seat indices."""
 from copy import deepcopy
 import math
 import tkinter as tk
@@ -43,9 +38,11 @@ def seat_positions(w, h, n, card_w, card_h):
 class TableView:
     def __init__(self, parent, on_card_click=None, on_dealer_click=None,
                  on_split_click=None, on_seat_name_click=None,
-                 on_dealer_extra_click=None, on_advice_click=None):
-        # Constructor compatibility only: none of these index callbacks is
-        # bound, even for a card carrying a legacy_ref.
+                 on_dealer_extra_click=None, on_advice_click=None,
+                 on_card_identity_click=None):
+        # Only the identity callback is bound. The other arguments remain
+        # accepted for source compatibility but are never used for corrections.
+        self.on_card_identity_click = on_card_identity_click
         self.on_card_click = on_card_click
         self.on_dealer_click = on_dealer_click
         self.on_split_click = on_split_click
@@ -179,16 +176,38 @@ class TableView:
         for i, card in enumerate(cards):
             widget = hand["cards"][i]
             widget.card_data = deepcopy(card)
+            identity_fields = (
+                "card_id", "legacy_ref", "rank", "suit", "state", "reason",
+                "hand", "owner", "group_id", "round_id", "shoe_id",
+                "profile_name", "mode", "resolution", "source_id", "source_ref",
+            )
             widget.card_identity = {key: deepcopy(card[key])
-                                    for key in ("card_id", "legacy_ref") if key in card}
-            widget.card_identity.update(round_id=presentation.get("round_id"),
-                                        shoe_id=presentation.get("shoe_id"))
+                                    for key in identity_fields if key in card}
+            for key in ("round_id", "shoe_id", "profile_name", "mode", "resolution",
+                        "source_id", "source_ref"):
+                if key not in widget.card_identity and key in presentation:
+                    widget.card_identity[key] = deepcopy(presentation[key])
+            can_correct = (callable(self.on_card_identity_click)
+                           and isinstance(widget.card_identity.get("card_id"), str)
+                           and bool(widget.card_identity["card_id"].strip()))
+            widget.configure(cursor="hand2" if can_correct else "")
+            if can_correct and not getattr(widget, "_identity_click_bound", False):
+                widget.bind("<Button-1>",
+                            lambda _event, target=widget: self._dispatch_card_identity(target))
+                widget._identity_click_bound = True
             name = self._visual_name(card)
             if hand["rendered"][i] != name:
                 photo = self.card_image(name, size)
                 widget.config(image=photo)
                 widget.image = photo
                 hand["rendered"][i] = name
+
+    def _dispatch_card_identity(self, widget):
+        """Send a detached physical identity; never a seat/card index."""
+        identity = getattr(widget, "card_identity", None)
+        if (callable(self.on_card_identity_click) and isinstance(identity, dict)
+                and identity.get("card_id") is not None):
+            self.on_card_identity_click(deepcopy(identity))
 
     # -------------------------------------------------------------- geometry
 

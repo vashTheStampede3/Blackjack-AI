@@ -39,6 +39,8 @@ data/
 reports/
 .env
 .env.*
+# Pytest artifacts from malformed Windows temp-path resolution.
+UsersPCAppDataLocalTempbjpytest-*/
 # Historical exports may contain obsolete embedded third-party credentials.
 archive/
 AUDIT_*.md

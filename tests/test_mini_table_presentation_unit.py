@@ -129,7 +129,8 @@ def test_legacy_identity_and_physical_metadata_are_detached(mini):
     p = presentation(cards=[c], dealer=[])
     mini.update_from_presentation(p)
     visual = mini._drawn_cards[0]
-    assert visual["identity"] == {"legacy_ref": c["legacy_ref"], "round_id": 2, "shoe_id": "shoe-a"}
+    assert visual["identity"] == {"legacy_ref": c["legacy_ref"], "rank": "Ace",
+                                  "suit": None, "state": "confirmed", "hand": 1}
     assert "card_id" not in visual["identity"]
     assert visual["card"]["hand"] == 1
     visual["identity"]["legacy_ref"]["seat_index"] = -1

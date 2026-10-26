@@ -280,7 +280,10 @@ def test_widget_identity_is_detached_and_contains_no_visual_slot(view):
     p = presentation(cards=[c])
     view.update(p)
     widget = view.seats[0]["cards"][0]
-    assert widget.card_identity == {"card_id": "h1", "legacy_ref": c["legacy_ref"], "round_id": 2, "shoe_id": "shoe-a"}
+    assert widget.card_identity["card_id"] == "h1"
+    assert widget.card_identity["legacy_ref"] == c["legacy_ref"]
+    assert (widget.card_identity["round_id"], widget.card_identity["shoe_id"]) == (2, "shoe-a")
+    assert "group_id" not in widget.card_identity  # The raw test presentation did not publish it.
     assert widget.card_data["hand"] == 1
     widget.card_identity["legacy_ref"]["seat_index"] = -1
     assert c["legacy_ref"]["seat_index"] == 4
