@@ -146,6 +146,7 @@ class DetectionEngine:
         self._dist_scale = 1.0
         self.card_layout = None
         self.card_registry = None
+        self._registry_serial = 0
         self._memory_mode = "legacy"
 
         self._pool = ThreadPoolExecutor(max_workers=2)
@@ -287,10 +288,7 @@ class DetectionEngine:
             res = self.capture.resolution
             self.card_layout = selected_layout
             self._memory_mode = "registry"
-            self.card_registry = CardMemory(
-                self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
-                empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
-            self.card_registry.round_number = self.round_number
+            DetectionEngine._replace_card_registry(self)
             self.regions = []
             xs, ys = zip(*selected_layout.dealer)
             self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
@@ -323,6 +321,17 @@ class DetectionEngine:
         """OCR regions exist for the current capture resolution."""
         return self._ocr_regions is not None
 
+    def _replace_card_registry(self, *, enabled=True):
+        """Called under the engine lock; never recycle IDs on source changes."""
+        self._registry_serial = max(getattr(self, "_registry_serial", 0),
+                                    getattr(self.card_registry, "serial", 0))
+        self.card_registry = (CardMemory(
+            self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
+            empty_frames=constants.EMPTY_FRAMES_FOR_RESET, serial=self._registry_serial)
+            if enabled else None)
+        if self.card_registry is not None:
+            self.card_registry.round_number = self.round_number
+
     def use_card_layout(self, layout, *, memory="legacy"):
         """Apply an exact-resolution table layout before beginning a replay/round.
 
@@ -336,11 +345,8 @@ class DetectionEngine:
         if self.counter.cards_seen or any(s.cards for s in self.seats) or self.dealer_card:
             raise ValueError("Choose the layout before cards are processed")
         self.card_layout, self._memory_mode = layout, memory
-        self.card_registry = (CardMemory(self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
-                                         empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
-                              if memory == "registry" else None)
-        if self.card_registry:
-            self.card_registry.round_number = self.round_number
+        with self._lock:
+            DetectionEngine._replace_card_registry(self, enabled=memory == "registry")
         xs, ys = zip(*layout.dealer)
         self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
         mx = sum(x for x, _ in layout.mine) / len(layout.mine)
@@ -709,13 +715,15 @@ class DetectionEngine:
         q = self._round_observation
         q.inferred_at = q.captured_at
         q.empty = self.card_registry.empty_frames
-        q.present = bool(self.card_registry.cards and not self.card_registry.clear_ready)
+        q.present = bool(any(c.status == "active" for c in self.card_registry.cards.values())
+                         and not self.card_registry.clear_ready)
         q.count_pending = self.card_registry.pending
         q.count_uncertain = self.counter.count_uncertain
         q.seats = {s.index: bool(len(s.cards) >= 2 and not self.card_registry.advice_pending
                                  and all(c.get("state") == "confirmed" for c in s.cards))
                    for s in self.seats}
         q.dealer_ok = bool(self.dealer_locked and not any(c.owner == "dealer" and
+            c.state not in ("rejected", "retired") and
             (not c.counted or c.reason or c.state != "confirmed") for c in self.card_registry.cards.values()))
         if self.card_registry.clear_ready:
             self._reset_round_state()
@@ -728,7 +736,7 @@ class DetectionEngine:
         dealer = []
         mine = next(iter(self.my_seats), 0)
         for card in sorted(self.card_registry.cards.values(), key=lambda c: (c.first_seen, c.id)):
-            if not card.counted or card.rank is None:
+            if not card.counted or card.rank is None or card.status != "active":
                 continue
             if card.owner == "dealer":
                 dealer.append(card)
@@ -818,6 +826,8 @@ class DetectionEngine:
         with self._lock:
             if self.card_registry is None:
                 return CorrectionResult(False, "registry_inactive")
+            if type(expected_round_id) is not int or expected_round_id != self.round_number:
+                return CorrectionResult(False, "round_changed")
             result = self.card_registry.apply_correction(
                 card_id, expected_round_id, action, new_rank=new_rank,
                 new_suit=new_suit, new_seat_id=new_seat_id)
@@ -826,7 +836,16 @@ class DetectionEngine:
             self._sync_registry_cards()
             self._round_observation.count_uncertain = self.counter.count_uncertain
             self._round_observation.count_pending = self.card_registry.pending
-        self.publish_snapshot()
+            active = [c for c in self.card_registry.cards.values() if c.status == "active"]
+            self._round_observation.present = bool(active)
+            self._round_observation.dealer_ok = bool(self.dealer_locked and all(
+                c.counted and not c.reason and c.state == "confirmed"
+                for c in active if c.owner == "dealer"))
+            self._round_observation.seats = {
+                s.index: bool(len(s.cards) >= 2 and not self.card_registry.advice_pending
+                              and all(c.get("state") == "confirmed" for c in s.cards))
+                for s in self.seats}
+            self.publish_snapshot()
         return result
 
     # --------------------------------------------------------------- dealer
@@ -1381,6 +1400,8 @@ class DetectionEngine:
             self._prev_thumb = self._prev_dealer_thumb = None
             self._last_frame = None
             self.round_number += 1  # invalidate card pickers opened in the old shoe
+            if self.card_registry is not None:
+                self.card_registry.round_number = self.round_number
             if cards_still_present:
                 self.counter.mark_uncertainty("shoe_reset_with_cards", {
                     "reason": "New Shoe iniciado mientras aún había cartas visibles",
@@ -2824,7 +2845,7 @@ class DetectionEngine:
                             "cy": card.cy / self.card_layout.resolution[1],
                         } if self.card_layout is not None else None),
                     } for card in group.cards],
-                } for group in self.card_registry.group_tracker.ordered_groups()]
+                } for group in self.card_registry.group_tracker.ordered_groups() if group.cards]
                     if self.card_registry is not None else [{
                         "seat_id": legacy_seat_ids.get(seat.index, f"J{seat.index + 1}"),
                         "slot_index": legacy_slot_indices.get(seat.index),
@@ -2876,9 +2897,10 @@ class DetectionEngine:
             if self.card_registry is not None:
                 snapshot["count"]["count_uncertain"] = self.counter.count_uncertain
                 hero_groups = [g for g in self.card_registry.group_tracker.ordered_groups()
-                               if g.is_hero]
+                               if g.is_hero and g.cards]
                 hero_uncertain = any(g.is_ambiguous for g in hero_groups)
                 dealer_uncertain = any(c.owner == "dealer" and
+                                       c.state not in ("rejected", "retired") and
                                        (not c.counted or c.reason or c.state != "confirmed")
                                        for c in self.card_registry.cards.values())
                 registry_pending = self.card_registry.advice_pending

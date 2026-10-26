@@ -54,8 +54,11 @@ def test_unread_card_and_shoe_uncertainty_survive_round_clear_and_state_restore(
     restored.apply_state(counter.get_state())
     assert restored.count_uncertain and restored.cards_seen == 0
     next_ledger = CardMemory(restored)
-    next_ledger.correct(identity, "6")
-    assert restored.running_count == 1 and restored.cards_seen == 1 and not restored.count_uncertain
+    before = restored.get_state()
+    with pytest.raises(ValueError, match="card_not_found"):
+        next_ledger.correct(identity, "6")
+    assert restored.get_state() == before
+    assert restored.running_count == 0 and restored.cards_seen == 0 and restored.count_uncertain
 
 
 def test_confirmed_round_clear_keeps_shoe_count_and_new_round_gets_new_ids():
