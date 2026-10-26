@@ -209,18 +209,22 @@ class MiniTableOverlay:
         self._text(WIDTH / 2, 65, "Crupier", "#BFDBFE", 9, "center")
         dealer_cards = [] if blocked else (state.get("dealer") or {}).get("cards", [])
         self._draw_hand(dealer_cards, WIDTH / 2, 80)
-        if state.get("mode") == "individual":
-            player = next((p for p in state.get("players", []) if p.get("id") == "hero"), {})
-            self._draw_group(player, blocked=blocked)
+        players = list(state.get("players", [])[:7])
+        if players:
+            centers = self._player_centers(len(players))
+            for player, center in zip(players, centers):
+                self._draw_group(player, center=center, blocked=blocked)
         elif state.get("mode") == "multiplayer":
-            self._text(WIDTH / 2, 165, "Multijugador — representación dinámica pendiente",
-                       "#CBD5E1", 10, "center")
+            self._text(WIDTH / 2, 172, "Sin grupos observados", "#94A3B8", 9, "center")
         self.canvas.create_text(WIDTH - 22, 28, text="×", fill="#CBD5E1",
                                 font=("Segoe UI", 13, "bold"), tags=("close",))
         self.canvas.tag_bind("close", "<Button-1>", lambda _event: self._close_by_user())
+        group_warning = state.get("group_warning")
+        if group_warning:
+            self._text(WIDTH / 2, 238, group_warning, "#FDE68A", 9, "center")
         if notice:
-            self._rect(8, 240, WIDTH - 8, 282, "#7F1D1D", "#FCA5A5")
-            self._text(WIDTH / 2, 261, notice, "#FEE2E2", 9, "center")
+            self._rect(8, 246, WIDTH - 8, 282, "#7F1D1D", "#FCA5A5")
+            self._text(WIDTH / 2, 264, notice, "#FEE2E2", 9, "center")
         if active:
             self._show_window()  # capture/activation guards remain authoritative
             self.win.attributes("-alpha", self.opacity)
@@ -234,9 +238,34 @@ class MiniTableOverlay:
             x, top, size = card_chip_position(index, len(cards), center, y, span)
             self._draw_card(x, top, card, size=size)
 
-    def _draw_group(self, player, *, blocked=False):
-        """One logical hero. Existing hand tags control layout, never ownership."""
-        self._text(WIDTH / 2, 136, "Yo", "#22C55E", 10, "center")
+    @staticmethod
+    def _player_centers(count):
+        if count <= 0:
+            return []
+        if count == 1:
+            return [WIDTH / 2]
+        span = min(WIDTH - 150, 136 * (count - 1))
+        left = (WIDTH - span) / 2
+        return [left + span * index / (count - 1) for index in range(count)]
+
+    def _draw_group(self, player, *, center=WIDTH / 2, blocked=False):
+        """Render one published group; never infer ownership or clustering."""
+        hero = bool(player.get("is_hero"))
+        provisional = bool(player.get("is_provisional"))
+        ambiguous = bool(player.get("is_ambiguous"))
+        label = "Yo" if hero else str(player.get("label") or player.get("id") or "?")
+        if provisional:
+            provisional_id = player.get("group_id") or player.get("seat_id") or player.get("id")
+            if str(provisional_id) not in label:
+                label += f" · {provisional_id}"
+            label += " · PROVISIONAL"
+        if ambiguous:
+            label += " · AMBIGUO / ?"
+        color = "#22C55E" if hero else "#FDE68A" if provisional or ambiguous else "#CBD5E1"
+        self._rect(center - 65, 130, center + 65, 224,
+                   "#16351F" if hero else "#172033",
+                   "#22C55E" if hero else "#F59E0B" if provisional or ambiguous else "#475569")
+        self._text(center, 140, label, color, 8, "center")
         cards = [] if blocked else player.get("cards", [])
         tags = [card.get("hand") for card in cards]
         split = bool(player.get("has_split"))
@@ -244,21 +273,20 @@ class MiniTableOverlay:
                  and all(type(tag) is int and tag in (0, 1) for tag in tags)
                  and set(tags) == {0, 1})
         if valid:
-            centers = (WIDTH / 2 - 180, WIDTH / 2 + 180)
-            for hand, center in enumerate(centers):
-                self._text(center, 155, f"Mano {hand + 1}", "#CBD5E1", 8, "center")
+            hand_centers = (center - 34, center + 34)
+            for hand, hand_center in enumerate(hand_centers):
+                self._text(hand_center, 155, f"Mano {hand + 1}", "#CBD5E1", 7, "center")
             depths, counts = [0, 0], [tags.count(0), tags.count(1)]
             # Iterate publication order, keeping the original identity on each
             # item. Positioning by explicit tags does not discover a split.
             for card, hand in zip(cards, tags):
-                x, y, size = card_chip_position(depths[hand], counts[hand], centers[hand], 174, 300)
+                x, y, size = card_chip_position(depths[hand], counts[hand], hand_centers[hand], 166, 58)
                 self._draw_card(x, y, card, size=size)
                 depths[hand] += 1
         else:
-            self._draw_hand(cards, WIDTH / 2, 166)
+            self._draw_hand(cards, center, 166, span=125)
             if split and cards:
-                self._text(WIDTH / 2, 219, "Split incierto: etiquetas de mano incompletas",
-                           "#FDE68A", 8, "center")
+                self._text(center, 218, "Split incierto", "#FDE68A", 7, "center")
 
     def _draw_card(self, x, y, card, size=(27, 34)):
         card_w, card_h = size

@@ -271,11 +271,12 @@ def test_opacity_and_position_editing_do_not_replace_reading_or_enable_correctio
 
 def test_multiplayer_uses_no_fixed_seat_fallback(mini):
     p = presentation(mode="multiplayer")
-    p["players"] += [{"id": "TMP_1", "seat_id": "TMP_1", "cards": [card("other", "2")]}]
+    p["players"] += [{"id": "TMP_1", "seat_id": "TMP_1", "is_provisional": True,
+                       "cards": [card("other", "2")]}]
     mini.update_from_presentation(p)
-    assert identities(mini) == ["d1"]
-    assert any("dinámica pendiente" in str(text) for text in mini.canvas.texts())
-    assert "Yo" not in mini.canvas.texts()
+    assert identities(mini) == ["d1", "h1", "h2", "other"]
+    assert "Yo" in mini.canvas.texts()
+    assert "TMP_1 · PROVISIONAL" in mini.canvas.texts()
 
 
 def test_gui_builds_once_and_passes_the_same_object_to_both_views(view, mini, monkeypatch):

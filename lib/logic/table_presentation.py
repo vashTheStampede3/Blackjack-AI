@@ -91,9 +91,12 @@ def _player(group=None, *, individual=False, issues, identity_context=None):
     result = {
         "id": "hero" if individual else deepcopy(group.get("seat_id")),
         "seat_id": deepcopy(group.get("seat_id")),
+        "group_id": deepcopy(group.get("seat_id")) if not individual else "hero",
         "label": "Yo" if individual or group.get("is_hero") else deepcopy(group.get("seat_id")),
         "is_hero": True if individual else bool(group.get("is_hero")),
         "is_ambiguous": bool(group.get("is_ambiguous")),
+        "is_provisional": bool(not individual and isinstance(group.get("seat_id"), str)
+                                and group["seat_id"].startswith("TMP_")),
         "has_split": bool(group.get("has_split") or len(hand_tags) > 1),
         "closed_by_double": bool(group.get("closed_by_double")),
         "cards": [_normalize_card(card, identity_context=identity_context,
@@ -156,8 +159,13 @@ def _build_players(groups, mode, issues, identity_context=None):
         seen.append(seat_id)
     # Keep publication order. Excess groups are reported, never accepted as an
     # eighth player or silently merged into another hand.
-    return [_player(group, issues=issues, identity_context=identity_context)
-            for group in groups[:7]]
+    players = [_player(group, issues=issues, identity_context=identity_context)
+               for group in groups[:7]]
+    if len(heroes) > 1:
+        for player in players:
+            if player.get("is_hero"):
+                player["is_ambiguous"] = True
+    return players
 
 
 def _identity_context(snapshot, result, mode):
@@ -431,6 +439,9 @@ def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> 
         "players": [_player(individual=True, issues=issues)] if mode == INDIVIDUAL else [],
         "advice_available": False,
         "issues": issues,
+        "group_count": 0,
+        "group_overflow": False,
+        "group_warning": None,
     }
     for key in _SOURCE_FIELDS:
         if key in snap:
@@ -458,6 +469,11 @@ def build_table_presentation(snapshot, *, selected_mode=None, running=False) -> 
             issues.append("Snapshot inválido")
         groups = _records(snap.get("card_groups"), "card_groups", issues)
         result["players"] = _build_players(groups, mode, issues, identity_context)
+        if mode != INDIVIDUAL:
+            result["group_count"] = len(groups)
+            result["group_overflow"] = len(groups) > 7
+            if result["group_overflow"]:
+                result["group_warning"] = ">7 grupos detectados - Revisar calibración"
         dealer_records = _records(snap.get("dealer_cards"), "dealer_cards", issues)
         for card in dealer_records:
             _card_doubts(card, issues)

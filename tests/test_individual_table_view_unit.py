@@ -397,8 +397,8 @@ def test_preview_resize_dpi_and_mode_change_restore_no_fixed_seats(view):
     assert view.canvas.items[view._preview_item][0] == 650
     view._rescale()
     view.clear_preview()
-    assert view.seats == []
-    assert "dinámica pendiente" in view.mode_label.cget("text")
+    assert [seat["id"] for seat in view.seats] == ["hero"]
+    assert view.mode_label.cget("text") == ""
     assert len(view.dealer["cards"]) == 1
     view.update(presentation(cards=[], dealer=[]))
     assert len(view.seats) == 1 and view.seats[0]["cards"] == []
@@ -534,7 +534,7 @@ def test_calibration_invalidation_and_mode_change_clear_old_cards(view):
     assert view.seats[0]["cards"] == []
     g.mode_var.set("Multijugador")
     poll(g)
-    assert view.seats == [] and "dinámica pendiente" in view.mode_label.cget("text")
+    assert view.seats == [] and view.mode_label.cget("text") == ""
 
 
 @pytest.mark.parametrize("attribute,value", [

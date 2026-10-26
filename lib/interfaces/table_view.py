@@ -74,19 +74,52 @@ class TableView:
 
     def _new_hand(self, title):
         return {"id": "hero" if title == "Yo" else "dealer", "cards": [],
-                "rendered": [], "name": self._label(title, constants.FONT_SECTION),
+                "card_keys": [], "rendered": [], "name": self._label(title, constants.FONT_SECTION),
                 "empty": self._label("[sin cartas]"), "advice": self._label(""),
                 "split_notice": self._label(""), "hand_titles": [],
-                "hand_of": [], "split_valid": False, "data": {}}
+                "hand_of": [], "split_valid": False, "data": {},
+                "is_hero": title == "Yo", "is_provisional": False,
+                "is_ambiguous": False}
 
-    def _make_seats(self):
-        if self._mode == "individual" and not self.seats:
-            self.seats.append(self._new_hand("Yo"))
-        elif self._mode != "individual":
-            for seat in self.seats:
-                for widget in self._hand_widgets(seat):
-                    widget.destroy()
-            self.seats.clear()
+    def _make_seats(self, players=None):
+        """Keep one widget set per observed logical group; never pad seats."""
+        players = players or []
+        if self._mode == "individual":
+            players = [{"id": "hero", "label": "Yo", "is_hero": True}]
+        else:
+            players = list(players[:7])
+        existing = {seat["id"]: seat for seat in self.seats}
+        active = []
+        for player in players:
+            group_id = player.get("id")
+            if not isinstance(group_id, (str, int)):
+                continue
+            hand = existing.pop(group_id, None)
+            title = "Yo" if player.get("is_hero") else str(player.get("label") or group_id)
+            if hand is None:
+                hand = self._new_hand(title)
+                hand["id"] = group_id
+            elif hand["name"].cget("text") != title:
+                hand["name"].config(text=title)
+            hand["is_hero"] = bool(player.get("is_hero"))
+            hand["is_provisional"] = bool(player.get("is_provisional"))
+            hand["is_ambiguous"] = bool(player.get("is_ambiguous"))
+            if hand["is_hero"]:
+                hand["name"].config(fg=C.get("success", "#22C55E"))
+            elif hand["is_provisional"] or hand["is_ambiguous"]:
+                hand["name"].config(fg=C.get("warning", "#F59E0B"))
+            else:
+                hand["name"].config(fg=C["text_on_felt"])
+            if hand["is_provisional"]:
+                title = f"{title} · {group_id} · PROVISIONAL"
+            if hand["is_ambiguous"]:
+                title = f"{title} · AMBIGUO / ?"
+            hand["name"].config(text=title)
+            active.append(hand)
+        for hand in existing.values():
+            for widget in self._hand_widgets(hand):
+                widget.destroy()
+        self.seats[:] = active
 
     @staticmethod
     def _hand_widgets(hand):
@@ -166,15 +199,25 @@ class TableView:
 
     def _update_hand(self, hand, cards, presentation, *, dealer=False):
         size = scaling.size(constants.DEALER_CARD_RENDER_SIZE if dealer else constants.CARD_RENDER_SIZE)
-        while len(hand["cards"]) < len(cards):
-            hand["cards"].append(tk.Label(self.canvas, bg=C["bg_canvas"], bd=0, cursor=""))
-            hand["rendered"].append(None)
-        for widget in hand["cards"][len(cards):]:
-            widget.destroy()
-        del hand["cards"][len(cards):]
-        del hand["rendered"][len(cards):]
+        old = {key: (widget, rendered) for key, widget, rendered in
+               zip(hand["card_keys"], hand["cards"], hand["rendered"])}
+        keys = [(card.get("card_id") if isinstance(card.get("card_id"), str)
+                 and card.get("card_id").strip() else ("visual", i))
+                for i, card in enumerate(cards)]
+        widgets, rendered_names = [], []
+        original = list(zip(hand["card_keys"], hand["cards"], hand["rendered"]))
         for i, card in enumerate(cards):
-            widget = hand["cards"][i]
+            key = keys[i]
+            if key in old:
+                widget, rendered = old.pop(key)
+            else:
+                visual_name = self._visual_name(card)
+                previous = original[i] if i < len(original) else None
+                if previous is not None and previous[0] in old and previous[2] == visual_name:
+                    old_key, widget, rendered = previous
+                    old.pop(old_key)
+                else:
+                    widget, rendered = tk.Label(self.canvas, bg=C["bg_canvas"], bd=0, cursor=""), None
             widget.card_data = deepcopy(card)
             identity_fields = (
                 "card_id", "legacy_ref", "rank", "suit", "state", "reason",
@@ -196,11 +239,15 @@ class TableView:
                             lambda _event, target=widget: self._dispatch_card_identity(target))
                 widget._identity_click_bound = True
             name = self._visual_name(card)
-            if hand["rendered"][i] != name:
+            if rendered != name:
                 photo = self.card_image(name, size)
                 widget.config(image=photo)
                 widget.image = photo
-                hand["rendered"][i] = name
+            widgets.append(widget)
+            rendered_names.append(name)
+        for widget, _rendered in old.values():
+            widget.destroy()
+        hand["cards"], hand["card_keys"], hand["rendered"] = widgets, keys, rendered_names
 
     def _dispatch_card_identity(self, widget):
         """Send a detached physical identity; never a seat/card index."""
@@ -229,7 +276,8 @@ class TableView:
         if split:
             for i, title in enumerate(hand["hand_titles"]):
                 title.place(x=x + (i * 2 - 1) * (cw + scaling.px(40)), y=top, anchor="n")
-        step = min(scaling.px(34), max(0, (self.canvas.winfo_width() - cw - scaling.px(40)) / max(count - 1, 1)))
+        span = hand.get("max_span", self.canvas.winfo_width() - scaling.px(40))
+        step = min(scaling.px(34), max(0, (span - cw) / max(count - 1, 1)))
         depths = [0, 0]
         for i, widget in enumerate(hand["cards"]):
             if split:
@@ -258,9 +306,30 @@ class TableView:
         self._place_hand(self.dealer, w / 2, scaling.px(52), dealer=True)
         if self.seats:
             cw, ch = scaling.size(constants.CARD_RENDER_SIZE)
-            x, top = seat_positions(w, h, 1, cw, ch)[0]
-            top = max(top, scaling.px(52) + scaling.size(constants.DEALER_CARD_RENDER_SIZE)[1] + scaling.px(80))
-            self._place_hand(self.seats[0], x, top)
+            min_top = scaling.px(52) + scaling.size(constants.DEALER_CARD_RENDER_SIZE)[1] + scaling.px(80)
+            count = len(self.seats)
+            if count <= 3:
+                positions = seat_positions(w, h, count, cw, ch)
+                ordered_x = [point[0] for point in positions]
+                for index, (seat, (x, top)) in enumerate(zip(self.seats, positions)):
+                    neighbors = ([ordered_x[index] - ordered_x[index - 1]] if index else [])
+                    if index + 1 < count:
+                        neighbors.append(ordered_x[index + 1] - ordered_x[index])
+                    seat["max_span"] = (min(neighbors) * .9 if neighbors else w - scaling.px(40))
+                    self._place_hand(seat, x, max(top, min_top))
+            else:
+                columns = math.ceil(count / 2)
+                cell_w = w / columns
+                row_gap = max(scaling.px(170), (h - min_top - scaling.px(100)) / 2)
+                row_tops = (min_top, min(h - ch - scaling.px(90), min_top + row_gap))
+                row_counts = (columns, count - columns)
+                for index, seat in enumerate(self.seats):
+                    row = 0 if index < columns else 1
+                    column = index if row == 0 else index - columns
+                    x = cell_w * (column + .5) if row_counts[row] == columns else (
+                        w * (column + .5) / row_counts[row])
+                    seat["max_span"] = max(scaling.px(48), cell_w - scaling.px(20))
+                    self._place_hand(seat, x, row_tops[row])
         self.status_label.config(wraplength=max(1, w - scaling.px(24)))
         self.status_label.place(x=w / 2, y=h - scaling.px(16), anchor="s")
         self.mode_label.place(x=w / 2, y=scaling.px(230), anchor="n")
@@ -283,7 +352,8 @@ class TableView:
         if self._preview_item is not None:
             return
         self._mode = presentation.get("mode")
-        self._make_seats()
+        players = presentation.get("players", []) if self._mode == "multiplayer" else []
+        self._make_seats(players)
         blocked = presentation.get("status") in ("stopped", "error", "needs_calibration", "source_mismatch")
         dealer_cards = [] if blocked else presentation.get("dealer", {}).get("cards", [])
         self._update_hand(self.dealer, dealer_cards, presentation, dealer=True)
@@ -296,14 +366,18 @@ class TableView:
         if dealer_advice and presentation.get("count_has_pending_uncertainty"):
             dealer_advice += " · TC INCIERTO"
         self.dealer["advice"].config(text=dealer_advice)
-        self.status_label.config(text=presentation.get("message", ""),
+        message = presentation.get("message", "")
+        if presentation.get("group_warning"):
+            message = f"{message} · {presentation['group_warning']}"
+        self.status_label.config(text=message,
                                  fg=C["warning"] if presentation.get("status") in
                                  ("uncertain", "error", "needs_calibration", "source_mismatch") else C["text_on_felt"])
-        self.mode_label.config(text="Multijugador — representación dinámica pendiente"
-                               if self._mode == "multiplayer" else "")
-        if self.seats:
-            player = next((p for p in presentation.get("players", []) if p.get("id") == "hero"), {})
-            seat = self.seats[0]
+        self.mode_label.config(text="")
+        player_by_id = {p.get("id"): p for p in players}
+        for seat in self.seats:
+            player = (next((p for p in presentation.get("players", [])
+                            if p.get("id") == "hero"), {})
+                      if self._mode == "individual" else player_by_id.get(seat["id"], {}))
             seat["data"] = deepcopy(player)
             cards = [] if blocked else player.get("cards", [])
             self._update_hand(seat, cards, presentation)
@@ -318,7 +392,7 @@ class TableView:
             seat["split_notice"].config(text="Split incierto: etiquetas de mano incompletas"
                                         if split and cards and not seat["split_valid"] else "")
             advice = player.get("advice")
-            advice_text = (advice if not blocked
+            advice_text = (advice if not blocked and player.get("is_hero")
                            and (presentation.get("advice_available") is True
                                 or isinstance(player.get("hands"), list)
                                 or player.get("advice_reason"))
