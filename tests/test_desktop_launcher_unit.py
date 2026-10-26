@@ -15,7 +15,10 @@ from scripts import launch_blackjack as launcher
 @pytest.fixture
 def installation(tmp_path, monkeypatch):
     root = tmp_path / "project with spaces"
-    for relative in ("main.py", ".venv312/Scripts/python.exe", ".venv312/Scripts/pythonw.exe"):
+    for relative in (
+        "main.py", ".venv312/Scripts/python.exe", ".venv312/Scripts/pythonw.exe",
+        "models/player_cards.onnx", "models/player_cards.onnx.json",
+    ):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("synthetic fixture", encoding="utf-8")
@@ -43,10 +46,13 @@ def test_validated_entry_is_the_official_main(installation):
     assert launcher.validate_installation(installation) == installation / "main.py"
 
 
-@pytest.mark.parametrize("missing", ["main.py", ".venv312/Scripts/python.exe", ".venv312/Scripts/pythonw.exe"])
+@pytest.mark.parametrize("missing", [
+    "main.py", ".venv312/Scripts/python.exe", ".venv312/Scripts/pythonw.exe",
+    "models/player_cards.onnx", "models/player_cards.onnx.json",
+])
 def test_missing_required_files_are_reported_before_importing_app(installation, missing):
     (installation / missing).unlink()
-    with pytest.raises(FileNotFoundError, match="Missing required startup file"):
+    with pytest.raises(FileNotFoundError, match="Missing (required startup file|local player model asset)"):
         launcher.validate_installation(installation)
     launcher.runpy.run_path.assert_not_called()
 
@@ -74,8 +80,11 @@ def test_both_project_python_launch_modes_are_accepted(installation, monkeypatch
 def test_entry_runs_once_with_root_cwd_and_import_path_and_restores_process_state(installation, monkeypatch):
     original_cwd, original_path = Path.cwd(), list(sys.path)
     called = []
+    configure_tk = Mock(side_effect=lambda: called.append("tk runtime"))
+    monkeypatch.setattr(launcher, "_configure_tk_runtime", configure_tk)
 
     def official_entry(path, *, run_name):
+        assert called == ["tk runtime"]
         assert Path.cwd() == installation
         assert sys.path[0] == str(installation)
         assert path == str(installation / "main.py") and run_name == "__main__"
@@ -83,7 +92,8 @@ def test_entry_runs_once_with_root_cwd_and_import_path_and_restores_process_stat
 
     monkeypatch.setattr(launcher.runpy, "run_path", official_entry)
     assert launcher.main(installation) == 0
-    assert len(called) == 1
+    assert called == ["tk runtime", str(installation / "main.py")]
+    configure_tk.assert_called_once_with()
     assert Path.cwd() == original_cwd and sys.path == original_path
     assert not (installation / "logs/startup_errors.log").exists()
 

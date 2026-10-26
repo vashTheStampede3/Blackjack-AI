@@ -9,6 +9,8 @@ from contextlib import contextmanager
 import ctypes
 from datetime import datetime, timezone
 import hashlib
+import importlib
+import importlib.util
 import os
 from pathlib import Path
 import runpy
@@ -24,12 +26,20 @@ def project_root(launcher_file=None):
 
 
 def validate_installation(root):
-    """Fail before importing the app if its entry point or venv is missing."""
+    """Fail before importing the app if its entry point, venv, or local models are missing."""
     root = Path(root).resolve()
-    for relative in ("main.py", ".venv312/Scripts/python.exe", ".venv312/Scripts/pythonw.exe"):
+    required = (
+        "main.py",
+        ".venv312/Scripts/python.exe",
+        ".venv312/Scripts/pythonw.exe",
+        "models/player_cards.onnx",
+        "models/player_cards.onnx.json",
+    )
+    for relative in required:
         path = root / relative
         if not path.is_file():
-            raise FileNotFoundError(f"Missing required startup file: {path}")
+            label = "local player model asset" if relative.startswith("models/") else "required startup file"
+            raise FileNotFoundError(f"Missing {label}: {path}")
     allowed = [root / ".venv312/Scripts" / name for name in ("python.exe", "pythonw.exe")]
     if Path(sys.executable).resolve() not in [path.resolve() for path in allowed]:
         raise RuntimeError(f"Use the project virtual environment: {allowed[0]}")
@@ -76,10 +86,27 @@ def run_application(root, entry):
     try:
         os.chdir(root)
         sys.path.insert(0, str(root))
+        _configure_tk_runtime()
         runpy.run_path(str(entry), run_name="__main__")
     finally:
         sys.path[:] = previous_path
         os.chdir(previous_cwd)
+
+
+def _configure_tk_runtime():
+    """Use the app's stdlib-only Tcl/Tk path repair when this checkout has it."""
+    module_name = "lib.interfaces.tk_runtime"
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name in {"lib", "lib.interfaces", module_name}:
+            return False
+        raise
+    if spec is None:
+        return False
+    runtime = importlib.import_module(module_name)
+    runtime.configure_tk_runtime()
+    return True
 
 
 def log_startup_error(root, error):

@@ -18,3 +18,10 @@
 - Counter contribution replacement is atomic under one counter lock; no Tk widget computes Hi-Lo. New-round archive survives state restore and source reconfiguration; New Shoe clears the historical correction space.
 - Tests: 132 related engine/memory/counting tests passed, including randomized repeated corrections, suit composition, historical pending confirmation and false-positive retraction, restore without recount, and manual-add deduplication.
 - Next: connect the inspector/history/manual-location picker to the main GUI, then integrate overlay changes.
+
+## Startup and installation checkpoint
+
+- Checked the existing Python 3.12 environment and frozen uv lock (37 packages); `start.ps1 -CheckOnly` succeeds without reinstalling packages. The desktop shortcut points to this checkout?s pythonw and launcher.
+- Launcher preflight reports a missing environment or local model; Tcl/Tk discovery uses the actual Python installation when Windows exposes an invalid alias. The CMD and PowerShell launch paths use the same guarded entry point.
+- Validation: 29 launcher and Tk runtime unit tests passed. No dependencies or models were downloaded.
+- Next: finish overlay, inspector and replay checkpoints; repeat full regression and Tk smoke.
