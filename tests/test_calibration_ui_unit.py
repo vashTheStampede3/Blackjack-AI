@@ -1,16 +1,22 @@
 ﻿"""Calibration UI contracts with fakes only: no Tk roots, capture or models."""
-from types import SimpleNamespace
+from types import SimpleNamespace, MethodType
 from unittest.mock import Mock, patch
 import unittest
 
 from lib.interfaces.modern_gui import ModernBlackjackGUI as GUI
 from lib.interfaces.region_editor import RegionEditor
+from lib.logic.app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODE_LABELS
 
 
-def fake_gui():
+def fake_gui(mode=INDIVIDUAL):
+    mode_label = [APP_MODE_LABELS[mode]]
     gui = SimpleNamespace(
-        controller=SimpleNamespace(running=False, set_monitor=Mock(side_effect=ValueError('Missing seven-seat layout'))),
+        controller=SimpleNamespace(running=False, configuration_busy=False,
+                                   set_monitor=Mock()),
         monitor_combo=SimpleNamespace(current=lambda: 0),
+        mode_var=SimpleNamespace(get=lambda: mode_label[0],
+                                 set=lambda value: mode_label.__setitem__(0, value)),
+        _app_mode=mode, _mode_context=None,
         source_kind=SimpleNamespace(get=lambda: 'Monitor'),
         _monitors=[SimpleNamespace(width=1600, height=1028)],
         _source_configured=True, _preview_source=None, _region_editor=None,
@@ -20,20 +26,39 @@ def fake_gui():
     for name in ('start_btn', 'calibrate_btn', 'regions_btn', 'ocr_btn',
                  'controls_btn', 'anchors_btn', 'monitor_status'):
         setattr(gui, name, Mock())
+    gui._selected_app_mode = MethodType(GUI._selected_app_mode, gui)
+    gui._sync_mode_context = MethodType(GUI._sync_mode_context, gui)
     return gui
 
 
 class CalibrationUIUnitTests(unittest.TestCase):
     def test_missing_layout_keeps_calibration_available_and_start_disabled(self):
-        gui = fake_gui()
-        self.assertFalse(GUI._confirm_monitor(gui))
-        self.assertFalse(gui._source_configured)
-        self.assertIs(gui.monitor, gui._monitors[0])
-        gui.start_btn.config.assert_called_with(state='disabled')
-        gui.calibrate_btn.config.assert_called_with(state='normal')
-        text = gui.monitor_status.config.call_args.kwargs['text']
-        self.assertIn('1600', text)
-        self.assertIn('Calibrate Regions', text)
+        for mode in (INDIVIDUAL, MULTIPLAYER):
+            with self.subTest(mode=mode):
+                gui = fake_gui(mode)
+                with patch('lib.logic.region_profiles.active_name', return_value='Table'), \
+                     patch('lib.logic.region_profiles.layout_mode', return_value=mode), \
+                     patch('lib.logic.region_profiles.has_card_layout', return_value=False) as available, \
+                     patch('lib.logic.region_profiles.get_card_layout', return_value=None) as load, \
+                     patch('lib.logic.region_profiles.set_card_layout') as save:
+                    self.assertFalse(GUI._confirm_monitor(gui))
+                available.assert_called_once_with((1600, 1028), mode, profile='Table')
+                load.assert_called_once_with((1600, 1028), mode, profile='Table')
+                save.assert_not_called()
+                gui.controller.set_monitor.assert_not_called()
+                self.assertFalse(gui._source_configured)
+                self.assertIs(gui.monitor, gui._monitors[0])
+                self.assertEqual(gui._selected_app_mode(), mode)
+                gui.start_btn.config.assert_called_with(state='disabled')
+                gui.calibrate_btn.config.assert_called_with(state='normal')
+                text = gui.monitor_status.config.call_args.kwargs['text']
+                self.assertIn('1600x1028', text)
+                self.assertIn(APP_MODE_LABELS[mode], text)
+                self.assertIn('calibración', text)
+                self.assertIn('Calibrate Regions', text)
+                self.assertNotIn('seven_seats', text)
+                self.assertEqual(gui.set_status.call_args.args[0], text)
+                self.assertTrue(gui.set_status.call_args.kwargs['error'])
 
     def test_invalid_selection_revokes_previous_source(self):
         gui = fake_gui()
@@ -77,7 +102,7 @@ class CalibrationUIUnitTests(unittest.TestCase):
     def test_mapped_feedback_only_for_editor_and_once(self):
         parent = SimpleNamespace(ui_actions=Mock(), set_status=Mock())
         editor = SimpleNamespace(_shown_logged=False, _editor_parent=parent,
-                                 resolution=(1600, 1028), mode='seven_seats')
+                                 resolution=(1600, 1028), mode=INDIVIDUAL)
         RegionEditor._on_editor_mapped(editor, SimpleNamespace(widget=object()))
         parent.ui_actions.record.assert_not_called()
         RegionEditor._on_editor_mapped(editor, SimpleNamespace(widget=editor))
@@ -114,19 +139,40 @@ class CalibrationUIUnitTests(unittest.TestCase):
         self.assertIs(capture.guard, gui._capture_guard)
 
     def test_open_constructs_editor_from_selected_capture_and_closes_local(self):
-        gui = fake_gui()
-        gui.monitor = gui._monitors[0]
-        capture = Mock(resolution=(1600, 1028))
-        gui._calibration_capture.return_value = capture
-        editor = Mock(_shown_logged=False)
-        with patch('lib.interfaces.region_editor.RegionEditor', return_value=editor) as ctor, \
-             patch('lib.logic.region_profiles.layout_mode', return_value='seven_seats'), \
-             patch('lib.logic.region_profiles.active_name', return_value='Table'):
-            GUI._calibrate_regions(gui)
-        self.assertIs(ctor.call_args.args[1], capture)
-        self.assertEqual(ctor.call_args.kwargs['mode'], 'seven_seats')
-        self.assertIs(gui._region_editor, editor)
-        editor.show_editor.assert_called_once()
-        capture.close_local.assert_called_once()
-        self.assertNotIn('CALIBRATION_SHOWN',
-                         [call.args[0] for call in gui.ui_actions.record.call_args_list])
+        for mode, saved_mode in ((INDIVIDUAL, MULTIPLAYER), (MULTIPLAYER, INDIVIDUAL)):
+            with self.subTest(mode=mode, saved_mode=saved_mode):
+                gui = fake_gui(mode)
+                gui.monitor = gui._monitors[0]
+                capture = Mock(resolution=(1600, 1028))
+                gui._calibration_capture.return_value = capture
+                editor = Mock(_shown_logged=False)
+                calls = Mock()
+                calls.attach_mock(gui._calibration_capture, 'capture')
+                calls.attach_mock(editor.show_editor, 'show')
+                calls.attach_mock(capture.close_local, 'close')
+                with patch('lib.interfaces.region_editor.RegionEditor', return_value=editor) as ctor, \
+                     patch('lib.logic.region_profiles.layout_mode', return_value=saved_mode) as stored_mode, \
+                     patch('lib.logic.region_profiles.active_name', return_value='Table'), \
+                     patch('lib.interfaces.modern_gui.messagebox.showerror') as error:
+                    calls.attach_mock(ctor, 'construct')
+                    GUI._calibrate_regions(gui)
+                gui._calibration_capture.assert_called_once_with()
+                ctor.assert_called_once()
+                self.assertIs(ctor.call_args.args[0], gui)
+                self.assertIs(ctor.call_args.args[1], capture)
+                self.assertEqual(ctor.call_args.args[1].resolution, (1600, 1028))
+                self.assertEqual(ctor.call_args.kwargs['mode'], mode)
+                self.assertTrue(callable(ctor.call_args.kwargs['on_save']))
+                stored_mode.assert_not_called()
+                self.assertIs(gui._region_editor, editor)
+                editor.show_editor.assert_called_once_with()
+                capture.close_local.assert_called_once_with()
+                self.assertEqual([call[0] for call in calls.mock_calls],
+                                 ['capture', 'construct', 'show', 'close'])
+                error.assert_not_called()
+                self.assertNotIn('CALIBRATION_SHOWN',
+                                 [call.args[0] for call in gui.ui_actions.record.call_args_list])
+                opened = next(call for call in gui.ui_actions.record.call_args_list
+                              if call.args[0] == 'CALIBRATION_OPEN')
+                self.assertEqual(opened.kwargs['details']['resolution'], (1600, 1028))
+                self.assertEqual(opened.kwargs['details']['mode'], mode)

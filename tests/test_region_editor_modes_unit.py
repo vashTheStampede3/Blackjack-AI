@@ -6,6 +6,7 @@ from unittest.mock import ANY, Mock
 import numpy as np
 import pytest
 
+from lib.common import constants
 from lib.interfaces import region_editor as editor_module
 from lib.interfaces.region_editor import RegionEditor, build_layout_payload, EDITOR_ZONE_LABELS
 from lib.logic.app_modes import zones_for_mode
@@ -13,6 +14,12 @@ from lib.logic.card_layout import CardLayout
 
 
 RES = (320, 180)
+
+
+@pytest.fixture(autouse=True)
+def isolated_profiles(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "OUTPUT_DIR", tmp_path)
+    assert editor_module.region_profiles.store_path() == tmp_path / "region_profiles.json"
 
 
 def rect(l, t, r, b):
@@ -224,10 +231,16 @@ def test_save_verifies_before_callback_and_close(monkeypatch, failure, mode):
         obj.zones[0] = []
     original = deepcopy(obj.zones)
     calls = []
+    saved_calls = []
 
-    def save(layout, profile):
+    def save(layout, profile=None, source_context=None, *, overwrite=False):
         calls.append("save")
+        saved_calls.append({"layout": layout, "profile": profile,
+                            "source_context": source_context, "overwrite": overwrite})
         assert profile == "Named"
+        assert source_context is None
+        assert overwrite is False  # These cases create a new profile, not replace one.
+        assert layout.to_payload() == build(mode, reference=context)
         assert layout.to_payload()["reference_source"] == context
         if failure == "write":
             raise OSError("write failed")
@@ -249,10 +262,34 @@ def test_save_verifies_before_callback_and_close(monkeypatch, failure, mode):
     setter, getter = Mock(side_effect=save), Mock(side_effect=load)
     monkeypatch.setattr(editor_module.region_profiles, "set_card_layout", setter)
     monkeypatch.setattr(editor_module.region_profiles, "get_card_layout", getter)
+    profile_exists = Mock(return_value=False)
+    target_exists = Mock(return_value=False)
+    monkeypatch.setattr(editor_module.region_profiles, "profile_exists", profile_exists)
+    monkeypatch.setattr(editor_module.region_profiles, "layout_target_exists", target_exists)
+    dialog = Mock(return_value=None)
+    monkeypatch.setattr(editor_module.messagebox, "askyesnocancel", dialog)
     error = Mock()
     monkeypatch.setattr(editor_module.messagebox, "showerror", error)
     RegionEditor._save_card_layout(obj)
     assert obj.zones == original
+    dialog.assert_not_called()
+    if failure in ("blank", "geometry"):
+        assert calls == [] and saved_calls == []
+        profile_exists.assert_not_called()
+        target_exists.assert_not_called()
+        setter.assert_not_called()
+        getter.assert_not_called()
+    else:
+        assert len(saved_calls) == 1 and saved_calls[0]["overwrite"] is False
+        target_exists.assert_called_once_with(RES, mode, "Named")
+        profile_exists.assert_called_once_with("Named")
+        setter.assert_called_once()
+        if failure == "write":
+            assert calls == ["save"]
+            getter.assert_not_called()
+        else:
+            assert calls == ["save", "read"]
+            getter.assert_called_once_with(RES, mode, profile="Named")
     if failure:
         error.assert_called_once()
         obj.destroy.assert_not_called()
@@ -264,3 +301,64 @@ def test_save_verifies_before_callback_and_close(monkeypatch, failure, mode):
         obj.destroy.assert_called_once_with()
         obj._log_saved.assert_called_once()
         error.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["individual", "multiplayer"])
+@pytest.mark.parametrize("target", ["new", "existing_profile", "occupied"])
+def test_save_intent_matches_explicit_profile_decision(monkeypatch, mode, target):
+    obj = fake_editor(mode)
+    obj.resolution, obj.scale = RES, 1
+    obj.profile_var = SimpleNamespace(get=lambda: " Named ")
+    obj.profile_entry = Mock()
+    obj.capture = SimpleNamespace(calibration_context=None)
+    obj.on_save, obj.destroy = Mock(), Mock()
+    obj._log_save_error, obj._log_saved = Mock(), Mock()
+    points = deepcopy(obj.zones)
+    occupied = target == "occupied"
+    exists = target != "new"
+    target_query = Mock(return_value=occupied)
+    profile_query = Mock(return_value=exists)
+    monkeypatch.setattr(editor_module.region_profiles, "layout_target_exists", target_query)
+    monkeypatch.setattr(editor_module.region_profiles, "profile_exists", profile_query)
+    dialog = Mock(return_value=True)
+    monkeypatch.setattr(editor_module.messagebox, "askyesnocancel", dialog)
+    error = Mock()
+    monkeypatch.setattr(editor_module.messagebox, "showerror", error)
+    saved_calls = []
+
+    def save(layout, profile=None, source_context=None, *, overwrite=False):
+        saved_calls.append({"layout": layout, "profile": profile,
+                            "source_context": source_context, "overwrite": overwrite})
+        assert profile == "Named" and source_context is None
+        assert overwrite is occupied
+        assert layout.to_payload() == build(mode)
+        assert dialog.call_count == int(exists)  # Consent precedes persistence.
+
+    def load(resolution, requested, profile=None):
+        assert len(saved_calls) == 1
+        assert (resolution, requested, profile) == (RES, mode, "Named")
+        obj.on_save.assert_not_called()
+        obj.destroy.assert_not_called()
+        return saved_calls[0]["layout"]
+
+    setter, getter = Mock(side_effect=save), Mock(side_effect=load)
+    monkeypatch.setattr(editor_module.region_profiles, "set_card_layout", setter)
+    monkeypatch.setattr(editor_module.region_profiles, "get_card_layout", getter)
+    RegionEditor._save_card_layout(obj)
+    assert len(saved_calls) == 1
+    assert saved_calls[0]["overwrite"] is occupied
+    assert obj.zones == points
+    target_query.assert_called_once_with(RES, mode, "Named")
+    assert profile_query.call_count == (0 if occupied else 1)
+    assert dialog.call_count == int(exists)
+    if exists:
+        assert dialog.call_args.args[0] == (
+            "La calibración ya existe" if occupied else "El perfil ya existe")
+    setter.assert_called_once()
+    getter.assert_called_once()
+    obj.on_save.assert_called_once_with()
+    obj.destroy.assert_called_once_with()
+    obj._log_saved.assert_called_once()
+    obj._log_save_error.assert_not_called()
+    obj.profile_entry.focus_set.assert_not_called()
+    error.assert_not_called()

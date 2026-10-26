@@ -37,6 +37,10 @@ from .card_layout import SEVEN_SEATS, CardLayout
 
 DEFAULT_NAME = "Default"
 
+
+class ProfileConflictError(ValueError):
+    """A stored calibration would be overwritten."""
+
 # Reads come from the engine worker (set_monitor) while editors write from
 # the Tk thread; the RLock serializes the read-modify-write cycles.
 _LOCK = threading.RLock()
@@ -62,12 +66,12 @@ def _empty():
     return {"active": DEFAULT_NAME, "profiles": {DEFAULT_NAME: _new_profile()}}
 
 
-def _load():
+def _load(*, read_only=False):
     """The whole store; folds legacy per-resolution files in on first touch."""
     with _LOCK:
         path = store_path()
         if not path.exists():
-            return _migrate_legacy()
+            return _empty() if read_only else _migrate_legacy()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             profiles = data.get("profiles")
@@ -93,6 +97,8 @@ def _load():
             data["_locked"] = True
             return data
         except (ValueError, TypeError, AttributeError) as e:
+            if read_only:
+                raise ValueError(f"Region-profile store corrupt: {e}") from e
             # Parse/shape corruption: quarantine the bytes first — the next
             # save would otherwise atomically replace every table's
             # calibration with an empty store.
@@ -376,7 +382,36 @@ def _valid_card_resolution(key, modes):
     return False
 
 
-def set_card_layout(layout, profile=None, source_context=None):
+def profile_exists(name: str) -> bool:
+    """Check stored names, stripping outer spaces only. Empty/non-string is False."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    with _LOCK:
+        if not store_path().exists():
+            return False  # Do not create/migrate storage for an existence query.
+        data = _load(read_only=True)
+        if data.get("_locked"):
+            raise OSError("Region-profile store unreadable; profile access blocked.")
+        return name.strip() in data["profiles"]
+
+
+def _layout_target_occupied(saved, mode):
+    return mode in saved or ("single_seat" if mode == INDIVIDUAL else "table") in saved
+
+
+def layout_target_exists(resolution, mode, profile) -> bool:
+    """Stored presence, including invalid payloads and compatible aliases, not validity."""
+    mode = normalize_mode(mode)
+    if not isinstance(profile, str) or not profile.strip():
+        return False
+    with _LOCK:
+        if not store_path().exists():
+            return False
+        name = profile.strip() if isinstance(profile, str) else profile
+        return _layout_target_occupied(_stored_layout_modes(_load(read_only=True), resolution, name), mode)
+
+
+def set_card_layout(layout, profile=None, source_context=None, *, overwrite=False):
     payload = layout.to_payload()
     if source_context is not None:
         payload["reference_source"] = clean_calibration_reference(source_context)
@@ -386,6 +421,10 @@ def set_card_layout(layout, profile=None, source_context=None):
         data = _load()
         name = (profile or data["active"]).strip() or data["active"]
         saved = dict(_stored_layout_modes(data, checked.resolution, name))
+        if _layout_target_occupied(saved, checked.mode) and overwrite is not True:
+            raise ProfileConflictError(
+                f'El perfil "{name}" ya tiene una calibración {checked.mode} '
+                f'para {_res_key(checked.resolution)}. Se requiere autorización para reemplazarla.')
         saved[checked.mode] = checked.to_payload()
         saved.pop("single_seat" if checked.mode == INDIVIDUAL else "table", None)
         saved["selected_mode"] = checked.mode

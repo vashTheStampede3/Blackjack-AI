@@ -131,9 +131,9 @@ class RegionEditor(tk.Toplevel):
         # Save target: a table profile by name. Prefilled with the active
         # profile; typing a new name creates it (and makes it active).
         self.profile_var = tk.StringVar(value=profile or region_profiles.active_name())
-        entry = tk.Entry(bar, textvariable=self.profile_var, width=18,
+        self.profile_entry = tk.Entry(bar, textvariable=self.profile_var, width=18,
                          font=constants.FONT_BODY)
-        entry.pack(side=tk.RIGHT, padx=(12, 2))
+        self.profile_entry.pack(side=tk.RIGHT, padx=(12, 2))
         tk.Label(bar, text="Save as profile:", bg=C["bg_primary"],
                  fg=C["text_secondary"], font=constants.FONT_BODY
                  ).pack(side=tk.RIGHT)
@@ -275,6 +275,28 @@ class RegionEditor(tk.Toplevel):
     def _save(self):
         self._save_card_layout()
 
+    def _confirm_profile_save(self, profile, occupied):
+        label = APP_MODE_LABELS[self.mode]
+        resolution = f"{self.resolution[0]}x{self.resolution[1]}"
+        if occupied:
+            title = "La calibración ya existe"
+            message = (f'El perfil "{profile}" ya tiene una calibración {label} para {resolution}.\n\n'
+                       '¿Querés reemplazar esa calibración?\n\n'
+                       'Sí: sobrescribir la calibración.\nNo: usar otro nombre.\n'
+                       'Cancelar: volver al editor sin guardar.\n\n'
+                       'Las demás resoluciones y configuraciones del perfil se conservarán.')
+        else:
+            title = "El perfil ya existe"
+            message = (f'El perfil "{profile}" ya existe, pero no tiene una calibración '
+                       f'{label} para {resolution}.\n\n¿Querés agregar esta calibración al perfil?\n\n'
+                       'Sí: agregar.\nNo: usar otro nombre.\nCancelar: volver al editor sin guardar.\n\n'
+                       'Las demás resoluciones y configuraciones del perfil se conservarán.')
+        answer = messagebox.askyesnocancel(title, message, parent=self)
+        if answer is False:
+            self.profile_entry.focus_set()
+            self.profile_entry.selection_range(0, tk.END)
+        return answer is True
+
     def _save_card_layout(self):
         try:
             profile = self.profile_var.get().strip()
@@ -284,10 +306,25 @@ class RegionEditor(tk.Toplevel):
             payload = build_layout_payload(self.mode, self.resolution, self.zone_keys,
                                            self.zones, self.scale, context)
             layout = CardLayout.from_payload(payload, self.resolution)
-            region_profiles.set_card_layout(layout, profile=profile)
+            occupied = region_profiles.layout_target_exists(self.resolution, self.mode, profile)
+            if (occupied or region_profiles.profile_exists(profile)):
+                if not RegionEditor._confirm_profile_save(self, profile, occupied):
+                    return
+            try:
+                region_profiles.set_card_layout(layout, profile=profile, overwrite=occupied)
+            except region_profiles.ProfileConflictError:
+                # A target appeared after the query. Ask again, with replacement
+                # wording, and allow only one explicitly authorized retry.
+                if not RegionEditor._confirm_profile_save(self, profile, True):
+                    return
+                region_profiles.set_card_layout(layout, profile=profile, overwrite=True)
             saved = region_profiles.get_card_layout(self.resolution, self.mode, profile=profile)
             if saved is None or saved.to_payload() != layout.to_payload():
                 raise ValueError("No se pudo comprobar el guardado; las zonas siguen abiertas.")
+        except region_profiles.ProfileConflictError as exc:
+            self._log_save_error(exc)
+            messagebox.showerror("Conflicto de calibración", str(exc), parent=self)
+            return
         except (OSError, ValueError) as exc:
             self._log_save_error(exc)
             messagebox.showerror("No se guardaron las zonas", str(exc), parent=self)

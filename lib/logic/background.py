@@ -36,8 +36,16 @@ class DetectionController:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
-    def set_monitor(self, monitor):
-        self.engine.set_monitor(monitor)
+    @property
+    def configuration_busy(self) -> bool:
+        with self._lifecycle_lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def set_monitor(self, monitor, *, mode=None, profile=None):
+        with self._lifecycle_lock:
+            if self.configuration_busy:
+                raise RuntimeError("La detección sigue activa o terminando; no se puede reconfigurar.")
+            self.engine.set_monitor(monitor, mode=mode, profile=profile)
 
     def start(self):
         with self._lifecycle_lock:

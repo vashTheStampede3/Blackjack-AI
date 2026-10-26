@@ -122,7 +122,11 @@ def test_legacy_read_and_localized_cleanup(store, alias, mode):
     assert profiles.get_card_layout(RES, mode).mode == mode
     assert profiles.get_card_layout(RES, alias).mode == mode
     assert store.read_bytes() == before
-    profiles.set_card_layout(layout(mode))
+    with pytest.raises(profiles.ProfileConflictError):
+        profiles.set_card_layout(layout(mode))
+    assert store.read_bytes() == before
+    # This test deliberately replaces the compatible historical calibration.
+    profiles.set_card_layout(layout(mode), overwrite=True)
     modes = read()["profiles"]["Default"]["layouts"][KEY]
     assert alias not in modes
     assert other in modes
@@ -237,7 +241,12 @@ def test_alias_cleanup_never_spreads_to_other_profiles_or_resolutions(mode, alia
     prof["layouts"]["640x360"] = {alias: payload(alias, (640, 360))}
     data["profiles"]["Other"] = deepcopy(prof)
     profiles.store_path().write_text(json.dumps(data), encoding="utf-8")
-    profiles.set_card_layout(layout(mode))
+    before = profiles.store_path().read_bytes()
+    with pytest.raises(profiles.ProfileConflictError):
+        profiles.set_card_layout(layout(mode))
+    assert profiles.store_path().read_bytes() == before
+    # Authorize only the replacement whose cleanup locality is under test.
+    profiles.set_card_layout(layout(mode), overwrite=True)
     saved = read()
     assert saved["profiles"]["Other"] == data["profiles"]["Other"]
     assert saved["profiles"]["Default"]["layouts"]["640x360"] == prof["layouts"]["640x360"]

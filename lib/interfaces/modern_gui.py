@@ -15,6 +15,7 @@ from tkinter import ttk, messagebox, filedialog
 import screeninfo
 
 from ..common import constants
+from ..logic.app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODE_LABELS
 from ..logic.background import DetectionController
 from ..logic.counting import COUNTER_KEYS
 from ..logic.phase import PHASE_LABELS
@@ -26,6 +27,7 @@ from .tooltip import ToolTip
 from .validation import attach_numeric_entry
 
 C = constants.COLORS
+MODE_BY_LABEL = {label: mode for mode, label in APP_MODE_LABELS.items()}
 
 
 def format_model_runtime_hint(metadata):
@@ -352,6 +354,14 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _build_controls_section(self, parent):
         section = self._section(parent, "Controls")
+
+        self.mode_var = tk.StringVar(value=APP_MODE_LABELS[INDIVIDUAL])
+        self._app_mode = INDIVIDUAL
+        self._mode_context = None
+        self.mode_combo = ttk.Combobox(section, textvariable=self.mode_var,
+            values=list(MODE_BY_LABEL), state="readonly", font=constants.FONT_BODY)
+        self.mode_combo.pack(fill=tk.X, pady=(0, 8))
+        self.mode_combo.bind("<<ComboboxSelected>>", lambda event: self._select_mode())
 
         # Table profile: named region calibrations (seat/dealer + OCR rects)
         # per casino table. Selecting one swaps every region live.
@@ -775,10 +785,77 @@ class ModernBlackjackGUI(tk.Tk):
 
     # --------------------------------------------------------------- actions
 
+    def _configuration_busy(self):
+        return bool(getattr(self.controller, "configuration_busy", self.controller.running))
+
+    def _selected_app_mode(self) -> str:
+        label = self.mode_var.get()
+        try:
+            return MODE_BY_LABEL[label]
+        except KeyError:
+            raise ValueError(f"Selecci\u00f3n de modo inv\u00e1lida: {label}") from None
+
+    def _sync_mode_context(self, profile, source):
+        from ..logic import region_profiles
+        from ..logic.window_capture import source_descriptor
+        resolution = (source.width, source.height)
+        descriptor = source_descriptor(source, self.source_kind.get())
+        context = (profile, resolution, tuple(sorted(descriptor.items())),
+                   getattr(source, "hwnd", None), getattr(source, "x", None), getattr(source, "y", None))
+        if context != getattr(self, "_mode_context", None):
+            mode = region_profiles.layout_mode(resolution, profile=profile)
+            self.mode_var.set(APP_MODE_LABELS[mode])
+            self._app_mode = mode
+            self._mode_context = context
+
+    def _select_mode(self):
+        previous = getattr(self, "_app_mode", INDIVIDUAL)
+        if ModernBlackjackGUI._configuration_busy(self):
+            self.mode_var.set(APP_MODE_LABELS[previous])
+            self.set_status("El trabajador sigue activo o terminando; no se puede cambiar el modo.", error=True)
+            return
+        try:
+            mode = self._selected_app_mode()
+        except ValueError as exc:
+            self.mode_var.set(APP_MODE_LABELS[previous])
+            self.set_status(str(exc), error=True)
+            return
+        self._app_mode = mode
+        self._source_configured = False
+        self.start_btn.config(state="disabled")
+        if self.monitor is not None:
+            from ..logic import region_profiles
+            try:
+                self._sync_mode_context(region_profiles.active_name(), self.monitor)
+            except (OSError, ValueError) as exc:
+                self.set_status(str(exc), error=True)
+                return
+            # A manual selection wins over the saved selection in this context.
+            self.mode_var.set(APP_MODE_LABELS[mode])
+            self._app_mode = mode
+            if self._confirm_monitor():
+                self.set_status(f"Modo {APP_MODE_LABELS[mode]} seleccionado. Calibraci\u00f3n aplicada.")
+        else:
+            self.set_status(f"Modo {APP_MODE_LABELS[mode]} seleccionado. Seleccion\u00e1 una fuente para calibrar.")
+
+    def _set_configuration_controls(self, busy):
+        for name in ("mode_combo", "profile_combo", "source_combo", "monitor_combo"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.config(state="disabled" if busy else "readonly")
+        for name in ("refresh_sources_btn", "calibrate_btn", "ocr_btn", "controls_btn", "anchors_btn"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                allowed = name == "refresh_sources_btn" or (
+                    self.monitor is not None and (name == "calibrate_btn" or self._source_configured))
+                widget.config(state="normal" if not busy and allowed else "disabled")
+
     def _refresh_sources(self):
-        if self.controller.running:
+        if ModernBlackjackGUI._configuration_busy(self):
+            self.source_kind.set(getattr(self, "_source_kind_selection", self.source_kind.get()))
             self.ui_actions.blocked("Detené la detección antes de cambiar la fuente.")
             return
+        self._source_kind_selection = self.source_kind.get()
         self._source_configured = False
         if self.source_kind.get() == "Window":
             from ..logic.window_capture import list_windows
@@ -823,6 +900,9 @@ class ModernBlackjackGUI(tk.Tk):
             self._confirm_monitor()
 
     def _confirm_monitor(self):
+        if ModernBlackjackGUI._configuration_busy(self):
+            self.set_status("El trabajador sigue activo o terminando; configuraci\u00f3n bloqueada.", error=True)
+            return False
         idx = self.monitor_combo.current()
         if idx < 0 or idx >= len(self._monitors):
             self._source_configured = False
@@ -847,13 +927,26 @@ class ModernBlackjackGUI(tk.Tk):
                 self.monitor_status.config(text=str(exc), fg=C["danger"])
                 self.set_status(str(exc), error=True)
                 return False
+        self.monitor = selected
+        self.start_btn.config(state="disabled")
+        self.calibrate_btn.config(state="normal")
         source_warning = ""
         source_review = False
         try:
             from ..logic import region_profiles
             from ..logic.window_capture import source_descriptor, source_review_required
-            reference = region_profiles.get_source_context(
-                (selected.width, selected.height))
+            profile = region_profiles.active_name()
+            self._sync_mode_context(profile, selected)
+            selected_mode = self._selected_app_mode()
+            resolution = (selected.width, selected.height)
+            available = region_profiles.has_card_layout(resolution, selected_mode, profile=profile)
+            if not available:
+                # Explicit load distinguishes corrupt geometry from missing geometry.
+                region_profiles.get_card_layout(resolution, selected_mode, profile=profile)
+                raise ValueError(f'El perfil "{profile}" necesita calibraci\u00f3n '
+                                 f'{APP_MODE_LABELS[selected_mode]} para {resolution[0]}x{resolution[1]}. '
+                                 'Us\u00e1 Calibrate Regions.')
+            reference = region_profiles.get_source_context(resolution, profile=profile)
             descriptor = source_descriptor(selected, self.source_kind.get())
             ambiguous = (reference and self.source_kind.get() == "Window"
                          and sum(source_descriptor(candidate, "Window") == descriptor
@@ -868,8 +961,13 @@ class ModernBlackjackGUI(tk.Tk):
                 source_warning = " · Fuente distinta a la usada al calibrar; revisá las zonas antes de iniciar."
             elif ambiguous:
                 source_warning = " · Hay varias ventanas compatibles; comprobá que seleccionaste la correcta."
-        except (AttributeError, OSError, ValueError, TypeError):
-            source_warning = " · No se pudo verificar la fuente de calibración."
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.regions_btn.config(state="disabled")
+            for button in (self.ocr_btn, self.controls_btn, self.anchors_btn):
+                button.config(state="disabled")
+            self.monitor_status.config(text=str(exc), fg=C["danger"])
+            self.set_status(str(exc), error=True)
+            return False
         self.monitor = selected
         self._source_review_required = bool(source_review)
         if source_review:
@@ -886,8 +984,8 @@ class ModernBlackjackGUI(tk.Tk):
                                    level="WARNING", details=self.ui_actions.context())
             return False
         try:
-            self.controller.set_monitor(self.monitor)
-        except ValueError as exc:
+            self.controller.set_monitor(self.monitor, mode=selected_mode, profile=profile)
+        except (ValueError, OSError, RuntimeError) as exc:
             self.start_btn.config(state="disabled")
             self.regions_btn.config(state="disabled")
             self.calibrate_btn.config(state="normal")
@@ -920,6 +1018,7 @@ class ModernBlackjackGUI(tk.Tk):
                         + ("OCR coordinates follow this window. Keep it restored."
                            if self.source_kind.get() == "Window" else ""))
         self._source_configured = True
+        self._applied_mode_context = (profile, selected_mode, resolution)
         self.ui_actions.record("SOURCE_CONFIGURED", "Fuente y perfil aplicados al motor.",
                                details=self.ui_actions.context())
         return True
@@ -948,18 +1047,36 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _select_profile(self):
         from ..logic import region_profiles
-        name = self._profile_by_label.get(self.profile_var.get())
-        if not name or not region_profiles.set_active(name):
+        if ModernBlackjackGUI._configuration_busy(self):
+            self._refresh_profiles()
+            self.set_status("El trabajador sigue activo o terminando; no se puede cambiar el perfil.", error=True)
             return
-        if self.monitor is not None:
-            # Reloads seat/dealer/OCR regions and refreshes the OCR hint.
-            self._confirm_monitor()
-        self.set_status(f"Table profile \"{name}\" active — regions reloaded.")
+        name = self._profile_by_label.get(self.profile_var.get())
+        if not name:
+            return
+        try:
+            if self.monitor is not None:
+                mode = region_profiles.layout_mode((self.monitor.width, self.monitor.height), profile=name)
+            else:
+                mode = INDIVIDUAL
+            if not region_profiles.set_active(name):
+                return
+            self.mode_var.set(APP_MODE_LABELS[mode])
+            self._app_mode = mode
+            self._mode_context = None
+            self._source_configured = False
+            self.start_btn.config(state="disabled")
+            if self.monitor is not None:
+                if self._confirm_monitor():
+                    self.set_status(f'Perfil "{name}" aplicado al motor.')
+            else:
+                self.set_status(f'Perfil "{name}" seleccionado; seleccion\u00e1 una fuente y verific\u00e1 la calibraci\u00f3n.')
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._source_configured = False
+            self.start_btn.config(state="disabled")
+            self.set_status(str(exc), error=True)
 
     def _toggle_detection(self):
-        if getattr(self, "_source_review_required", False):
-            self.set_status("Calibrate Regions for the selected source before starting detection.", error=True)
-            return
         if self.controller.running:
             self.controller.stop()
             # No fresh snapshots while stopped — acting on a stale phase
@@ -969,17 +1086,15 @@ class ModernBlackjackGUI(tk.Tk):
             self.start_btn.config(text="▶  Start Detection", bg=C["success"],
                                   activebackground=C["success_hover"])
             self.start_btn._base_bg = C["success"]
-            self.monitor_combo.config(state="readonly")
-            self.source_combo.config(state="readonly")
-            self.refresh_sources_btn.config(state="normal")
-            self.profile_combo.config(state="readonly")
-            self.calibrate_btn.config(state="normal")
-            self.ocr_btn.config(state="normal")
-            self.controls_btn.config(state="normal")
-            self.anchors_btn.config(state="normal")
+            self._configuration_was_busy = True
+            self._set_configuration_controls(True)
+            self.start_btn.config(state="disabled")
             self.set_status("Detection stopped.")
             self._detection_action = (self.ui_actions.pending(
                 "Parada solicitada; esperando que termine el hilo de detección."), "stopped")
+            return
+        if ModernBlackjackGUI._configuration_busy(self):
+            self.set_status("Esper\u00e1 a que termine el trabajador.", error=True)
             return
         if self.monitor is None:
             messagebox.showerror("No monitor", "Confirm a monitor first.")
@@ -987,9 +1102,13 @@ class ModernBlackjackGUI(tk.Tk):
         if not self._source_configured:
             self.ui_actions.blocked("La fuente tiene una calibración pendiente. Usá Calibrate Regions antes de iniciar.")
             return
+        if not self._confirm_monitor():
+            return
         if self.round_enabled.get():
             self._toggle_round_overlay()
         self.controller.start()
+        self._configuration_was_busy = True
+        self._set_configuration_controls(True)
         self.start_btn.config(text="■  Stop Detection", bg=C["danger"],
                               activebackground=C["danger_hover"])
         self.start_btn._base_bg = C["danger"]
@@ -1184,6 +1303,11 @@ class ModernBlackjackGUI(tk.Tk):
     def _poll_snapshot(self):
         try:
             snapshot = self.controller.engine.get_snapshot()
+            expected = getattr(self, "_applied_mode_context", None)
+            if (not self._source_configured or expected is None or snapshot is None
+                    or (snapshot.get("source_profile"), snapshot.get("source_mode"),
+                        tuple(snapshot.get("source_resolution") or ())) != expected):
+                snapshot = None
             if snapshot is not None and snapshot["seq"] != self._last_seq:
                 self._last_seq = snapshot["seq"]
                 self._render(snapshot)
@@ -1214,22 +1338,23 @@ class ModernBlackjackGUI(tk.Tk):
         self.after(constants.SNAPSHOT_POLL_MS, self._poll_snapshot)
 
     def _sync_start_button(self):
-        """Keep the Start/Stop button truthful if the worker dies (model error)."""
-        showing_stop = self.start_btn.cget("text").startswith("■")
-        if showing_stop and not self.controller.running:
+        busy = ModernBlackjackGUI._configuration_busy(self)
+        was_busy = getattr(self, "_configuration_was_busy", False)
+        self._configuration_was_busy = busy
+        if busy:
+            self._set_configuration_controls(True)
+            self.start_btn.config(state="normal" if self.controller.running else "disabled")
+            return
+        if was_busy:
             self.executor.disarm("detection worker stopped")
             self._hide_marker()
-            self.start_btn.config(text="▶  Start Detection", bg=C["success"],
+            self.start_btn.config(text="\u25b6  Start Detection", bg=C["success"],
                                   activebackground=C["success_hover"])
             self.start_btn._base_bg = C["success"]
-            self.monitor_combo.config(state="readonly")
-            self.source_combo.config(state="readonly")
-            self.refresh_sources_btn.config(state="normal")
-            self.profile_combo.config(state="readonly")
-            self.calibrate_btn.config(state="normal")
-            self.ocr_btn.config(state="normal")
-            self.controls_btn.config(state="normal")
-            self.anchors_btn.config(state="normal")
+            if self.monitor is not None:
+                self._confirm_monitor()
+        self._set_configuration_controls(False)
+        self.start_btn.config(state="normal" if self._source_configured else "disabled")
 
     def _render(self, snap):
         self._sync_money_entries(snap)
@@ -1640,41 +1765,38 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status("Calibration saved; source reference could not be saved.", error=True)
 
     def _calibrate_regions(self):
-        if self.controller.running:
+        if ModernBlackjackGUI._configuration_busy(self):
             self.ui_actions.blocked("Detené la detección antes de calibrar las regiones.")
             return
         if self.monitor is None and self._preview_source is None:
             self.ui_actions.blocked("Seleccioná una ventana o abrí una imagen antes de calibrar.")
             return
         from .region_editor import RegionEditor
+        from ..logic.window_capture import source_descriptor
+        calibration_source = (source_descriptor(self.monitor, self.source_kind.get())
+                              if self.monitor is not None else None)
 
         def reload_regions(saved=True):
-            # _confirm_monitor reloads all regions AND refreshes the
-            # sidebar's "OCR not calibrated" hint (a save into a NEW
-            # profile has no OCR rects yet).
-            if saved and self.monitor is not None:
-                self._store_source_reference((self.monitor.width, self.monitor.height))
-            applied = self._confirm_monitor() if self.monitor is not None else None
-            self._refresh_profiles()  # a new/updated profile (and its date)
             from ..logic import region_profiles
+            self._source_configured = False
+            self.start_btn.config(state="disabled")
+            self._refresh_profiles()
             name = region_profiles.active_name()
-            if applied is False:
-                self.set_status(f'Perfil "{name}" actualizado, pero el motor sigue bloqueado. '
-                                'Revisá el error SOURCE_NEEDS_CALIBRATION en Logs.', error=True)
-                self.ui_actions.record("CALIBRATION_APPLY_FAILED",
-                    "El perfil cambió en disco, pero no se pudo aplicar al motor.",
-                    level="ERROR", details=self.ui_actions.context())
+            saved_mode = region_profiles.layout_mode(capture.resolution, profile=name)
+            self.mode_var.set(APP_MODE_LABELS[saved_mode])
+            self._app_mode = saved_mode
+            if (self._preview_source is not None or self.monitor is None
+                    or (self.monitor.width, self.monitor.height) != tuple(capture.resolution)
+                    or source_descriptor(self.monitor, self.source_kind.get()) != calibration_source):
+                self.set_status(f'Zonas guardadas en "{name}"; no aplicadas a la fuente viva.')
                 return
-            if applied:
-                self.ui_actions.record("CALIBRATION_APPLIED",
-                    "Perfil de regiones aplicado al motor para la fuente seleccionada.",
-                    details=self.ui_actions.context())
-            if saved:
-                self.set_status(f'Zonas guardadas en "{name}".' +
-                                (" Perfil aplicado al motor." if applied else " Configuración de imagen guardada."))
-            else:
-                self.set_status(f"Calibration removed from profile \"{name}\""
-                                " — using the shipped default layout.")
+            self._store_source_reference(capture.resolution)
+            applied = self._confirm_monitor()
+            if not applied:
+                self.ui_actions.record("CALIBRATION_APPLY_FAILED", "Guardado confirmado; aplicaci\u00f3n al motor fallida.", level="ERROR")
+                return
+            self.ui_actions.record("CALIBRATION_APPLIED", "Perfil aplicado al motor.")
+            self.set_status(f'Zonas guardadas en "{name}". Perfil aplicado al motor.')
 
         capture = None
         try:
@@ -1687,14 +1809,12 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status("Abriendo Calibrate Regions: capturando la fuente seleccionada...")
             capture = self._calibration_capture()
             from ..logic import region_profiles
-            mode = region_profiles.layout_mode(capture.resolution)
+            mode = self._selected_app_mode()
             self.ui_actions.record("CALIBRATION_OPEN", "Capturando el fondo para abrir el editor de regiones.",
                 details={"resolution": capture.resolution, "mode": mode,
                          "profile": region_profiles.active_name(), "uses_selected_source": True})
             def saved_regions(saved=True):
                 reload_regions(saved)
-                if self._preview_source is not None:
-                    self._preview_regions()
             editor = RegionEditor(self, capture, on_save=saved_regions, mode=mode)
             self._region_editor = editor
             editor.show_editor()

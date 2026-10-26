@@ -22,7 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 
 from ..common import constants
-from .app_modes import INDIVIDUAL, MULTIPLAYER
+from .app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODE_LABELS, normalize_mode
+from .card_layout import CardLayout
 from ..common.card_mappings import PLAYER_CLASS_MAP, DEALER_CLASS_MAP, CUTTING_CARD_CLASS
 from . import betting
 from . import cards
@@ -41,7 +42,7 @@ from . import anchors as anchors_mod
 from .counting import CardCounter, counter_key
 from .models import ModelProvider, ModelError
 from .monitor_utils import (Polygon, ScreenCapture, dealer_area_rect,
-                            load_custom_regions, scaled_player_regions,
+                            load_custom_regions,
                             scaling_factors)
 from .session_store import SessionStore
 from .round_observation import RoundObservation
@@ -229,32 +230,44 @@ class DetectionEngine:
 
     # ------------------------------------------------------------------ setup
 
-    def set_monitor(self, monitor, *, profile=None):
+    def set_monitor(self, monitor, *, profile=None, mode=None):
         resolution = (monitor.width, monitor.height)
         selected_profile = profile or region_profiles.active_name()
-        from .card_layout import SEVEN_SEATS
-        selected_mode = region_profiles.layout_mode(resolution, profile=selected_profile)
-        selected_layout = (region_profiles.get_card_layout(
+        selected_mode = (normalize_mode(mode) if mode is not None else
+                         region_profiles.layout_mode(resolution, profile=selected_profile))
+        selected_layout = region_profiles.get_card_layout(
             resolution, selected_mode, profile=selected_profile)
-            if selected_mode != SEVEN_SEATS else None)
-        if selected_mode != SEVEN_SEATS and selected_layout is None:
-            raise ValueError(f'Profile "{selected_profile}" has no saved card zones at '
-                             f'{monitor.width}x{monitor.height}. Calibrate this mode first.')
-        custom = (load_custom_regions(resolution, profile=selected_profile)
-                  if selected_mode == SEVEN_SEATS else None)
-        if selected_mode == SEVEN_SEATS and custom is None:
-            if profile is not None or selected_profile != region_profiles.DEFAULT_NAME:
-                raise ValueError(f'Profile "{selected_profile}" has no seven-seat layout at '
-                                 f'{monitor.width}x{monitor.height}. Select or calibrate one first.')
-            self.log(f'Using scaled default regions at {monitor.width}x{monitor.height}; '
-                     'no exact calibration is saved.', level="WARNING")
-        elif (profile is None and
-              ((region_profiles.get_regions(resolution, profile=selected_profile) or {})
-               .get("reference_source") or {}).get("kind") == "video_frame"):
-            raise ValueError(f'Profile "{selected_profile}" was calibrated on a video, '
-                             'not this live capture source.')
+        if selected_layout is None:
+            raise ValueError(f'El perfil "{selected_profile}" no tiene calibraci\u00f3n '
+                             f'{APP_MODE_LABELS[selected_mode]} para {resolution[0]}x{resolution[1]}. '
+                             'Calibr\u00e1 las regiones antes de iniciar.')
+        selected_layout = CardLayout.from_payload(selected_layout.to_payload(), resolution)
+        if selected_layout.mode != selected_mode:
+            raise ValueError("El modo del layout no coincide con el modo seleccionado.")
+        reference = selected_layout.reference_source or {}
+        if not isinstance(reference, dict):
+            raise ValueError("La procedencia de la calibración tiene un formato inválido.")
+        if reference.get("kind") == "video_frame":
+            raise ValueError("La calibraci\u00f3n procede de un video; no corresponde a una fuente viva.")
+        from .window_capture import source_descriptor, source_review_required
+        context = region_profiles.get_source_context(resolution, profile=selected_profile)
+        kind = "Window" if hasattr(monitor, "hwnd") else "Monitor"
+        descriptor = source_descriptor(monitor, kind)
+        source_identity = (getattr(monitor, "hwnd", None),
+                           getattr(monitor, "x", None), getattr(monitor, "y", None))
+        if (context or reference) and source_review_required(context or reference, descriptor, has_calibration=True):
+            raise ValueError("Fuente incompatible con la calibraci\u00f3n; revis\u00e1 las regiones.")
+        ocr_regions = ocr.load_regions(resolution)
         with self._lock:
+            if (self.card_layout == selected_layout
+                    and getattr(self, "_active_mode", None) == selected_mode
+                    and getattr(self, "_active_profile", None) == selected_profile
+                    and getattr(self, "_configuration_source_identity", None) == source_identity
+                    and getattr(self, "_configuration_source_descriptor", None) == descriptor):
+                return  # Revalidation must not discard identities on Stop/Start.
             self.capture.set_monitor(monitor)
+            self._configuration_source_descriptor = descriptor
+            self._configuration_source_identity = source_identity
             self._active_profile = selected_profile
             self._active_mode = selected_mode
             if self._unread_positions:
@@ -265,31 +278,29 @@ class DetectionEngine:
             self._pending_positions.clear()
             self._prev_seat_thumbs.clear()
             self._prev_thumb = self._prev_dealer_thumb = None
+            with self._preview_cache_lock:
+                self._preview_detection_cache = None
+            self._last_frame = None
             previous_doubt = self._round_observation.count_uncertain
             self._round_observation = RoundObservation()
             self._round_observation.count_uncertain = previous_doubt
             res = self.capture.resolution
-            if selected_layout is not None:
-                self.card_layout = selected_layout
-                self._memory_mode = "registry"
-                self.card_registry = CardMemory(
-                    self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
-                    empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
-                self.card_registry.round_number = self.round_number
-                self.regions = []  # the selected table polygon is the sole counting boundary
-                xs, ys = zip(*selected_layout.dealer)
-                self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
-                self.my_seats = {0}
-            else:
-                self.card_layout = None
-                self.card_registry = None
-                self._memory_mode = "legacy"
-                self.regions = ([Polygon(p) for p in custom["players"]] if custom
-                                else scaled_player_regions(res))
-                self._dealer_rect = tuple(custom["dealer"]) if custom else dealer_area_rect(res)
+            self.card_layout = selected_layout
+            self._memory_mode = "registry"
+            self.card_registry = CardMemory(
+                self.counter, confirmations=constants.EXTRA_CARD_CONFIRM_CYCLES,
+                empty_frames=constants.EMPTY_FRAMES_FOR_RESET)
+            self.card_registry.round_number = self.round_number
+            self.regions = []
+            xs, ys = zip(*selected_layout.dealer)
+            self._dealer_rect = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+            self.my_seats = {0}
+            # Project the new empty registry so the next snapshot cannot label
+            # cards from the previous configuration as belonging to this one.
+            self._sync_registry_cards()
             sx, _ = scaling_factors(res)
             self._dist_scale = sx
-            self._ocr_regions = ocr.load_regions(res)
+            self._ocr_regions = ocr_regions
             # Anchor remap (V3 E3): solved on the next worker cycle — a
             # full-frame template search here would hitch the Tk thread.
             self._anchor_state = {"status": "none", "fit": None,
@@ -304,6 +315,8 @@ class DetectionEngine:
             self.log(f"OCR regions not calibrated for {res[0]}x{res[1]} — "
                      "balance/bet OCR paused (use OCR Regions to calibrate).",
                      level="WARNING")
+
+        self.publish_snapshot()
 
     @property
     def ocr_calibrated(self) -> bool:
@@ -2172,10 +2185,14 @@ class DetectionEngine:
                      " — exact geometry kept.")
             self.publish_snapshot()
             return
-        regions_payload = load_custom_regions(calib_res)
+        regions_payload = load_custom_regions(calib_res) if self.card_layout is None else None
         ocr_payload = ocr.load_regions(calib_res)
         controls = phase.load_controls(calib_res)
-        t_regions = anchors_mod.transform_regions(regions_payload, fit)
+        t_regions = (anchors_mod.transform_regions(regions_payload, fit)
+                     if self.card_layout is None else None)
+        if self.card_layout is not None:
+            self.log("CardLayout geometry kept; legacy anchor remapping is not supported for these polygons.",
+                     level="WARNING")
         t_ocr = anchors_mod.transform_ocr(ocr_payload, fit)
         with self._lock:
             if t_regions:
