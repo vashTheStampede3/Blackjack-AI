@@ -47,3 +47,8 @@
 - The exact 113-frame video replay using local ONNX and the same calibration/schedule produced 20/22 then 3/15 counted events and final RC +1 on both the starting revision and the stabilized working code. A much older report recorded 22/22 and 15/15, RC 0, using a different inference pipeline.
 - Numeric trace: during the empty interval a below-threshold 4 box fills almost the entire mine crop and repeatedly prevents round clearance; second-hand detections are then associated with the prior round. This was already present at the starting revision. No confidence or geometry rule was changed based on this one recording. Use manual New Round if necessary and treat live accuracy as unverified.
 - Next: finish native input-event smoke, publish the GUI/registry checkpoint and video replay repair; remove only task-owned temporary worktrees and test directories.
+
+## Replay source boundary
+
+- Fixed the local replay tool after its normal live `set_monitor` path correctly rejected the saved video calibration. Replay now has a separate binding path that requires an exact-resolution official layout explicitly reviewed on the same video, sets its source provenance to video, and never calls the live monitor gate. It does not substitute the old seven-seat layout.
+- Validation: 3 replay contract tests reject missing/wrong source references and verify official-mode setup; 15 registry/replay tests pass. The 113-frame synthetic/user-video replay completed, but remained 23/37 and RC +1, matching the same result at the mission baseline.

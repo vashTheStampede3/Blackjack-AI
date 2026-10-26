@@ -17,6 +17,7 @@ import cv2
 from lib.common import constants, settings
 from lib.logic import region_profiles
 from lib.logic.card_layout import SEVEN_SEATS
+from lib.logic.app_modes import normalize_mode
 from lib.logic.counting import CardCounter
 from lib.logic.engine import DetectionEngine
 from lib.logic.models import ManualShuffleModel, OnnxModel
@@ -156,6 +157,30 @@ class ReplayEngine(DetectionEngine):
         return None
 
 
+def configure_replay(engine, source, profile, memory):
+    """Bind a reviewed video layout without presenting it as a live monitor.
+
+    The production live-source gate deliberately rejects video calibrations.
+    Replay uses the explicit layout API, with exact resolution and file checks.
+    """
+    resolution = (source.width, source.height)
+    mode = normalize_mode(region_profiles.layout_mode(resolution, profile=profile))
+    layout = region_profiles.get_card_layout(resolution, mode, profile=profile)
+    if layout is None:
+        raise ValueError("Replay requires an official exact-resolution calibrated layout")
+    reference = layout.reference_source or {}
+    if reference.get("kind") != "video_frame" or not reference.get("path"):
+        raise ValueError("Replay requires a calibration explicitly reviewed on this video")
+    if Path(reference["path"]).resolve() != Path(source.reader.path).resolve():
+        raise ValueError("The layout was calibrated on a different video")
+    engine.capture.set_monitor(source)
+    engine.regions = []  # Official layouts do not use seven historical seats.
+    engine.use_card_layout(layout, memory=memory)
+    engine._active_profile, engine._active_mode = profile, mode
+    engine._configuration_source_identity = ("video", str(Path(source.reader.path).resolve()))
+    engine._configuration_source_descriptor = dict(reference)
+
+
 def validate_labels(labels):
     from lib.logic.cards import hilo_delta
     aliases = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}
@@ -204,16 +229,11 @@ def run(args):
         source = ReplaySource(reader, scope["start_seconds"], min(scope["end_seconds"], reader.duration_seconds))
         audited = AuditedModel(OnnxModel(model_path))
         engine = ReplayEngine(log=lambda *a, **k: None, provider=LocalProvider(audited), persist=False)
-        engine.set_monitor(source, profile=args.profile)
+        configure_replay(engine, source, args.layout_profile or args.profile, args.memory)
         engine.counter = TraceCounter(engine, source)
-        if args.layout_profile:
-            layout = region_profiles.get_card_layout(reader.resolution, "table", profile=args.layout_profile)
-            if layout is None:
-                raise ValueError("The selected table profile has no exact-resolution layout")
-            reference = layout.reference_source or {}
-            if reference.get("path") and Path(reference["path"]).resolve() != Path(labels["video_path"]).resolve():
-                raise ValueError("The table profile was calibrated on a different video; review it first")
-            engine.use_card_layout(layout, memory=args.memory)
+        # use_card_layout bound memory to the initial counter before auditing.
+        if engine.card_registry is not None:
+            engine.card_registry.counter = engine.counter
         records = []
         target.mkdir(parents=True)
         metadata = {"profile": args.profile, "layout_profile": args.layout_profile,
