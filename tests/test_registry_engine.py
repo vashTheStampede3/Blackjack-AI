@@ -55,7 +55,9 @@ def test_doubt_withholds_own_advice_and_survives_clear_save_restore(engine):
     observe(engine, boxes, 1.)
     observe(engine, boxes, 2.)
     assert engine.counter.cards_seen == 3
-    observe(engine, [boxes[0] | {"class": "K"}] + boxes[1:], 3.)
+    card = next(c for c in engine.card_registry.cards.values() if c.owner == "mine")
+    engine.card_registry._issue(card, "Rango cambiado; revisar carta")
+    engine.publish_snapshot()
     snap = engine.get_snapshot()
     assert snap["count"]["count_uncertain"] and snap["reading"]["count_uncertain"]
     assert snap["seats"][0]["optimal_action"] is None

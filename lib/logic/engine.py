@@ -732,11 +732,11 @@ class DetectionEngine:
         q.count_pending = self.card_registry.pending
         q.count_uncertain = self.counter.count_uncertain
         q.seats = {s.index: bool(len(s.cards) >= 2 and not self.card_registry.advice_pending
-                                 and all(c.get("state") == "confirmed" for c in s.cards))
+                                 and all(c.get("state") in ("confirmed", "locked") for c in s.cards))
                    for s in self.seats}
         q.dealer_ok = bool(self.dealer_locked and not any(c.owner == "dealer" and
             c.state not in ("rejected", "retired") and
-            (not c.counted or c.reason or c.state != "confirmed") for c in self.card_registry.cards.values()))
+            (not c.counted or c.reason or c.state not in ("confirmed", "locked")) for c in self.card_registry.cards.values()))
         if self.card_registry.clear_ready:
             self._reset_round_state()
 
@@ -852,11 +852,11 @@ class DetectionEngine:
             active = [c for c in self.card_registry.cards.values() if c.status == "active"]
             self._round_observation.present = bool(active)
             self._round_observation.dealer_ok = bool(self.dealer_locked and all(
-                c.counted and not c.reason and c.state == "confirmed"
+                c.counted and not c.reason and c.state in ("confirmed", "locked")
                 for c in active if c.owner == "dealer"))
             self._round_observation.seats = {
                 s.index: bool(len(s.cards) >= 2 and not self.card_registry.advice_pending
-                              and all(c.get("state") == "confirmed" for c in s.cards))
+                              and all(c.get("state") in ("confirmed", "locked") for c in s.cards))
                 for s in self.seats}
             self.publish_snapshot()
         return result
@@ -1390,6 +1390,7 @@ class DetectionEngine:
             self._round_observation.count_uncertain = self.counter.count_uncertain
         if self._unread_positions or self._pending_extra:
             self._round_observation.count_uncertain = True
+            self.counter.mark_uncertainty("unread_positions", {"reason": "Unread positions disappeared"})
         self._unread_positions.clear()
         self._card_evidence = CardEvidence()
         self._round_observation.reset_round()
@@ -2785,7 +2786,7 @@ class DetectionEngine:
                 and record is not None and record.get("round_id") == round_id
                 and record.get("status") == "active"
                 and record.get("state") not in ("rejected", "retired")
-                and (card.get("state") != "confirmed"
+                and (card.get("state") not in ("confirmed", "locked")
                      or record.get("rank") == card.get("rank"))
                 and record.get("owner") == card.get("owner")
                 and ("hand" not in card or record.get("hand") == card.get("hand")))
@@ -2799,7 +2800,7 @@ class DetectionEngine:
             if (not record.get("id", "").startswith(active_prefix)
                     or record.get("round_id") != round_id
                     or record.get("status") != "active" or record.get("counted")
-                    or record.get("state") != "confirmed" or record.get("reason")
+                    or record.get("state") not in ("confirmed", "locked") or record.get("reason")
                     or rank not in constants.CARD_RANKS):
                 continue
             suit = record.get("suit")
@@ -2817,11 +2818,11 @@ class DetectionEngine:
             or any(group.get("is_ambiguous")
                    or str(group.get("seat_id", "")).startswith("TMP_")
                    for group in groups if isinstance(group, dict))
-            or any(card.get("state") != "confirmed" or card.get("reason")
+            or any(card.get("state") not in ("confirmed", "locked") or card.get("reason")
                    or card.get("ambiguous_seat") or not current_card(card)
                    for card in active_cards)
             or any(row.get("status") == "active"
-                   and (row.get("state") != "confirmed" or not row.get("counted")
+                   and (row.get("state") not in ("confirmed", "locked") or not row.get("counted")
                         or row.get("reason") or row.get("ambiguous_seat"))
                    for row in registry.values())
         )
@@ -2843,7 +2844,7 @@ class DetectionEngine:
         dealer_rank = None
         dealer_reason = "WAITING_DEALER"
         if upcard is not None:
-            if (upcard.get("state") == "confirmed" and not upcard.get("reason")
+            if (upcard.get("state") in ("confirmed", "locked") and not upcard.get("reason")
                     and not upcard.get("ambiguous_seat")
                     and upcard.get("owner") in (None, "dealer")
                     and isinstance(upcard.get("card_id"), str)
@@ -2951,7 +2952,7 @@ class DetectionEngine:
             if reason is None and split and hand_tag is None:
                 reason = "SPLIT_HAND_AMBIGUOUS"
             if reason is None and any(
-                    card.get("state") != "confirmed" or card.get("reason")
+                    card.get("state") not in ("confirmed", "locked") or card.get("reason")
                     or card.get("ambiguous_seat") or card.get("owner") != "mine"
                     or not isinstance(card.get("rank"), str)
                     or card.get("rank") not in constants.CARD_RANKS
@@ -3006,6 +3007,10 @@ class DetectionEngine:
 
     def publish_snapshot(self):
         with self._lock:
+            if hasattr(self, "_round_observation"):
+                self._round_observation.count_uncertain = bool(self.counter.count_uncertain or self._round_observation.count_uncertain)
+                if self.card_registry is not None:
+                    self._round_observation.count_pending = self.card_registry.pending
             source_resolution = (self.capture.resolution
                                  if self.capture.monitor is not None else None)
             dealer_rank = self.dealer_card
@@ -3251,7 +3256,7 @@ class DetectionEngine:
                 hero_uncertain = any(g.is_ambiguous for g in hero_groups)
                 dealer_uncertain = any(c.owner == "dealer" and
                                        c.state not in ("rejected", "retired") and
-                                       (not c.counted or c.reason or c.state != "confirmed")
+                                       (not c.counted or c.reason or c.state not in ("confirmed", "locked"))
                                        for c in self.card_registry.cards.values())
                 registry_pending = self.card_registry.advice_pending
             else:

@@ -118,8 +118,9 @@ class MiniTableOverlay:
         set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
         set_style.restype = ctypes.c_ssize_t
         style = get_style(self.hwnd, GWL_EXSTYLE)
+        WS_EX_TRANSPARENT = 0x00000020
         set_style(self.hwnd, GWL_EXSTYLE,
-                  style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+                  (style & ~WS_EX_TRANSPARENT) | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
                   WS_EX_LAYERED | WS_EX_TOPMOST)
         set_pos = user32.SetWindowPos
         set_pos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
@@ -191,6 +192,9 @@ class MiniTableOverlay:
         self._selected_id = self._selected_round = self._selected_ref = None
         self._selected_suit = self._selected_expected_name = None
         if not changed:
+            return
+        if getattr(self, "_pointer_start", None) is not None:
+            self._pending_draw = True
             return
         self._last_state = deepcopy(state)
         self._metrics = deepcopy(aggregates)
@@ -393,7 +397,7 @@ class MiniTableOverlay:
     def _draw_card(self, x, y, card, size=(27, 34)):
         card_w, card_h = size
         rank = card.get("rank")
-        confirmed = card.get("state") == "confirmed" and not card.get("reason") and rank is not None
+        confirmed = card.get("state") in ("confirmed", "locked") and not card.get("reason") and rank is not None
         label = self._rank(rank) + SUIT_SYMBOLS.get(card.get("suit"), "") if confirmed else "?"
         fill, edge, fg = (("#F8FAFC", "#38BDF8", "#0F172A") if confirmed else
                           ("#7C2D12", "#F97316", "#FFEDD5"))
@@ -403,9 +407,9 @@ class MiniTableOverlay:
             edge = "#22C55E"
         tag = f"physical-card-{len(self._drawn_cards)}"
         item = self._item("rectangle", (x, y, x + card_w, y + card_h),
-                          fill=fill, outline=edge, width=2, tags=(tag,))
+                          fill=fill, outline=edge, width=2, tags=(tag, "card_hitbox"))
         self._item("text", (x + card_w / 2, y + card_h / 2), text=label,
-                   fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
+                   fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag, "card_hitbox"))
         identity_fields = (
             "card_id", "legacy_ref", "rank", "suit", "state", "reason", "owner",
             "hand", "group_id", "round_id", "shoe_id", "profile_name", "mode",
@@ -413,7 +417,9 @@ class MiniTableOverlay:
         )
         identity = {key: deepcopy(card[key]) for key in identity_fields if key in card}
         self._drawn_cards.append({"item": item, "tag": tag,
-                                  "card": deepcopy(card), "identity": identity})
+                                  "card": deepcopy(card), "identity": identity,
+                                  "hitbox": (x, y, x + card_w, y + card_h),
+                                  "card_id": identity.get("card_id")})
         if (getattr(self, "identity_corrections_enabled", False)
                 and callable(self.on_correct_card)
                 and isinstance(identity.get("card_id"), str)
@@ -425,6 +431,26 @@ class MiniTableOverlay:
         self._pressed_identity = deepcopy(identity)
 
     def _identity_at_pointer(self, event):
+        x, y = getattr(event, "x", None), getattr(event, "y", None)
+        if x is not None and y is not None:
+            # Check bounding boxes first
+            for record in reversed(self._drawn_cards):
+                x1, y1, x2, y2 = record.get("hitbox", (0, 0, 0, 0))
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    if record.get("identity") and record["identity"].get("card_id"):
+                        return deepcopy(record["identity"])
+            # Check overlapping canvas items
+            try:
+                overlapping = self.canvas.find_overlapping(x - 2, y - 2, x + 2, y + 2)
+                tags = set()
+                for item in overlapping:
+                    tags.update(self.canvas.gettags(item))
+                for record in reversed(self._drawn_cards):
+                    if record.get("tag") in tags:
+                        if record.get("identity") and record["identity"].get("card_id"):
+                            return deepcopy(record["identity"])
+            except (AttributeError, tk.TclError):
+                pass
         try:
             current = self.canvas.find_withtag("current")
             tags = self.canvas.gettags(current[0]) if current else ()
@@ -458,13 +484,22 @@ class MiniTableOverlay:
             if drag_origin is not None:
                 self.remember_position()
                 self._persist_preferences()
+            if getattr(self, "_pending_draw", False):
+                self._pending_draw = False
+                self._draw()
             return
         if start is None or math.hypot(event.x_root - start[0], event.y_root - start[1]) >= 5:
+            if getattr(self, "_pending_draw", False):
+                self._pending_draw = False
+                self._draw()
             return
         released = self._identity_at_pointer(event)
-        if (identity is not None and released is not None
-                and identity.get("card_id") == released.get("card_id")):
-            self._dispatch_identity(identity)
+        target = released or identity
+        if target is not None and target.get("card_id"):
+            self._dispatch_identity(target)
+        if getattr(self, "_pending_draw", False):
+            self._pending_draw = False
+            self._draw()
 
     def _dispatch_identity(self, identity):
         if (getattr(self, "identity_corrections_enabled", False)

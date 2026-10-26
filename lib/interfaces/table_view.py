@@ -218,7 +218,7 @@ class TableView:
         # The presenter withholds uncertain ranks; defensively keep candidate
         # ranks neutral as well. This name is visual only, never card identity.
         rank = card.get("rank")
-        if card.get("state") != "confirmed" or card.get("reason") or not rank:
+        if card.get("state") not in ("confirmed", "locked") or card.get("reason") or not rank:
             return "unknown"
         rank = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}.get(rank, rank)
         if rank not in constants.CARD_RANKS:
@@ -253,7 +253,7 @@ class TableView:
                     widget, rendered = tk.Label(self.canvas, bg=C["bg_canvas"], bd=0, cursor=""), None
             widget.card_data = deepcopy(card)
             border = ("#EF4444" if card.get("reason") else "#22C55E" if card.get("manual")
-                      else "#F59E0B" if card.get("state") != "confirmed" else "#38BDF8")
+                      else "#F59E0B" if card.get("state") not in ("confirmed", "locked") else "#38BDF8")
             widget.config(highlightbackground=border, highlightthickness=1)
             identity_fields = (
                 "card_id", "legacy_ref", "rank", "suit", "state", "reason",

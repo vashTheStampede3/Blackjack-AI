@@ -74,7 +74,7 @@ def _records(value, name, issues):
 def _normalize_card(card, *, identity_context=None, group_id=None):
     result = {key: deepcopy(card[key]) for key in _CARD_FIELDS if key in card}
     result["rank"] = (deepcopy(card.get("rank"))
-                      if card.get("state") == "confirmed" and not card.get("reason")
+                      if card.get("state") in ("confirmed", "locked") and not card.get("reason")
                       else None)
     result["suit"] = deepcopy(card.get("suit")) or None
     if identity_context is not None:
@@ -218,7 +218,7 @@ def _reading_status(snapshot, groups, players, dealer, issues):
         if card.get("state") in ("rejected", "retired") or card.get("status") in ("rejected", "retired"):
             continue
         _card_doubts(card, issues)
-        registry_pending |= (card.get("state") != "confirmed"
+        registry_pending |= (card.get("state") not in ("confirmed", "locked")
                              or ("counted" in card and not card["counted"]))
         if card.get("possible_ids"):
             issues.append("El registro informa identidades alternativas para una carta")
@@ -240,7 +240,7 @@ def _reading_status(snapshot, groups, players, dealer, issues):
         return "reading"
     if (not dealer or not any(player["is_hero"] for player in players)
             or not all(_complete_player(player) for player in players)
-            or any(card.get("state") != "confirmed" or not card.get("rank")
+            or any(card.get("state") not in ("confirmed", "locked") or not card.get("rank")
                    for card in cards)):
         return "reading"
     return "ready"
@@ -266,11 +266,11 @@ def _attach_physical_advice(result, snapshot):
             pending |= bool(group_cards)
             continue
         pending |= any(isinstance(card, Mapping) and (
-            card.get("state") != "confirmed" or card.get("reason")
+            card.get("state") not in ("confirmed", "locked") or card.get("reason")
             or card.get("ambiguous_seat")
         ) for card in group_cards)
     pending |= any(isinstance(card, Mapping) and (
-        card.get("state") != "confirmed" or card.get("reason")
+        card.get("state") not in ("confirmed", "locked") or card.get("reason")
         or card.get("ambiguous_seat")
     ) for card in raw_dealer)
     result["count_has_pending_uncertainty"] = bool(pending)

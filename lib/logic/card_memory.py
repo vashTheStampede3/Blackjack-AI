@@ -20,6 +20,20 @@ class CorrectionResult:
     rc_delta: int = 0
 
 
+class CardState(str):
+    def __eq__(self, other):
+        if not isinstance(other, (str, CardState)):
+            return False
+        s_self = str(self).lower()
+        s_other = str(other).lower()
+        if s_self in ("locked", "confirmed") and s_other in ("locked", "confirmed"):
+            return True
+        return s_self == s_other
+
+    def __hash__(self):
+        return hash("locked") if str(self).lower() in ("locked", "confirmed") else super().__hash__()
+
+
 @dataclass
 class RememberedCard:
     id: str
@@ -60,6 +74,14 @@ class RememberedCard:
     events: list = field(default_factory=list)
     manual_added: bool = False
     last_model_rank: str | None = None
+    locked: bool = False
+    user_locked: bool = False
+    rank_votes: dict = field(default_factory=dict)
+    suit_votes: dict = field(default_factory=dict)
+
+    @property
+    def is_locked(self):
+        return self.locked or self.user_locked or self.state in ("locked", "confirmed") or self.counted
 
     @property
     def card_id(self):
@@ -103,9 +125,12 @@ TrackedCard = RememberedCard
 
 
 class CardMemory:
-    def __init__(self, counter, *, confirmations=2, empty_frames=5, serial=0, archive=None):
+    def __init__(self, counter, *, confirmations=4, empty_frames=5, serial=0, archive=None):
         self.counter = counter
         self.confirmations = confirmations
+        self.min_consensus_frames = confirmations
+        self.consensus_threshold = 0.65
+        self.discarded_regions = []
         self.required_empty = empty_frames
         self.cards = {}
         self.archive = deepcopy(archive or {})
@@ -211,7 +236,7 @@ class CardMemory:
         if not pred.get("ambiguous") and not pred.get("unstable") and pred.get("name"):
             card.valid_observations += 1
         self._update_observation(card, pred, now)
-        if card.state == "confirmed" and card.confirmed_at is None:
+        if card.state in ("confirmed", "locked") and card.confirmed_at is None:
             card.confirmed_at = now
         if card.counted and card.counted_at is None:
             card.counted_at = now
@@ -230,45 +255,62 @@ class CardMemory:
             del card.trajectory[:-12]
         if card.state in ("rejected", "retired"):
             return
-        if card.manual:
-            card.state = "confirmed"
+        if card.user_locked or card.manual:
+            card.state = CardState("locked")
+            card.locked = True
+            return
+        if card.locked or card.counted:
+            # Phase 3: Hard Latch - Immutable during the active round
+            card.state = CardState("locked")
+            card.locked = True
+            suit = pred.get("suit")
+            if card.suit is None and suit in ("S", "H", "D", "C"):
+                name = self._counted_name(card.rank, suit)
+                try:
+                    self.counter.replace_contribution(card.counted_name or card.rank, name)
+                    card.counted_name = name
+                    card.suit = suit
+                except ValueError:
+                    pass
             return
         if card.reason:
             return  # a known ambiguity is never silently turned into a clean count
         if pred.get("ambiguous") or pred.get("unstable") or pred.get("name") is None:
-            # A previously confirmed card does not become a new unread card
-            # because one observation is blurred. Keep its confirmed rank;
-            # unconfirmed candidates still need consecutive clean sightings.
-            if not card.counted:
-                card.hits = 0
             return
-        if card.counted and pred["name"] != card.rank:
-            self._issue(card, "Rango cambiado; revisar carta")
-            return
+
+        conf = float(pred.get("confidence", 1.0)) if type(pred.get("confidence")) in (float, int) else 1.0
+        rank_name = pred.get("name")
+        card.rank_votes[rank_name] = card.rank_votes.get(rank_name, 0.0) + conf
         suit = pred.get("suit")
-        if card.suit is None and suit in ("S", "H", "D", "C"):
-            if card.counted:
-                # A late suit observation must move the existing contribution,
-                # not create a second card or desynchronize shoe composition.
-                name = self._counted_name(card.rank, suit)
-                try:
-                    self.counter.replace_contribution(card.counted_name or card.rank, name)
-                except ValueError:
-                    self._issue(card, "No se pudo actualizar el palo contabilizado")
-                    return
-                card.counted_name = name
-            card.suit = suit
-        if pred["name"] != card.rank:
-            card.rank, card.hits = pred["name"], 0
+        if suit in ("S", "H", "D", "C"):
+            card.suit_votes[suit] = card.suit_votes.get(suit, 0.0) + conf
+
         card.hits += 1
-        if card.counted:
-            card.state = "confirmed"
-        elif card.hits >= self.confirmations:
-            card.counted, card.state = True, "confirmed"
+        total_votes = sum(card.rank_votes.values())
+        best_rank, best_votes = max(card.rank_votes.items(), key=lambda it: it[1])
+        majority = (best_votes / total_votes) if total_votes > 0 else 0.0
+
+        time_window_ok = (now - card.first_seen >= 0.350 and card.valid_observations >= 2)
+        frames_ok = (card.valid_observations >= self.min_consensus_frames or card.hits >= self.confirmations)
+        consensus_ok = (majority >= self.consensus_threshold and (frames_ok or time_window_ok))
+
+        if consensus_ok and not card.counted:
+            card.rank = best_rank
+            if card.suit_votes:
+                card.suit = max(card.suit_votes.items(), key=lambda it: it[1])[0]
+            elif suit in ("S", "H", "D", "C"):
+                card.suit = suit
+            card.counted, card.state = True, CardState("locked")
+            card.locked = True
             card.counted_rank = card.rank
             card.counted_name = self._shoe_name(card)
             self.counter.count_card(card.counted_name)
             self.counter.clear_uncertainty(card.id)
+            card.confirmed_at = now
+            card.counted_at = now
+        else:
+            card.state = "pending"
+            card.rank = best_rank
 
     @staticmethod
     def _distance(card, pred, now):
@@ -319,7 +361,12 @@ class CardMemory:
                 continue
             if pred.get("class") in ("back", "cardback", "cuttingcard"):
                 continue
-            radius = max(2., min(pred.get("width", 30), pred.get("height", 40))*.10)
+            px, py = pred.get("cx", 0), pred.get("cy", 0)
+            pw, ph = pred.get("width", 30), pred.get("height", 40)
+            if any(math.hypot(px - rx, py - ry) < max(pw, ph, rw, rh) * 0.75
+                   for rx, ry, rw, rh in self.discarded_regions):
+                continue
+            radius = max(2., min(pw, ph)*.10)
             duplicate = next((p for p in unique if p["owner"] == pred["owner"]
                 and math.hypot(p["cx"]-pred["cx"], p["cy"]-pred["cy"]) < radius), None)
             if duplicate is not None:
@@ -344,7 +391,8 @@ class CardMemory:
                 and self._distance(card, pred, now) <= max(
                     card.width, card.height, pred.get("width", 30), pred.get("height", 40))*.85
                 for pred in unique)
-            for key, card in self.cards.items() if card.rank is not None and not card.manual
+            for key, card in self.cards.items()
+            if card.rank is not None and not card.manual and card.status != "not_a_card"
         }
         for index, pred in enumerate(unique):
             if index in corner_aliases:
@@ -352,6 +400,8 @@ class CardMemory:
                 continue
             options = []
             for key, card in self.cards.items():
+                if card.status == "not_a_card":
+                    continue
                 distance = self._distance(card, pred, now)
                 scale = max(card.width, card.height, pred.get("width", 30), pred.get("height", 40))
                 same = card.rank == pred.get("name") or card.manual or card.rank is None
@@ -397,6 +447,8 @@ class CardMemory:
                 possible = []
                 for key in original_ids-used:
                     card = self.cards[key]
+                    if card.state in ("rejected", "retired") or card.status in ("not_a_card", "retired"):
+                        continue
                     if card.rank != pred.get("name"):
                         continue
                     # A dealer HUD graphic cannot physically become a player
@@ -421,7 +473,11 @@ class CardMemory:
                 self._new(pred, now)
         for key in original_ids-used:
             card = self.cards[key]
-            if card.counted and not card.reason:
+            if card.state in ("rejected", "retired") or card.status in ("not_a_card", "retired"):
+                continue
+            if card.locked or card.counted or card.user_locked:
+                card.state = CardState("locked")
+            elif not card.reason:
                 card.state = "occluded"
         self._group_hands()
 
@@ -540,6 +596,7 @@ class CardMemory:
         if action == "not_a_card":
             if any(value is not None for value in (new_rank, new_suit, new_seat_id)):
                 return CorrectionResult(False, "invalid_action")
+            self.discarded_regions.append((card.cx, card.cy, card.width, card.height))
             before = self.counter.running_count
             if card.counted:
                 try:
@@ -548,6 +605,8 @@ class CardMemory:
                     return CorrectionResult(False, str(exc))
             card.counted, card.counted_rank, card.counted_name = False, None, None
             card.manual, card.rank = True, None
+            card.user_locked = True
+            card.locked = False
             card.state, card.status, card.reason = "rejected", "not_a_card", None
             card.possible_ids = []
             self.counter.clear_uncertainty(identity)
@@ -562,7 +621,7 @@ class CardMemory:
         suit = card.suit if suit is None else suit
         name = self._counted_name(rank, suit)
         if (card.counted and card.rank == rank and card.suit == suit
-                and card.counted_name == name and card.manual and card.state == "confirmed"
+                and card.counted_name == name and card.manual and card.state in ("confirmed", "locked")
                 and not card.reason and not card.possible_ids
                 and identity not in self.counter.uncertainties):
             return CorrectionResult(False, "unchanged")
@@ -578,7 +637,8 @@ class CardMemory:
         card.rank, card.suit = rank, suit
         card.counted_rank, card.counted_name = rank, name
         card.counted, card.manual = True, True
-        card.state, card.reason, card.possible_ids = "confirmed", None, []
+        card.locked, card.user_locked = True, True
+        card.state, card.reason, card.possible_ids = CardState("locked"), None, []
         self.counter.clear_uncertainty(identity)
         self._group_hands()
         return CorrectionResult(True, "rank_updated", self.counter.running_count - before)
@@ -637,6 +697,7 @@ class CardMemory:
 
     def detach_shoe(self):
         self.archive.clear()
+        self.discarded_regions.clear()
         for card in self.cards.values():
             card.counted, card.manual = False, True
             card.state, card.reason = "retired", None
@@ -649,6 +710,7 @@ class CardMemory:
         self.archive_current()
         self.cards.clear()
         self.split_roots.clear()
+        self.discarded_regions.clear()
         self.empty_frames, self.empty_since, self.had_cards = 0, None, False
         self.round_number += 1
         self.group_tracker.reset_for_round()

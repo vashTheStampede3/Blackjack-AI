@@ -55,8 +55,18 @@ class CardPicker(tk.Toplevel):
         if self._card_identity is not None:
             self._build_identity_controls()
             self.update_idletasks()
-            x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
-            y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+            try:
+                cx = self.winfo_pointerx()
+                cy = self.winfo_pointery()
+                w = self.winfo_width()
+                h = self.winfo_height()
+                sw = self.winfo_screenwidth()
+                sh = self.winfo_screenheight()
+                x = max(10, min(cx - w // 2, sw - w - 10))
+                y = max(10, min(cy - 20, sh - h - 10))
+            except Exception:
+                x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+                y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
             self.geometry(f"+{max(0, x)}+{max(0, y)}")
             self.attributes("-topmost", True)
             self.lift()
@@ -161,7 +171,7 @@ class CardPicker(tk.Toplevel):
         for index, rank in enumerate(constants.CARD_RANKS):
             label = _RANK_LABELS.get(rank, rank)
             btn = tk.Button(ranks, text=label, width=3, cursor="hand2",
-                            command=lambda value=rank: self._set_rank(value))
+                            command=lambda value=rank: self._on_rank_button_click(value))
             btn.grid(row=index // 7, column=index % 7, padx=2, pady=2)
             self._rank_buttons[rank] = btn
         self._refresh_rank_buttons()
@@ -190,7 +200,7 @@ class CardPicker(tk.Toplevel):
             font=constants.FONT_BODY_BOLD, padx=10, pady=7)
         self._save_button.pack(side=tk.LEFT)
         if getattr(self, "_allow_remove", True):
-            tk.Button(footer, text="Descartar Falsa Detección",
+            tk.Button(footer, text="Descartar Falsa Detección / Borrar",
                       command=self._discard_identity_card, bg=C["danger"], fg="white",
                       relief="flat", cursor="hand2", font=constants.FONT_BODY,
                       padx=8, pady=7).pack(side=tk.LEFT, padx=6)
@@ -199,6 +209,18 @@ class CardPicker(tk.Toplevel):
                   cursor="hand2", font=constants.FONT_BODY,
                   padx=10, pady=7).pack(side=tk.RIGHT)
         self._refresh_save_button()
+
+    def _on_rank_button_click(self, rank):
+        """1-Click Fast Edit: Immediately apply rank correction and close popup on button click."""
+        self._chosen_rank = rank
+        self._refresh_rank_buttons()
+        suit = self._chosen_suit
+        identity = deepcopy(self._card_identity)
+        self._close()
+        self._on_select("set_rank", rank, suit, identity)
+
+    def _choose_rank(self, rank):
+        self._on_rank_button_click(rank)
 
     def _set_rank(self, rank):
         self._chosen_rank = rank

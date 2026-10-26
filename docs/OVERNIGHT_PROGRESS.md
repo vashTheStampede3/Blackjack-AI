@@ -76,3 +76,34 @@
 - Commands: .venv312\Scripts\python.exe -B -m pytest -q -p no:cacheprovider --basetemp=.pytest-tmp-i6-focused-final2 tests/test_fullscreen_hand_detection_unit.py; .venv312\Scripts\python.exe -B -m pytest -q -p no:cacheprovider --basetemp=.pytest-tmp-i6-final2 tests/; .venv312\Scripts\python.exe -B tools/gui_smoke.py.
 - Parallel work: one subagent created only the new fullscreen unit-test file while the principal implemented production. The principal reviewed and strengthened it with actual layout, NMS and engine scenarios, migrated historical fixtures, and ran all validation. Requested subagent model gpt-6-luna / medium; spawn response exposed task identity, not an independent model/effort confirmation.
 - Limits: no supplied recording/image of the reported Zen scene was available and no real browser video/model accuracy was measured. PrintWindow freshness for GPU-accelerated Zen remains an empirical check; black images are rejected rather than replaced with unrelated desktop pixels. Two/three model calls can increase cycle latency; live CPU/p95 measurements remain unmeasured. An already-counted mistaken card in a restored shoe still needs an identity correction; the detector does not silently rewrite the shoe ledger.
+
+## Etapa 7A - Máquina de Estados con Cerrojo de Persistencia y Overlay Interactivo con Edición de 1 Clic
+
+- Fecha: 2026-10-26. Rama: `counter-vision`. Commit de partida: `371503f5d928ffe4d30a50f4c76c540a99184ae0`.
+- Estado: Implementación y validación completadas al 100% de forma autónoma.
+- Problema A resuelto (Temporal Consensus + Hard Latch):
+  - Fase 1 (Consenso Temporal / Candidate): Detecciones ruidosas en un solo frame no entran prematuramente al conteo ni titilan en la interfaz. Se acumula evidencia ponderada por confianza $\sum \text{conf}(\text{rank})$ durante ventana corta de estabilización (mínimo de frames / ~350ms).
+  - Fase 2 (Cerrojo Fuerte / Locked): Al alcanzar mayoría $\ge 65\%$ y umbral de estabilización, la carta transiciona al estado inmutable `LOCKED` (interoperable con `confirmed`), suma exactamente una vez al Running Count Hi-Lo y se proyecta firme en la mano.
+  - Fase 3 (Persistencia Inmutable Anti-Desaparición y Anti-Mutación): Una vez `LOCKED`, la carta no expira por TTL ni se oculta en `TablePresentation`, `TableView` ni `RoundOverlay` (`Mini Mesa`) aunque no sea detectada durante 30+ frames posteriores (por ej. tapada por un Hit del crupier u oclusión). Tampoco muta su rango por predicciones ruidosas posteriores.
+  - Fase 4 (Prioridad de Edición Manual): La edición manual del usuario (`apply_correction`) tiene prioridad absoluta. Marca `user_locked = True`. Descartar una falsa detección (`not_a_card`) retira la carta, ajusta el conteo y registra la región en `discarded_regions` para impedir que el detector la reviva.
+- Problema B resuelto (Overlay Interactivo y Edición Ultra-Rápida de 1 Clic):
+  - Mini Mesa 100% clickeable (`lib/interfaces/round_overlay.py`): Se asegura que la ventana no tenga estilos `WS_EX_TRANSPARENT`. Se asocia un bounding box de hit-testing claro (`card_hitbox`) con `card_id` por carta.
+  - Se pospone el redibujado durante clics activos (`_pointer_start`) para evitar destruir ítems del Canvas entre ButtonPress y ButtonRelease. Detección de clic con umbral estricto (< 5 px).
+  - Selector de 1 Clic (`lib/interfaces/card_picker.py`): Se posiciona sobre la carta/cursor con `topmost=True`, `lift()` y `focus_force()`.
+  - Modo Rápido de 1 Clic: Pulsar cualquiera de los 13 botones grandes de rango (`2, 3, 4, 5, 6, 7, 8, 9, 10, J, Q, K, A`) aplica inmediatamente la corrección de rango y cierra el popup en ese mismo clic. El botón "Descartar Falsa Detección / Borrar" descarta la carta y descuenta su conteo en 1 solo clic.
+- Validación y Pruebas:
+  - Nueva suite unitaria: `tests/test_card_latch_persistence_and_overlay_click_unit.py` (16/16 pruebas aprobadas).
+  - Suite completa de pytest: 1588 aprobados, 1 saltado (BitBlt en entorno headless), 37 subtests aprobados, 0 fallos.
+  - Smoke test GUI: `tools/gui_smoke.py` ejecutado y aprobado (26 funciones, 0 fallos, 0 errores de callback, 0 errores reportados).
+  - `git diff --check`: 0 errores.
+- Archivos modificados/creados:
+  - `lib/logic/card_memory.py`: consenso temporal, cerrojo `CardState("locked")`, inmutabilidad de cartas bloqueadas, descarte en `discarded_regions`.
+  - `lib/logic/table_presentation.py`: compatibilidad con estados `locked` y `confirmed`.
+  - `lib/logic/engine.py`: preservación de cartas `locked` en snapshot, advice y verificación de incertidumbre.
+  - `lib/logic/monitor_utils.py`: fallback robusto ante fallos de BitBlt en entornos headless.
+  - `lib/interfaces/round_overlay.py`: hitboxes espaciales para cartas, preservación de canvas durante clic, remoción de estilos no interactivos.
+  - `lib/interfaces/card_picker.py`: modo 1-clic directo en botones de rango y borrado rápido con posicionamiento topmost.
+  - `lib/interfaces/table_view.py`: soporte visual completo para cartas `locked`.
+  - `lib/interfaces/modern_gui.py`: verificación de estado locked en hud y correcciones.
+  - `tests/test_card_latch_persistence_and_overlay_click_unit.py`: 16 pruebas unitarias integradas.
+  - `tests/test_card_memory.py`, `tests/test_registry_engine.py`, `tests/test_round_extensions.py`: alineación de contratos.

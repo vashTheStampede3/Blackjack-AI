@@ -1320,7 +1320,7 @@ class ModernBlackjackGUI(tk.Tk):
         dealer_up = dealer_cards[0] if dealer_cards else {}
         insurance = ""
         if (presentation.get("status") == "ready"
-                and dealer_up.get("state") == "confirmed"
+                and dealer_up.get("state") in ("confirmed", "locked")
                 and dealer_up.get("rank") in ("Ace", "A")):
             payload = presentation.get("insurance") or {}
             if payload.get("status") == "ready":

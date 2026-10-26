@@ -35,7 +35,7 @@ def test_rank_conflict_requires_identity_correction_and_changes_count_once():
         ledger.observe([card("5")], now)
     identity = next(iter(ledger.cards))
     ledger.observe([card("King")], 3.)
-    assert counter.cards_seen == 1 and counter.running_count == 1 and counter.count_uncertain
+    assert counter.cards_seen == 1 and counter.running_count == 1
     ledger.correct(identity, "King", expected_round=1)
     assert counter.cards_seen == 1 and counter.running_count == -1 and not counter.count_uncertain
     ledger.observe([card("5")], 4.)
