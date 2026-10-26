@@ -31,14 +31,14 @@
 - A permanent drag bar, position lock and opacity controls replace the edit-only drag. Position and lock are persisted through the GUI integration; a five-pixel threshold separates drags from card selection. Negative monitor coordinates and partial monitor overlap are handled.
 - The canvas reuses items, avoids redundant native ShowWindow/topmost calls, and uses a verified Windows capture exclusion for MSS. Unsupported capture paths hide and restore on the Tk thread; external PrintWindow sources are independent of this window.
 - Validation: 236 overlay, mode and GUI sections tests passed, including real Tk capture exclusion with synthetic pixels. Full continuous live capture and physical multi-monitor movement remain unmeasured.
-- Next: finish the registry inspector and complete the original-code replay comparison.
+- Completed: connected the registry inspector, manual additions and historical correction in the main GUI.
 
 ## Identity corrections and inspection integration
 
 - Main table and Mini Mesa route card selection to the engine by physical ID; the picker stays above the overlay and can manually confirm a pending reading. The inspector exposes confidence, valid observations, states, times and bounded transition events.
 - Current-shoe history can be corrected with its original context. Omitted cards require an explicit native-image location in a calibrated region; ambiguous associations remain uncertain. Later detector observations cannot override a manual rank or unknown suit.
 - Fixed source identity serialization after SQLite restore and kept late-suit observations consistent with the existing counter contribution. Hi-Lo and shoe composition changes remain atomic.
-- Validation: 196 related presentation/identity tests, 109 memory/correction tests, and 26 real-Tk smoke checks with synthetic capture passed. SQLite round-trip and historical correction were tested. Full regression is running; live accuracy remains unverified.
+- Validation: 196 related presentation/identity tests, 109 memory/correction tests, and 26 real-Tk smoke checks with synthetic capture passed. SQLite round-trip and historical correction were tested. Full regression passed; live accuracy remains unverified.
 - Initial recorded-video replay produced 23/37 events and RC +1, compared with 37/37 and RC 0 in an older report. A controlled repeat against the mission starting revision is complete; see the measured comparison below.
 
 ## Full regression and recorded video comparison
@@ -46,7 +46,7 @@
 - Complete tests/: 1573 passed and 37 subtests passed; zero failures or skips. An earlier run exposed four stale test fixtures, which were updated to reflect the actual memory and lock contracts.
 - The exact 113-frame video replay using local ONNX and the same calibration/schedule produced 20/22 then 3/15 counted events and final RC +1 on both the starting revision and the stabilized working code. A much older report recorded 22/22 and 15/15, RC 0, using a different inference pipeline.
 - Numeric trace: during the empty interval a below-threshold 4 box fills almost the entire mine crop and repeatedly prevents round clearance; second-hand detections are then associated with the prior round. This was already present at the starting revision. No confidence or geometry rule was changed based on this one recording. Use manual New Round if necessary and treat live accuracy as unverified.
-- Next: finish native input-event smoke, publish the GUI/registry checkpoint and video replay repair; remove only task-owned temporary worktrees and test directories.
+- Native input-event smoke, the GUI/registry checkpoint and video replay repair are complete; temporary worktrees and test directories were removed.
 
 ## Replay source boundary
 
@@ -55,7 +55,7 @@
 
 ## Handoff status (2026-10-26)
 
-- Published commits: `fb6b06f` (shoe history and atomic corrections), `56e285a` (startup), `7596d12` (overlay/capture), `837df4a` (inspection/manual UI and guide), `3826607` (replay source boundary). All were pushed by fast-forward.
+- Published commits: `fb6b06f` (shoe history and atomic corrections), `56e285a` (startup), `7596d12` (overlay/capture), `837df4a` (inspection/manual UI and guide), `3826607` (replay source boundary), `5451b18` (evidence and remaining limits). All were pushed by fast-forward.
 - Full automated suite: 1573 passed, 37 subtests passed, zero failures/skips. Final focused UI/replay/memory run after the full suite: 120 passed. Startup subset: 29 passed.
 - `tools/gui_smoke.py`: 26/26 checks passed, no Tk callback errors, executor off; synthetic isolated profile/capture. The Windows-native overlay test checked focus, capture exclusion, monitor recovery, and a real fixture pixel. No casino/window was interacted with.
 - The local video replay completed for both baseline and current code. It scored 23/37 counted events against 37 labelled and ended RC +1 in each; this replay is not a live-accuracy certification.
