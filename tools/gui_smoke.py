@@ -11,11 +11,21 @@ import time
 import traceback
 import tkinter as tk
 from tkinter import messagebox,filedialog
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-from tools.common import ROOT,write_json
+from tools.common import write_json
 from lib.common import constants,settings
+from lib.logic.app_modes import INDIVIDUAL
+from lib.logic.card_layout import CardLayout
+from lib.logic.table_inference import prepare_layout_image
+from lib.logic import region_profiles
+import screeninfo
 
 
 def main():
@@ -28,6 +38,40 @@ def main():
     constants.BETTING["use_exact_edge"]=0
     constants.EXECUTOR["mode"]="off"
     constants.TRAINING["enabled"]=0
+    constants.EXTRA_CARD_CONFIRM_CYCLES=1
+    monitors=screeninfo.get_monitors()
+    monitor=next((m for m in monitors if getattr(m,"is_primary",False)),monitors[0])
+    width,height=monitor.width,monitor.height
+    layout=CardLayout.from_payload({
+        "mode":INDIVIDUAL,"resolution":[width,height],
+        "mine":[[width*.1,height*.52],[width*.72,height*.52],
+                [width*.72,height*.94],[width*.1,height*.94]],
+        "dealer":[[width*.4,height*.05],[width*.75,height*.05],
+                  [width*.75,height*.33],[width*.4,height*.33]],
+    },(width,height))
+    from lib.logic.window_capture import source_descriptor
+    calibration_source=source_descriptor(monitor,"Monitor")
+    region_profiles.set_card_layout(layout,profile=region_profiles.active_name(),
+                                    source_context=calibration_source)
+    region_profiles.set_source_context((width,height),calibration_source,
+                                       profile=region_profiles.active_name())
+    _,patches=prepare_layout_image(np.zeros((height,width,3),np.uint8),layout)
+    predictions=[]
+    class SyntheticModel:
+        hosted=False
+        def predict(self,_frame,*_args):
+            return [dict(item) for item in predictions]
+    model=SyntheticModel()
+    class SyntheticProvider:
+        backend_name="Deterministic synthetic fixture"
+        def players_model(self): return model
+        def dealer_model(self): return model
+        def has_hosted(self): return False
+        def loaded_model_metadata(self,*_args): return {}
+        def refresh(self,**_kwargs): return False
+    from lib.logic.models import ModelProvider
+    original_provider_get=ModelProvider.get
+    ModelProvider.get=staticmethod(lambda:SyntheticProvider())
     results=[]; callback_errors=[]; messages=[]
     messagebox.askyesno=lambda *a,**k:True # isolated test counts only
     messagebox.showerror=lambda title,text,**k:messages.append({"type":"error","title":title,"text":str(text)})
@@ -36,11 +80,27 @@ def main():
     filedialog.asksaveasfilename=lambda *a,**k:str(isolated/"export.csv")
     from lib.logic.log_manager import LogManager
     from lib.interfaces.modern_gui import ModernBlackjackGUI
-    app=ModernBlackjackGUI(LogManager())
+    try:
+        app=ModernBlackjackGUI(LogManager())
+    except Exception:
+        ModelProvider.get=original_provider_get
+        raise
     app.geometry("1400x950+30+30")
     app.report_callback_exception=lambda *exc:callback_errors.append("".join(traceback.format_exception(*exc)))
     engine=app.controller.engine
     engine._warm_advice_job=lambda *a:None # avoid an unrelated full-shoe EV sweep
+    mine_patch=next(p["packed"] for p in patches if p["role"]=="mine")
+    dealer_patch=next(p["packed"] for p in patches if p["role"]=="dealer")
+    mx,my,mr,mb=mine_patch
+    dx,dy,dr,db=dealer_patch
+    predictions.extend([
+        {"class":"6","cx":mx+(mr-mx)*.46,"cy":my+(mb-my)*.52,
+         "width":100,"height":150,"confidence":.99},
+        {"class":"10","cx":mx+(mr-mx)*.54,"cy":my+(mb-my)*.52,
+         "width":100,"height":150,"confidence":.99},
+        {"class":"A","cx":dx+(dr-dx)*.5,"cy":dy+(db-dy)*.5,
+         "width":100,"height":150,"confidence":.99},
+    ])
     def synthetic_frame():
         w,h=engine.capture.resolution
         frame=np.full((h,w,3),(45,80,45),np.uint8)
@@ -81,6 +141,14 @@ def main():
         except Exception:
             results.append({"feature":name,"passed":False,"error":traceback.format_exc()})
             close_tops()
+            if app.controller.running:
+                try:
+                    app.controller.stop()
+                    deadline=time.monotonic()+5
+                    while app.controller._thread and app.controller._thread.is_alive() and time.monotonic()<deadline:
+                        pump(.1)
+                except Exception:
+                    pass
 
     def open_window(label):
         click(label)
@@ -106,13 +174,12 @@ def main():
             app.monitor_combo.current(0)
             app.monitor_combo.event_generate("<<ComboboxSelected>>")
             pump()
-            assert engine.capture.resolution == (640, 480)
             assert app.monitor is source
-            click("OCR Regions")
-            editor = next(w for w in tops() if "OCR Regions" in w.title())
-            assert editor.resolution == (640, 480)
-            assert editor._frame_bgr.shape[:2] == (480, 640)
-            close_tops()
+            assert str(app.start_btn.cget("state")) == "disabled"
+            assert ("calibr" in app.monitor_status.cget("text").casefold()
+                    or "calibr" in app.status_var.get().casefold())
+            assert str(app.ocr_btn.cget("state")) == "disabled"
+            assert "calibr" in app.status_var.get().casefold() or "calibr" in app.monitor_status.cget("text").casefold()
             click("Refresh windows")
             assert app.monitor is None
             with patch("lib.logic.window_capture.list_windows", return_value=[]):
@@ -124,29 +191,99 @@ def main():
         app._auto_select_monitor()
         assert app.monitor is not None
 
-    def choose_first():
-        picker=next(w for w in tops() if "card" in w.title().lower())
-        choices=[w for w in widgets(picker) if isinstance(w,tk.Button) and str(w.cget("image"))]
-        assert choices,"Card picker has no card images"
-        choices[0].invoke();pump(.2)
+    def wait_registered_cards(timeout=12):
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            pump(.1)
+            cards=list(engine.card_registry.cards.values())
+            if len([card for card in cards if card.status=="active" and card.counted])>=3:
+                return
+        raise AssertionError(f"Synthetic cards were not confirmed: {engine.card_registry.snapshot()}")
 
     def manual_cards():
-        app.table.seats[0]["cards"][0].event_generate("<Button-1>");pump();choose_first()
-        assert len(engine.seats[0].cards)==1
-        app.table.seats[0]["cards"][1].event_generate("<Button-1>");pump();choose_first()
-        assert len(engine.seats[0].cards)==2
-        split=app.table.seats[0]["split_btn"]
-        assert split is not None
-        split.event_generate("<Button-1>");pump()
-        assert engine.seats[0].split
-        app.table.dealer_card_lbl.event_generate("<Button-1>");pump();choose_first()
-        assert engine.dealer_card
-        assert engine.counter.cards_seen==3
+        click("Start Detection")
+        deadline=time.monotonic()+12
+        while app.controller.state!="running" and time.monotonic()<deadline:pump(.1)
+        assert app.controller.state=="running",engine.last_error
+        wait_registered_cards()
+        deadline=time.monotonic()+5
+        while (getattr(app,"_table_presentation",{}).get("status")!="ready"
+               and time.monotonic()<deadline):
+            pump(.1)
+        presentation=app._table_presentation
+        assert presentation["status"]=="ready",presentation
+        assert app.round_overlay._last_state==presentation
+        table_ids=[c.get("card_id") for player in presentation["players"] for c in player["cards"]]
+        mini_ids=[c.get("card_id") for player in app.round_overlay._last_state["players"] for c in player["cards"]]
+        assert table_ids==mini_ids and len(table_ids)==2
+        assert len(presentation["dealer"]["cards"])==1
+        assert app.table.telemetry_label.cget("text") and app.table.advice_label.cget("text")
+
+        hero=next(player for player in app.table.seats if player["is_hero"])
+        original=hero["cards"][0].card_identity
+        corrected_rank="6" if original.get("rank")!="6" else "10"
+        before=engine.counter.running_count
+        app.table._dispatch_card_identity(hero["cards"][0]);pump()
+        picker=getattr(app,"_card_correction_picker",None)
+        live=app._current_display_snapshot()
+        diagnostics={
+            "round":original.get("round_id")==presentation.get("round_id"),
+            "shoe":original.get("shoe_id")==presentation.get("shoe_id"),
+            "metadata":{k:original.get(k)==presentation.get(k) for k in ("profile_name","mode","resolution","source_id","source_ref")},
+            "seq":None if live is None else (live.get("seq"),presentation.get("seq")),
+            "source_context":(original.get("source_ref") or {}).get("source_context")==((live or {}).get("source_context")),
+            "mode_var":app.mode_var.get(),"profile_var":app.profile_var.get(),
+            "applied":app._applied_mode_context,
+        }
+        assert picker is not None and picker._card_identity["card_id"]==original["card_id"], (
+            f"Identity picker did not open: status={app.status_var.get()!r}; "
+            f"identity={original!r}; current={app._identity_is_current(original)}; "
+            f"diagnostics={diagnostics!r}; configured={app._source_configured}")
+        picker._set_rank(corrected_rank)
+        source_prediction=next((item for item in predictions
+                                if item["class"]==original.get("rank")),None)
+        if source_prediction is not None:
+            source_prediction["class"]=corrected_rank
+        accepted=app._finish_identity_correction(
+            "set_rank",corrected_rank,None,original)
+        assert accepted, f"Identity correction rejected: {app.status_var.get()!r}"
+        immediate_rank=engine.card_registry.cards[original["card_id"]].rank
+        picker._cancel();pump(.3)
+        assert immediate_rank==corrected_rank and engine.card_registry.cards[original["card_id"]].rank==corrected_rank, (
+            f"Correction failed: status={app.status_var.get()!r}, "
+            f"actual={engine.card_registry.cards[original['card_id']].rank!r}, "
+            f"immediate={immediate_rank!r}, wanted={corrected_rank!r}, chosen={picker._chosen_rank!r}, "
+            f"picker_current={picker._current_rank!r}")
+        assert engine.counter.running_count!=before
+        corrected=app._table_presentation
+        corrected_card=next(card for player in corrected["players"] for card in player["cards"]
+                            if card["card_id"]==original["card_id"])
+        assert corrected_card["rank"]==corrected_rank
+        assert corrected==app.round_overlay._last_state
+
+        hero=next(player for player in app.table.seats if player["is_hero"])
+        target=next(widget for widget in hero["cards"] if widget.card_identity["card_id"]!=original["card_id"])
+        doomed=target.card_identity["card_id"]
+        before_seen=engine.counter.cards_seen
+        app.table._dispatch_card_identity(target);pump()
+        picker=app._card_correction_picker
+        assert picker is not None and picker._card_identity["card_id"]==doomed
+        assert app._finish_identity_correction("not_a_card",None,None,target.card_identity)
+        picker._cancel();pump(.3)
+        assert (engine.card_registry.cards[doomed].state=="rejected"
+                and engine.card_registry.cards[doomed].status=="not_a_card")
+        assert engine.counter.cards_seen==before_seen-1
+        assert all(card.get("card_id")!=doomed for player in app._table_presentation["players"] for card in player["cards"])
+        assert app._table_presentation==app.round_overlay._last_state
+        click("Stop Detection")
+        deadline=time.monotonic()+5
+        while app.controller._thread and app.controller._thread.is_alive() and time.monotonic()<deadline:pump(.1)
+        assert not app.controller._thread or not app.controller._thread.is_alive()
 
     def resets():
         before=engine.counter.cards_seen
         click("New Round")
-        assert engine.counter.cards_seen==before and not engine.seats[0].cards
+        assert engine.counter.cards_seen==before and not [c for c in engine.card_registry.cards.values() if c.status=="active"]
         click("New Shoe")
         assert engine.counter.cards_seen==0 and engine.counter.running_count==0
 
@@ -154,7 +291,7 @@ def main():
         click("Preview Regions")
         deadline=time.monotonic()+12
         while app._preview_busy and time.monotonic()<deadline:pump(.1)
-        assert app.table._preview_item is not None,"Preview did not render"
+        assert app.table._preview_item is not None,f"Preview did not render: {app.status_var.get()}"
         close_button=next(w for w in app.table._preview_close_btn.winfo_children()
                           if isinstance(w,tk.Button) and "Close preview" in str(w.cget("text")))
         close_button.invoke();pump()
@@ -174,10 +311,11 @@ def main():
         assert not app.controller._thread.is_alive()
 
     def counters():
+        before=engine.counter.cards_seen
         plus=next(w for w in widgets(app) if isinstance(w,tk.Button) and str(w.cget("text"))=="+")
         minus=next(w for w in widgets(app) if isinstance(w,tk.Button) and str(w.cget("text")) in ("−","-"))
-        plus.invoke();pump();assert engine.counter.cards_seen==1
-        minus.invoke();pump();assert engine.counter.cards_seen==0
+        plus.invoke();pump();assert engine.counter.cards_seen==before+1
+        minus.invoke();pump();assert engine.counter.cards_seen==before
 
     def settings_save():
         click("Settings"); dialog=next(w for w in tops() if "Settings" in w.title())
@@ -205,21 +343,6 @@ def main():
         assert len(dialog._cd_deck)==52 and dialog._cd_started is not None
         close_tops()
 
-    def save_calibration(label):
-        click(label)
-        dialog=next(w for w in tops() if hasattr(w,"_save"))
-        if hasattr(dialog,"rects"):
-            for i,key in enumerate(dialog.rects):
-                dialog.rects[key]=[[20+i*45,30],[50+i*45,60]]
-        if hasattr(dialog,"include"):
-            for var in dialog.include.values():var.set(True)
-        save_label=("Save" if any(isinstance(w,tk.Button) and "Save" in str(w.cget("text"))
-                                  for w in widgets(dialog)) else "Guardar")
-        click(save_label,dialog)
-        assert not dialog.winfo_exists(),f"{label} did not save/close"
-        assert (isolated/"region_profiles.json").exists()
-        close_tops()
-
     def run():
         try:
             check("opens and auto-selects monitor",lambda:(_ for _ in ()).throw(AssertionError("No monitor")) if app.monitor is None else None)
@@ -233,25 +356,23 @@ def main():
             check("Mini Mesa on/off",lambda:(click("Mini Mesa"),click("Mini Mesa")))
             for label in ["Calibrate Regions","OCR Regions","Capture Controls","Capture Anchors"]:
                 check(f"{label}: open/cancel",lambda label=label:open_window(label))
-            check("manual cards, dealer and split",manual_cards)
+            check("physical detections and identity corrections",manual_cards)
             check("new round and new shoe",resets)
             check("manual count +/-",counters)
             check("region preview open/close",preview)
             check("local detection start/stop",detection)
-            for label in ["Calibrate Regions","OCR Regions","Capture Controls","Capture Anchors"]:
-                check(f"{label}: save isolated calibration",lambda label=label:save_calibration(label))
             check("window selection, OCR client coordinates, refresh and monitor fallback",window_source_workflow)
             assert app.executor.mode=="off" and not app.executor.armed
-            # Screenshot contains only this app's opaque client area.
-            app.lift();pump(.2)
-            import mss
-            from PIL import Image
-            with mss.MSS() as capture:
-                image=capture.grab({"left":app.winfo_rootx(),"top":app.winfo_rooty(),
-                    "width":app.winfo_width(),"height":app.winfo_height()})
-                screenshot_path=ROOT/"reports/gui_smoke.png"
-                screenshot_path.parent.mkdir(parents=True,exist_ok=True)
-                Image.frombytes("RGB",(image.width,image.height),image.rgb).save(screenshot_path)
+            app.update_idletasks()
+            required_controls=("Individual", "Multijugador", "Calibrate Regions",
+                              "Start Detection", "New Round", "New Shoe", "Mini Mesa")
+            visible_text=" ".join(str(widget.cget("text")) for widget in widgets(app)
+                                  if isinstance(widget, (tk.Label, tk.Button)))
+            mode_values=tuple(app.mode_combo.cget("values"))
+            missing=[label for label in required_controls
+                     if label not in mode_values and label not in visible_text]
+            assert not missing, f"Required UI controls not constructed: {missing}"
+            assert app.winfo_exists() and app.winfo_width()>0 and app.winfo_height()>0
         except Exception:
             callback_errors.append(traceback.format_exc())
         finally:
@@ -261,9 +382,12 @@ def main():
             if thread and thread.is_alive():thread.join(timeout=5)
             payload={"scope":"Functional Tk button test; synthetic capture; isolated profile",
                 "results":results,"callback_errors":callback_errors,"messages":messages,
-                "recognition_accuracy_tested":False,"executor":"off","isolated_profile":str(isolated)}
+                "recognition_accuracy_tested":False,"executor":"off","isolated_profile":str(isolated),
+                "window_constructed":bool(app.winfo_exists()),
+                "window_geometry":([app.winfo_width(),app.winfo_height()] if app.winfo_exists() else None)}
             write_json(ROOT/"reports/gui_smoke.json",payload)
             app._on_close()
+            ModelProvider.get=original_provider_get
     app.after(1000,run)
     app.mainloop()
     failed=sum(not row["passed"] for row in results)

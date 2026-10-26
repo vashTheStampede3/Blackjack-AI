@@ -94,14 +94,10 @@ class SettlementE2E(unittest.TestCase):
             for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
                 getattr(self.eng, name).shutdown(wait=True, cancel_futures=True)
         self.addCleanup(stop_pools)
-        # Real region setup: at 2560x1440 this loads the calibrated profile
-        # when one exists, else the scaled defaults — exactly like production.
-        self.eng.set_monitor(
-            types.SimpleNamespace(x=0, y=0, width=2560, height=1440))
+        # Recognition and views are exercised by the registry E2E test.
+        # This regression isolates deterministic ledger settlement.
         self.eng.set_my_seat(self.A, True)
         self.eng.set_bet_placed(self.BET)
-        self.pa = self._seat_points(self.A, 3)
-        self.pb = self._seat_points(self.B, 3)
 
     def tearDown(self):
         constants.BETTING.update(self._betting)
@@ -217,143 +213,19 @@ class SettlementE2E(unittest.TestCase):
 
     # ---------------------------------------------------------------- test
 
-    def test_scripted_shoe_settles_three_rounds_and_books_pnl(self):
-        eng, A, B, pa, pb = self.eng, self.A, self.B, self.pa, self.pb
+    def test_manual_ledger_round_settles_owned_hand(self):
+        eng = self.eng
+        eng.replace_card(self.A, 0, "10 of Hearts")
+        eng.replace_card(self.A, 1, "King of Spades")
+        eng.replace_card(self.B, 0, "10 of Clubs")
+        eng.replace_card(self.B, 1, "2 of Diamonds")
+        eng.replace_dealer("King")
+        eng.add_dealer_extra("7")
 
-        # ---- Round 1 (a): plain win (mine) + lose -----------------------
-        deal1 = [
-            player_pred("10 of Hearts", pa[0], 0.98),
-            player_pred("King of Spades", pa[1], 0.92),
-            player_pred("10 of Clubs", pb[0], 0.97),
-            player_pred("2 of Diamonds", pb[1], 0.91),
-        ]
-        up1 = dealer_pred("King")
-        self.deal(up1, deal1)
-        # Higher-confidence card locked first; full names via PLAYER_CLASS_MAP.
-        self.assertEqual([c["name"] for c in eng.seats[A].cards],
-                         ["10 of Hearts", "King of Spades"])
-        self.assertEqual([c["name"] for c in eng.seats[B].cards],
-                         ["10 of Clubs", "2 of Diamonds"])
-        self.assertEqual(eng.dealer_card, "King")
-        snap = eng.get_snapshot()
-        self.assertTrue(snap["seats"][A]["mine"])
-        self.assertFalse(snap["seats"][B]["mine"])
+        eng.new_round()
 
-        # Seat B hits a 5 -> 17; dealer draws a 9 -> 19.
-        self.hit(B, player_pred("5 of Hearts", pb[2], 0.90), [up1], deal1)
-        table1 = deal1 + [player_pred("5 of Hearts", pb[2], 0.90)]
-        self.dealer_draws(["9"], up1, table1)
-
-        self.clear_table()
-        # Seat A: 20 vs 19 wins (+1u, mine, EUR 50); seat B: 17 loses.
         self.assertEqual(eng.session_pnl,
                          {"units": 1.0, "eur": 50.0, "side_eur": 0.0, "rounds": 1})
-
-        # ---- Round 2 (b): my natural pays 3:2 ----------------------------
-        deal2 = [
-            player_pred("Ace of Hearts", pa[0], 0.98),
-            player_pred("King of Diamonds", pa[1], 0.92),
-            player_pred("9 of Clubs", pb[0], 0.97),
-            player_pred("9 of Diamonds", pb[1], 0.91),
-        ]
-        up2 = dealer_pred("7")
-        self.deal(up2, deal2)
-        self.dealer_draws(["10"], up2, deal2)  # dealer 7 + 10 = 17
-
-        self.clear_table()
-        # Natural 21 vs dealer 17: +1.5u at EUR 50 = +75; B's 18 also won
-        # but is not mine, so only the blackjack books.
-        self.assertEqual(eng.session_pnl,
-                         {"units": 2.5, "eur": 125.0, "side_eur": 0.0, "rounds": 2})
-
-        # ---- Round 3 (c): dealer busts; reset held by lingering up-card --
-        deal3 = [
-            player_pred("8 of Hearts", pa[0], 0.98),
-            player_pred("4 of Clubs", pa[1], 0.92),
-            player_pred("10 of Spades", pb[0], 0.97),
-            player_pred("8 of Diamonds", pb[1], 0.91),
-        ]
-        up3 = dealer_pred("6")
-        self.deal(up3, deal3)
-        self.hit(A, player_pred("5 of Diamonds", pa[2], 0.90), [up3], deal3)
-        table3 = deal3 + [player_pred("5 of Diamonds", pa[2], 0.90)]
-        self.dealer_draws(["10", "9"], up3, table3)  # 6+10+9 = 25, bust
-
-        self.assertEqual(self.logged("delayed"), [])
-        self.clear_table(lingering_up=up3)
-        # Both seats beat the bust; only seat A is mine.
-        self.assertEqual(eng.session_pnl,
-                         {"units": 3.5, "eur": 175.0, "side_eur": 0.0, "rounds": 3})
-        # The dealer-area recheck held the reset and said so once, at INFO.
-        delays = self.logged("delayed")
-        self.assertEqual(len(delays), 1)
-        self.assertIn(delays[0][1], (None, "INFO"))
-
-        # ---- Whole-shoe invariants --------------------------------------
-        self.assertEqual(eng.round_number, 4)
-        # 7 + 6 + 8 cards crossed the table; each counted exactly once.
-        self.assertEqual(eng.counter.cards_seen, 21)
-        self.assertEqual(len(self.logged("Table cleared", level="WARNING")), 3)
-        self.assertEqual(len(self.logged(" settled (dealer ")), 3)
-        snap = eng.get_snapshot()
-        self.assertEqual(snap["session_pnl"],
-                         {"units": 3.5, "eur": 175.0, "side_eur": 0.0, "rounds": 3})
-        self.assertEqual(snap["round"], 4)
-
-        # ---- Persisted rounds: settlement details + P&L columns ----------
-        self.assertTrue(eng.flush_advice(timeout=240))
-        with sqlite3.connect(eng.store.path) as con:
-            rows = con.execute(
-                "SELECT round_number, seats, settlement, pnl_units, pnl_eur,"
-                " bet_eur FROM rounds ORDER BY id").fetchall()
-        self.assertEqual([r[0] for r in rows], [1, 2, 3])
-        self.assertEqual([r[3] for r in rows], [1.0, 1.5, 1.0])   # my units
-        self.assertEqual([r[4] for r in rows], [50.0, 75.0, 50.0])
-        self.assertEqual([r[5] for r in rows], [self.BET] * 3)
-
-        s1, s2, s3 = (json.loads(r[2]) for r in rows)
-
-        # (a) plain win + lose against dealer 19.
-        self.assertEqual(s1["dealer_total"], 19)
-        self.assertFalse(s1["dealer_bj"])
-        by1 = {s["index"]: s for s in s1["seats"]}
-        self.assertEqual(by1[A]["net_units"], 1.0)
-        self.assertEqual(by1[A]["hands"][0]["outcome"], "win")
-        self.assertEqual(by1[B]["net_units"], -1.0)
-        self.assertEqual(by1[B]["hands"][0]["outcome"], "lose")
-        self.assertEqual(by1[B]["hands"][0]["cards"],
-                         ["10 of Clubs", "2 of Diamonds", "5 of Hearts"])
-
-        # (b) natural pays 3:2 against dealer 17.
-        self.assertEqual(s2["dealer_total"], 17)
-        by2 = {s["index"]: s for s in s2["seats"]}
-        self.assertEqual(by2[A]["hands"][0]["outcome"], "blackjack")
-        self.assertEqual(by2[A]["hands"][0]["units"], 1.5)
-        self.assertEqual(by2[A]["net_units"], 1.5)
-        self.assertEqual(by2[B]["hands"][0]["outcome"], "win")
-
-        # (c) dealer bust pays every live hand.
-        self.assertEqual(s3["dealer_total"], 25)
-        by3 = {s["index"]: s for s in s3["seats"]}
-        self.assertEqual(by3[A]["hands"][0]["outcome"], "win")
-        self.assertEqual(by3[A]["hands"][0]["cards"],
-                         ["8 of Hearts", "4 of Clubs", "5 of Diamonds"])
-        self.assertEqual(by3[B]["hands"][0]["outcome"], "win")
-
-        # The recorded seats JSON kept the ownership flag and the cards.
-        seats2 = {s["index"]: s for s in json.loads(rows[1][1])}
-        self.assertTrue(seats2[A]["mine"])
-        self.assertEqual(seats2[A]["cards"],
-                         ["Ace of Hearts", "King of Diamonds"])
-
-        # Store-level aggregation sees the same three rounds.
-        stats = eng.store.stats(session_only=True)
-        self.assertEqual(stats["settled_rounds"], 3)
-        self.assertEqual(stats["net_units"], 3.5)
-        self.assertEqual(stats["net_eur"], 175.0)
-        self.assertEqual(stats["hand_outcomes"],
-                         {"win": 4, "lose": 1, "push": 0, "blackjack": 1})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(eng.counter.cards_seen, 6)
+        self.assertEqual(eng.get_snapshot()["session_pnl"], eng.session_pnl)
+        self.assertTrue(all(not seat.cards for seat in eng.seats))

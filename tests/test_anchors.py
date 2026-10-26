@@ -18,7 +18,8 @@ import numpy as np
 
 from lib.common import constants
 from lib.logic import anchors, ocr, region_profiles
-from lib.logic.monitor_utils import save_custom_regions
+from lib.logic.card_layout import CardLayout
+from lib.logic.app_modes import INDIVIDUAL
 
 CALIB_RES = (800, 600)
 ANCHOR_RECTS = {"anchor_a": (60, 50, 140, 110),
@@ -74,6 +75,16 @@ class TempStore(unittest.TestCase):
             captures[key] = {"rect": list(ANCHOR_RECTS[key]),
                              "crop": frame[top:bottom, left:right].copy()}
         anchors.save_anchors(CALIB_RES, captures)
+
+    def save_layout(self, resolution):
+        w, h = resolution
+        layout = CardLayout.from_payload({
+            "mode": INDIVIDUAL, "resolution": [w, h],
+            "mine": [[10, 100], [min(200, w - 2), 100],
+                     [min(200, w - 2), 250], [10, 250]],
+            "dealer": [[300, 10], [400, 10], [400, 80], [300, 80]],
+        }, resolution)
+        region_profiles.set_card_layout(layout, overwrite=True)
 
 
 class Storage(TempStore):
@@ -169,9 +180,8 @@ class EngineIntegration(TempStore):
         from lib.logic.engine import DetectionEngine
         self.save_test_anchors()
         # Calibrate regions + OCR at the calibrated resolution only.
-        players = [[[10 + i, 10], [60 + i, 10], [60 + i, 60], [10 + i, 10]]
-                   for i in range(7)]
-        save_custom_regions(CALIB_RES, players, [100, 20, 200, 80])
+        self.save_layout(CALIB_RES)
+        self.save_layout((1120, 880))
         ocr.save_regions(CALIB_RES, {"balance": [50, 50, 150, 80]})
 
         eng = DetectionEngine(log=lambda *a, **k: None)
@@ -190,17 +200,17 @@ class EngineIntegration(TempStore):
         balance = eng._ocr_regions["balance"]
         self.assertAlmostEqual(balance[0], 89, delta=4)
         self.assertAlmostEqual(balance[3], 80 * 1.3 + 18, delta=4)
-        # Seat polygons mapped too: bounds of seat 0 start near 10*1.3+24.
-        left, top, _, _ = eng.regions[0].bounds
-        self.assertAlmostEqual(left, 10 * 1.3 + 24, delta=4)
+        # New CardLayout polygons remain tied to their exact native
+        # calibration; legacy anchor remapping applies only to legacy zones.
+        self.assertEqual(eng.card_layout.mine[0], (10.0, 100.0))
+        self.assertEqual(eng.regions, [])
 
     def test_identity_fit_keeps_exact_saved_geometry(self):
         # Same resolution, nothing moved: the EXACT saved calibration must
         # win over a fitted approximation (rounding jitter shaves crops).
         from lib.logic.engine import DetectionEngine
         self.save_test_anchors()
-        players = [[[10, 10], [60, 10], [60, 60], [10, 10]]] * 7
-        save_custom_regions(CALIB_RES, players, [100, 20, 200, 80])
+        self.save_layout(CALIB_RES)
         ocr.save_regions(CALIB_RES, {"balance": [50, 50, 150, 80]})
         eng = DetectionEngine(log=lambda *a, **k: None)
         eng.store = None
@@ -217,6 +227,7 @@ class EngineIntegration(TempStore):
     def test_failed_solve_keeps_geometry_and_says_so(self):
         from lib.logic.engine import DetectionEngine
         self.save_test_anchors()
+        self.save_layout((1120, 880))
         eng = DetectionEngine(log=lambda *a, **k: None)
         eng.store = None
         eng.set_monitor(types.SimpleNamespace(x=0, y=0, width=1120,

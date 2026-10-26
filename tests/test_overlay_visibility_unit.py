@@ -64,7 +64,7 @@ def test_visibility_uses_published_status_instead_of_reinterpreting_snapshot_fie
     assert overlay_visibility(state, True) == (True, "Mano lista")
 
 
-@pytest.mark.parametrize("status", ["waiting", "reading", "uncertain", "stopped", "error", "needs_calibration", "source_mismatch"])
+@pytest.mark.parametrize("status", ["waiting", "reading", "stopped", "error", "needs_calibration", "source_mismatch"])
 def test_nonready_status_suppresses_residual_advice(status):
     state = current_state()
     state.update(status=status, message="mensaje", advice_available=True)

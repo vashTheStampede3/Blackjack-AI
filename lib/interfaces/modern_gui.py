@@ -8,6 +8,7 @@ ever touched from the worker thread.
 """
 
 import threading
+import queue
 import time
 import tkinter as tk
 from copy import deepcopy
@@ -91,6 +92,7 @@ class ModernBlackjackGUI(tk.Tk):
         self._last_seq = -1
         self._last_table_signature = None
         self._preview_busy = False
+        self._ui_events = queue.SimpleQueue()
 
         # Ghost-mode executor (V4 Feature 2): a second consumer of the same
         # snapshot. step() runs in the render path (pure dict math); clicks
@@ -550,11 +552,33 @@ class ModernBlackjackGUI(tk.Tk):
         from ..logic.hotkeys import GlobalHotkeys
         self._hotkeys = GlobalHotkeys({
             int(constants.EXECUTOR.get("confirm_vk", 0x77)):
-                lambda: self.after(0, self._hotkey_confirm),
+                lambda: self._post_ui(self._hotkey_confirm),
             int(constants.EXECUTOR.get("kill_vk", 0x78)):
-                lambda: self.after(0, self._hotkey_kill),
+                lambda: self._post_ui(self._hotkey_kill),
         })
         self._hotkeys.start()
+
+    def _post_ui(self, callback, *args):
+        """Queue worker results without making a Tcl/Tk call off-thread."""
+        if not getattr(self, "_closing", False):
+            self._ui_events.put((callback, args))
+
+    def _drain_ui_events(self):
+        """Run queued worker callbacks from the existing Tk polling loop."""
+        events = getattr(self, "_ui_events", None)
+        if events is None:
+            return
+        while not getattr(self, "_closing", False):
+            try:
+                callback, args = events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(*args)
+            except Exception as error:
+                manager = getattr(self, "log_manager", None)
+                if manager is not None:
+                    manager.exception(f"Error entregando resultado del worker: {error}")
 
     def _stop_hotkeys(self):
         if self._hotkeys is not None:
@@ -1197,28 +1221,8 @@ class ModernBlackjackGUI(tk.Tk):
                                         "before": before, "after": after})
 
     def _on_card_click(self, seat_idx, slot):
-        snapshot = self.controller.engine.get_snapshot()
-        seat_snap = snapshot["seats"][seat_idx] if snapshot else {"cards": []}
-        n_cards = len(seat_snap["cards"])
-        round_at_click = snapshot["round"] if snapshot else None
-        slot = min(slot, n_cards)  # 99 from the "+" button -> append
-        verb = "Replace" if slot < n_cards else "Add"
-        split_info = None
-        if slot >= n_cards and seat_snap.get("split"):
-            # Adding to a split seat: let the user pick the target hand
-            # instead of the engine's count-balancing fallback. Replacing
-            # (slot < n_cards) keeps the card's existing hand tag, and
-            # removal is slot-based — neither needs a selector.
-            hand_of = seat_snap.get("hand_of", [])
-            split_info = {"is_split": True,
-                          "hands": [[n for n, h in zip(seat_snap["cards"], hand_of)
-                                     if h == target] for target in (0, 1)]}
-        CardPicker(self, f"Player {seat_idx + 1} — {verb} card {slot + 1}",
-                   self.table.card_image,
-                   lambda name, hand_idx=None: self.controller.engine.replace_card(
-                       seat_idx, slot, name, expected_round=round_at_click,
-                       hand_index=hand_idx),
-                   allow_remove=slot < n_cards, split_info=split_info)
+        self.set_status("Correction requires a current physical card identity.", error=True)
+        return False
 
     def _on_identity_card_click(self, identity):
         """Open a picker bound to the exact physical card from the view."""
@@ -1270,41 +1274,28 @@ class ModernBlackjackGUI(tk.Tk):
 
     @staticmethod
     def _hud_advice(presentation, running):
-        if not running or presentation.get("status") != "ready":
+        if (not running
+                or presentation.get("status") not in ("ready", "uncertain")):
             return "SIN CONSEJO", "#CBD5E1", ""
         heroes = [player for player in presentation.get("players", [])
                   if player.get("is_hero")]
-        action_names = {"H": "PEDIR", "S": "PLANTARSE", "D": "DOBLAR",
-                        "P": "SEPARAR", "R": "RENDIRSE", "D/H": "DOBLAR / PEDIR",
-                        "D/S": "DOBLAR / PLANTARSE", "P/H": "SEPARAR / PEDIR",
-                        "R/H": "RENDIRSE / PEDIR"}
         advice = "SIN CONSEJO"
         advice_color = "#CBD5E1"
         if (len(heroes) == 1 and not heroes[0].get("is_ambiguous")
                 and len(heroes[0].get("cards") or []) >= 2
-                and presentation.get("advice_available") is True):
-            hands = heroes[0].get("hands")
-            if isinstance(hands, list) and hands:
-                items, colors = [], []
-                valid = True
-                for index, hand in enumerate(hands):
-                    if not isinstance(hand, dict):
-                        valid = False
-                        break
+                ):
+            hero = heroes[0]
+            presented_advice = hero.get("advice")
+            if (isinstance(presented_advice, str) and presented_advice.strip()
+                    and (presentation.get("advice_available") is True
+                         or isinstance(hero.get("hands"), list)
+                         or hero.get("advice_reason"))):
+                advice = presented_advice.strip()
+                for hand in hero.get("hands") or []:
                     payload = hand.get("advice") if isinstance(hand, dict) else None
-                    code = payload.get("action") if isinstance(payload, dict) else None
-                    text = (payload.get("text") if isinstance(payload, dict) else None)
-                    if hand.get("status") != "ready" or not text or code not in action_names:
-                        valid = False
+                    if isinstance(payload, dict) and payload.get("color"):
+                        advice_color = payload["color"]
                         break
-                    hand_tag = hand.get("hand")
-                    prefix = (f"M{hand_tag + 1}: " if type(hand_tag) is int else
-                              f"M{index + 1}: " if len(hands) > 1 else "")
-                    items.append(prefix + action_names[code])
-                    colors.append(constants.ACTION_COLORS.get(code, "#CBD5E1"))
-                if valid:
-                    advice = " | ".join(items)
-                    advice_color = colors[0] if len(set(colors)) == 1 else "#FDE68A"
         dealer_cards = (presentation.get("dealer") or {}).get("cards") or []
         dealer_up = dealer_cards[0] if dealer_cards else {}
         insurance = ""
@@ -1335,7 +1326,9 @@ class ModernBlackjackGUI(tk.Tk):
             except (AttributeError, ValueError):
                 return False
             profile_var = getattr(self, "profile_var", None)
-            profile = profile_var.get() if profile_var is not None else None
+            profile_label = profile_var.get() if profile_var is not None else None
+            profile = getattr(self, "_profile_by_label", {}).get(
+                profile_label, profile_label)
             monitor = getattr(self, "monitor", None)
             resolution = (getattr(monitor, "width", None),
                           getattr(monitor, "height", None))
@@ -1345,7 +1338,7 @@ class ModernBlackjackGUI(tk.Tk):
                     != (profile, mode, resolution)):
                 return False
             current = ModernBlackjackGUI._current_display_snapshot(self)
-            if (current is None or current.get("seq") != presentation.get("seq")):
+            if current is None:
                 return False
             expected_context = (identity.get("source_ref") or {}).get("source_context")
             if expected_context != current.get("source_context"):
@@ -1424,31 +1417,12 @@ class ModernBlackjackGUI(tk.Tk):
         return True
 
     def _on_dealer_click(self):
-        snapshot = self.controller.engine.get_snapshot()
-        round_at_click = snapshot["round"] if snapshot else None
-        CardPicker(self, "Dealer up-card", self.table.card_image,
-                   lambda name: self.controller.engine.replace_dealer(
-                       name, expected_round=round_at_click))
+        self.set_status("Correction requires a registered physical dealer card_id.", error=True)
+        return False
 
     def _on_dealer_extra_click(self, idx):
-        """Correct a tracked dealer draw, or add one the detector missed
-        (idx 99 comes from the '+' button). The round captured at picker
-        open guards against a stale pick landing after an auto reset."""
-        snap = self.controller.engine.get_snapshot()
-        extras = (snap["dealer"].get("extras") or []) if snap else []
-        round_at_click = snap["round"] if snap else None
-        if idx >= len(extras):
-            CardPicker(self, "Dealer draw — add missed card",
-                       self.table.card_image,
-                       lambda name: self.controller.engine.add_dealer_extra(
-                           name, expected_round=round_at_click),
-                       allow_remove=False)
-        else:
-            CardPicker(self, f"Dealer draw {idx + 1} — correct card",
-                       self.table.card_image,
-                       lambda name: self.controller.engine.replace_dealer_extra(
-                           idx, name, expected_round=round_at_click),
-                       allow_remove=True)
+        self.set_status("Dealer-card correction requires a registered physical card_id.", error=True)
+        return False
 
     def _preview_regions(self):
         if self._preview_busy:
@@ -1468,11 +1442,11 @@ class ModernBlackjackGUI(tk.Tk):
                 image = build_region_preview(
                     self.controller.engine, source=source,
                     live_running=bool(self.controller.running and source is None))
-                self.after(0, lambda: self._show_preview(image))
+                self._post_ui(self._show_preview, image)
             except Exception as e:
                 self.log_manager.exception("Falló la preparación de Preview Regions.",
                                            action_id=self._preview_action)
-                self.after(0, lambda e=e: self._preview_failed(e))
+                self._post_ui(self._preview_failed, e)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1568,6 +1542,7 @@ class ModernBlackjackGUI(tk.Tk):
         if getattr(self, "_closing", False):
             ModernBlackjackGUI._finish_close(self)
             return
+        ModernBlackjackGUI._drain_ui_events(self)
         try:
             snapshot = ModernBlackjackGUI._current_display_snapshot(self)
             if snapshot is not None and snapshot["seq"] != self._last_seq:
@@ -1848,10 +1823,13 @@ class ModernBlackjackGUI(tk.Tk):
         SettingsDialog(self, on_apply=self.controller.engine.refresh_settings)
 
     def _on_split_click(self, seat_idx, currently_split):
-        self.controller.engine.set_split(seat_idx, not currently_split)
+        self.set_status("Historical seat-based split controls are disabled.", error=True)
+        return False
 
     def _on_seat_name_click(self, seat_idx):
-        self.controller.engine.set_my_seat(seat_idx)
+        self.set_status("Physical grouping determines player identity; seat selection is disabled.",
+                        error=True)
+        return False
 
     def _set_bet_placed(self):
         try:
@@ -1979,23 +1957,9 @@ class ModernBlackjackGUI(tk.Tk):
         if deck:
             self.trainer_window.load_replay_deck(deck, label="leak drill")
 
-    def _on_advice_click(self, seat_index):
-        """Open the EV inspector for a seat's advice line (V3 F8)."""
-        snap = self.controller.engine.get_snapshot()
-        if not snap:
-            return
-        seat = next((s for s in snap["seats"] if s["index"] == seat_index),
-                    None)
-        if seat is None \
-                or len([c for c in seat["cards"] if c and c != "-"]) < 2 \
-                or not snap["dealer"]["card"]:
-            self.set_status("Nothing to inspect yet — the seat needs two "
-                            "cards and the dealer an up-card.")
-            return
-        from .inspector_window import InspectorWindow
-        InspectorWindow(self, seat=seat, dealer=snap["dealer"]["card"],
-                        per_rank=snap["count"].get("per_rank") or {},
-                        deck_count=self.controller.engine.counter.deck_count)
+    def _on_advice_click(self, *_args):
+        self.set_status("Historical seat advice is not linked to the current physical hand.")
+        return False
 
     def _open_leaks(self):
         store = self.controller.engine.store

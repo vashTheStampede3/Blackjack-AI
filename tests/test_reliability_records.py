@@ -112,6 +112,10 @@ class PaytableHash(ConstantsGuard):
         self.assertEqual(settlement.paytable_hash(), before)
 
     def test_changes_on_payout_relevant_edits(self):
+        enabled = constants.SIDE_BETS["hot3"]["enabled"]
+        perfect_pairs_enabled = constants.SIDE_BETS["perfect_pairs"]["enabled"]
+        constants.SIDE_BETS["hot3"]["enabled"] = True
+        constants.SIDE_BETS["perfect_pairs"]["enabled"] = True
         before = settlement.paytable_hash()
         constants.SIDE_BETS["hot3"]["paytable"]["21"] = 5
         self.assertNotEqual(settlement.paytable_hash(), before)
@@ -122,6 +126,8 @@ class PaytableHash(ConstantsGuard):
         self.assertNotEqual(after_disable, before)
         constants.RULES["bj_pays"] = 1.2
         self.assertNotEqual(settlement.paytable_hash(), after_disable)
+        constants.SIDE_BETS["hot3"]["enabled"] = enabled
+        constants.SIDE_BETS["perfect_pairs"]["enabled"] = perfect_pairs_enabled
 
 
 class StoreMigrationAndRecord(unittest.TestCase):

@@ -227,6 +227,8 @@ class CuttingCardPollCadence(unittest.TestCase):
     def test_pending_sighting_polls_every_cycle(self):
         eng = DetectionEngine(log=lambda *a, **k: None)
         eng.store = None
+        eng.capture.set_monitor(types.SimpleNamespace(x=0, y=0, width=200,
+                                                     height=200, is_primary=False))
         eng._dealer_rect = (0, 0, 100, 100)
         players = self._FakeModel([])
         rank = self._FakeModel([cc_pred()])

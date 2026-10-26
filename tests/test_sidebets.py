@@ -101,9 +101,11 @@ class EvaluateAll(unittest.TestCase):
         comp52 = from_counter_snapshot(snap, 8)
         from lib.logic.ev_engine import comp_from_per_rank
         comp10 = comp_from_per_rank(snap["per_rank"], 8)
-        results = sidebets.evaluate_all(comp52, comp10)
+        enabled = {key: dict(cfg, enabled=True) for key, cfg in constants.SIDE_BETS.items()}
+        results = sidebets.evaluate_all(comp52, comp10, side_bets=enabled)
         keys = {r["key"] for r in results}
-        self.assertEqual(keys, {"perfect_pairs", "21+3", "hot3", "bust_it"})
+        self.assertEqual(keys, {"perfect_pairs", "21+3", "hot3", "bust_it",
+                                "lucky_lucky", "lucky_ladies"})
         for r in results:
             self.assertIsNotNone(r["ev"], r["key"])
             self.assertLess(r["ev"], 0)  # near-full shoe: all -EV

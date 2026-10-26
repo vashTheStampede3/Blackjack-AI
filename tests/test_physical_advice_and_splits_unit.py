@@ -470,5 +470,3 @@ def test_corrected_physical_dealer_rank_refreshes_both_views_from_new_presentati
     assert after["players"][0]["hands"][0]["advice"]["action"] == "S"
     assert "Stand" in table.seats[0]["advice"].cget("text")
     assert any("Stand" in text for text in mini.canvas.texts())
-
-\n

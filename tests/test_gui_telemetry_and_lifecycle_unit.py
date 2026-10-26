@@ -1,6 +1,7 @@
 """HUD and lifecycle contracts exercised with fake windows and workers."""
 
 import threading
+import queue
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -318,3 +319,36 @@ def test_start_is_rejected_when_live_calibration_is_not_valid():
 
     controller.start.assert_not_called()
     gui._confirm_monitor.assert_called_once()
+
+
+def test_worker_ui_events_are_delivered_only_when_tk_poll_drains_queue():
+    called = []
+    gui = SimpleNamespace(_ui_events=queue.SimpleQueue(), _closing=False)
+    worker = threading.Thread(target=lambda: GUI._post_ui(gui, called.append, "ready"))
+    worker.start()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert called == []
+    GUI._drain_ui_events(gui)
+    assert called == ["ready"]
+
+
+def test_worker_ui_events_are_discarded_after_close():
+    called = []
+    gui = SimpleNamespace(_ui_events=queue.SimpleQueue(), _closing=True)
+    GUI._post_ui(gui, called.append, "late")
+    GUI._drain_ui_events(gui)
+    assert called == []
+
+
+def test_historical_index_correction_callbacks_are_disabled():
+    statuses = []
+    gui = SimpleNamespace(set_status=lambda message, error=False: statuses.append((message, error)))
+    assert GUI._on_card_click(gui, 0, 0) is False
+    assert GUI._on_dealer_click(gui) is False
+    assert GUI._on_dealer_extra_click(gui, 0) is False
+    assert GUI._on_split_click(gui, 0, False) is False
+    assert GUI._on_seat_name_click(gui, 0) is False
+    assert GUI._on_advice_click(gui, 0) is False
+    assert len(statuses) == 6
+    assert all(error for _message, error in statuses[:5])

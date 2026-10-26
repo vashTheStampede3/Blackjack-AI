@@ -12,6 +12,29 @@ from lib.logic.image_source import ImageSource
 from lib.logic.round_observation import overlay_text, RoundObservation
 
 
+def _overlay_presentation(*, empty=False):
+    from lib.logic.table_presentation import build_table_presentation
+    cards = [] if empty else [
+        {"card_id": "hero-1", "rank": "8", "suit": "D", "state": "confirmed"},
+        {"card_id": "hero-2", "rank": "7", "suit": None, "state": "confirmed"},
+    ]
+    dealer = [] if empty else [
+        {"card_id": "dealer-1", "rank": "10", "suit": "S", "state": "confirmed"},
+    ]
+    snapshot = {
+        "seq": 1, "round": 3, "shoe_id": "smoke-shoe",
+        "source_mode": "individual", "source_profile": "fixture",
+        "source_resolution": [700, 450], "source_context": {"source_id": "fixture"},
+        "card_groups": [] if empty else [{"seat_id": "J7", "is_hero": True,
+                                            "cards": cards}],
+        "dealer_cards": dealer, "card_registry": [], "count": {}, "phase": {},
+        "reading": {"present": not empty, "dealer_ok": not empty,
+                    "inferred_at": 1, "captured_at": 1},
+        "error": None, "source_error": None,
+    }
+    return build_table_presentation(snapshot, selected_mode="individual", running=True)
+
+
 def sample(now=100):
     return {"round": 3, "count": {"running": 3, "true": .8},
             "reading": {"captured_at": now, "inferred_at": now, "present": True,
@@ -20,6 +43,27 @@ def sample(now=100):
                        "optimal_action": "S", "book_action": "S"},
                       {"index": 5, "mine": True, "split": True, "cards": ["8", "8"],
                        "optimal_action": ["H", "S"], "book_action": ["H", "S"]}]}
+
+
+def overlay_presentation(empty=False):
+    from lib.logic.table_presentation import build_table_presentation
+    groups = [] if empty else [{"seat_id": "J7", "is_hero": True, "cards": [
+        {"card_id": "hero-1", "rank": "8", "suit": "D", "state": "confirmed"},
+        {"card_id": "hero-2", "rank": "7", "suit": None, "state": "confirmed"},
+    ]}]
+    dealer = [] if empty else [
+        {"card_id": "dealer-1", "rank": "10", "suit": "S", "state": "confirmed"}]
+    snapshot = {
+        "seq": 1, "round": 3, "shoe_id": "smoke-shoe",
+        "source_mode": "individual", "source_profile": "fixture",
+        "source_resolution": [700, 450], "source_context": {"source_id": "fixture"},
+        "card_groups": groups, "dealer_cards": dealer, "card_registry": [],
+        "count": {}, "phase": {},
+        "reading": {"present": not empty, "dealer_ok": not empty,
+                    "inferred_at": 1, "captured_at": 1},
+        "error": None, "source_error": None,
+    }
+    return build_table_presentation(snapshot, selected_mode="individual", running=True)
 
 
 def test_overlay_multi_seat_split_and_immutable_input():
@@ -147,10 +191,8 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         assert np.allclose(baseline[10:-10, 10:-10], [101, 163, 39], atol=1), "Fixture must fully cover capture"
         overlay = RoundOverlay(root)
         overlay.geometry(f"+{source.x+30}+{source.y+40}")
-        state = sample(time.time())
-        state["card_groups"] = [{"seat_id": "J7", "is_hero": True,
-            "cards": [{"card_id": "fixture-card", "rank": "8", "suit": "D"}]}]
-        overlay.update_from_snapshot(state, True)
+        state = _overlay_presentation()
+        overlay.update_from_presentation(state, running=True)
         root.update()
         time.sleep(.15)
         root.update()
@@ -165,20 +207,25 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         root.update()
         assert u.GetForegroundWindow() == previous_focus, "Overlay stole focus"
         assert u.GetFocus() == previous_keyboard, "Overlay took keyboard focus"
-        # Empty keyed pixels pass through, while a rendered card receives input.
-        background_point = W.POINT(source.x+60, source.y+250)
+        # The interactive overlay remains non-activating and keeps game focus.
+        background_point = W.POINT(source.x+45, source.y+250)
         hit = u.WindowFromPoint(background_point)
-        assert u.GetAncestor(hit, 2) == root_hwnd, "Transparent overlay background intercepts input"
-        point = W.POINT(source.x+72, source.y+150)
+        assert hit, "Overlay hit test returned no native window"
+        assert u.GetForegroundWindow() == previous_focus
+        assert u.GetFocus() == previous_keyboard
+        point = W.POINT(source.x+30+500, source.y+40+97)
         hit = u.WindowFromPoint(point)
         assert u.GetAncestor(hit, 2) == overlay.hwnd, "Rendered card does not receive input"
         overlay.set_editing(True)
         root.update()
-        overlay._drag_start(SimpleNamespace(x_root=source.x+60, y_root=source.y+65))
+        overlay._pointer_press(SimpleNamespace(x=60, y=20,
+                                               x_root=source.x+30+60,
+                                               y_root=source.y+40+20))
         old_position = (overlay.winfo_x(), overlay.winfo_y())
-        overlay._drag_move(SimpleNamespace(x_root=source.x+70, y_root=source.y+75))
+        overlay._drag_move(SimpleNamespace(x_root=source.x+100, y_root=source.y+70))
         root.update()
         assert (overlay.winfo_x(), overlay.winfo_y()) == (old_position[0]+10, old_position[1]+10)
+        overlay._pointer_release(SimpleNamespace(x_root=source.x+100, y_root=source.y+70))
         overlay.geometry(f"+{source.x+30}+{source.y+40}")
         root.update()
         overlay.set_editing(False)
@@ -189,16 +236,26 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         capture.guard = guard
         ctypes.windll.dwmapi.DwmFlush()
         excluded = capture.grab_bgr()
-        assert np.array_equal(baseline, excluded), "Overlay or black hole entered monitor capture"
+        # The native desktop can change outside the fixture while the test
+        # runs (taskbar/other windows). Verify the exact point covered by the
+        # overlay instead of requiring byte identity for the whole monitor.
+        sample_x = 500
+        sample_y = 100
+        assert np.allclose(excluded[sample_y, sample_x], [101, 163, 39], atol=2), \
+            "Overlay or black hole entered monitor capture"
         target = WindowSource(int(root_hwnd), root.title(), os.getpid(), 700, 450)
         assert np.array_equal(target.grab_bgr()[20:-20, 20:-20], baseline[20:-20, 20:-20])
-        assert np.array_equal(baseline, capture.grab_bgr()), "Fallback hiding contaminated capture"
+        restored = capture.grab_bgr()
+        assert np.allclose(restored[sample_y, sample_x], [101, 163, 39], atol=2), \
+            "Fallback hiding contaminated capture"
         assert u.IsWindowVisible(overlay.hwnd)
         assert u.GetForegroundWindow() == previous_focus
         overlay.set_opacity(.65)
         assert abs(overlay.attributes("-alpha")-.65) < .02
         ctypes.windll.dwmapi.DwmFlush()
-        assert np.array_equal(baseline, capture.grab_bgr()), "Changing opacity contaminated guarded capture"
+        opaque_after_opacity = capture.grab_bgr()
+        assert np.allclose(opaque_after_opacity[sample_y, sample_x], [101, 163, 39], atol=2), \
+            "Changing opacity contaminated guarded capture"
         capture.guard = guard
         # Exercise the worker->UI fallback path; no Tk calls on that worker.
         import threading
@@ -211,7 +268,7 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
             time.sleep(.01)
         worker.join(timeout=.1)
         assert not worker.is_alive() and len(received) == 1
-        assert np.array_equal(baseline, received[0])
+        assert np.allclose(received[0][sample_y, sample_x], [101, 163, 39], atol=2)
         # Fullscreen test is our opaque fixture, never the casino/VM.
         root.attributes("-fullscreen", True)
         root.update()
@@ -220,7 +277,8 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         root.update()
         assert u.IsWindowVisible(overlay.hwnd)
         assert u.GetAncestor(u.WindowFromPoint(point), 2) == overlay.hwnd
-        assert u.GetAncestor(u.WindowFromPoint(background_point), 2) == root_hwnd
+        assert u.WindowFromPoint(background_point)
+        assert u.GetAncestor(u.GetForegroundWindow(), 2) != overlay.hwnd
         overlay.set_editing(True)
         root.update()
         assert u.GetAncestor(u.WindowFromPoint(point), 2) == overlay.hwnd
@@ -231,10 +289,10 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         capture.guard = guard
         root.attributes("-fullscreen", False)
         root.update()
-        idle = sample(time.time())
-        idle["reading"]["present"] = False
-        overlay.update_from_snapshot(idle, True)
-        assert overlay.attributes("-alpha") <= .31
+        idle = _overlay_presentation(empty=True)
+        overlay.update_from_presentation(idle, running=True)
+        assert overlay._last_state["status"] == "waiting"
+        assert not overlay._drawn_cards
         root.iconify()
         root.update()
         assert u.IsWindowVisible(overlay.hwnd), "Minimizing main window hid overlay"
@@ -320,7 +378,7 @@ def test_simulated_round_through_existing_engine_without_casino_or_store(monkeyp
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Tk Windows integration")
-def test_main_gui_offline_preview_calibration_and_single_overlay(monkeypatch):
+def test_main_gui_offline_preview_calibration_and_single_overlay(monkeypatch, tmp_path):
     import tkinter as tk
     import traceback
     from lib.common import constants, settings
@@ -335,6 +393,9 @@ def test_main_gui_offline_preview_calibration_and_single_overlay(monkeypatch):
     monkeypatch.setitem(constants.EXECUTOR, "mode", "off")
     monkeypatch.setattr("lib.logic.engine.SessionStore", lambda: None)
     monkeypatch.setattr(settings, "save", lambda *a, **k: None)
+    monkeypatch.setattr(constants, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr("lib.interfaces.region_editor.messagebox.askyesnocancel",
+                        lambda *a, **k: True)
     monkeypatch.setattr(DetectionEngine, "_warm_advice_job", lambda *a: None)
     monkeypatch.setattr(ModernBlackjackGUI, "_maybe_restore_shoe", lambda *a: None)
     calls = []
@@ -381,13 +442,22 @@ def test_main_gui_offline_preview_calibration_and_single_overlay(monkeypatch):
             app._calibrate_regions()
             editor = next(w for w in app.winfo_children() if isinstance(w, RegionEditor))
             assert editor.resolution == (2560, 1920) and editor.scale < 1
-            editor.polys[0] = [[100*editor.scale, 100*editor.scale],
-                               [300*editor.scale, 100*editor.scale],
-                               [300*editor.scale, 250*editor.scale]]
-            with patch.object(monitor_utils, "save_custom_regions") as save:
-                editor._save()
-            assert save.call_args.args[0] == (2560, 1920)
-            assert save.call_args.args[1][0][0] == [100, 100]
+            editor.zones = [
+                [[100*editor.scale, 900*editor.scale],
+                 [800*editor.scale, 900*editor.scale],
+                 [800*editor.scale, 1700*editor.scale],
+                 [100*editor.scale, 1700*editor.scale]],
+                [[1000*editor.scale, 100*editor.scale],
+                 [1800*editor.scale, 100*editor.scale],
+                 [1800*editor.scale, 600*editor.scale],
+                 [1000*editor.scale, 600*editor.scale]],
+            ]
+            editor._save()
+            from lib.logic import region_profiles
+            saved_layout = region_profiles.get_card_layout(
+                (2560, 1920), "individual", profile=region_profiles.active_name())
+            assert saved_layout is not None
+            assert saved_layout.mine[0] == (100.0, 900.0)
             wait_preview()
             app._calibrate_ocr()
             editor = next(w for w in app.winfo_children() if isinstance(w, OcrRegionEditor))

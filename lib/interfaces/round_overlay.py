@@ -392,38 +392,20 @@ class MiniTableOverlay:
         state = presentation or {}
         blocked = state.get("status") in (
             "stopped", "error", "needs_calibration", "source_mismatch")
-        if not running or blocked or state.get("status") != "ready":
+        if (not running or blocked
+                or state.get("status") not in ("ready", "uncertain")):
             return "SIN CONSEJO"
         heroes = [p for p in state.get("players", []) if p.get("is_hero")]
         parts = []
         if (len(heroes) == 1 and not heroes[0].get("is_ambiguous")
-                and len(heroes[0].get("cards") or []) >= 2
-                and state.get("advice_available") is True):
+                and len(heroes[0].get("cards") or []) >= 2):
             hero = heroes[0]
-            hands = hero.get("hands")
-            action_names = {"H": "PEDIR", "S": "PLANTARSE", "D": "DOBLAR",
-                            "P": "SEPARAR", "R": "RENDIRSE", "D/H": "DOBLAR / PEDIR",
-                            "D/S": "DOBLAR / PLANTARSE", "P/H": "SEPARAR / PEDIR",
-                            "R/H": "RENDIRSE / PEDIR", "H/S": "PEDIR / PLANTARSE"}
-            if isinstance(hands, list) and hands:
-                labels = []
-                for index, hand in enumerate(hands):
-                    payload = hand.get("advice") if isinstance(hand, dict) else None
-                    code = payload.get("action") if isinstance(payload, dict) else None
-                    if (not isinstance(hand, dict) or hand.get("status") != "ready"
-                            or code not in action_names):
-                        labels = []
-                        break
-                    hand_tag = hand.get("hand")
-                    prefix = (f"M{hand_tag + 1}: " if type(hand_tag) is int else
-                              f"M{index + 1}: " if len(hands) > 1 else "")
-                    labels.append(prefix + action_names[code])
-                if labels:
-                    parts.append(" | ".join(labels))
-            else:
-                advice = hero.get("advice")
-                if isinstance(advice, str) and advice.strip():
-                    parts.append(advice.strip())
+            advice = hero.get("advice")
+            if (isinstance(advice, str) and advice.strip()
+                    and (state.get("advice_available") is True
+                         or isinstance(hero.get("hands"), list)
+                         or hero.get("advice_reason"))):
+                parts.append(advice.strip())
         insurance = state.get("insurance") or {}
         dealer_cards = (state.get("dealer") or {}).get("cards") or []
         upcard = dealer_cards[0] if dealer_cards else {}

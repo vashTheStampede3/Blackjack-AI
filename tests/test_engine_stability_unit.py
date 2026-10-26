@@ -12,6 +12,7 @@ from lib.logic.engine import DetectionEngine
 def _monitor_engine(monkeypatch, mode, layout=None, custom=None):
     e = object.__new__(DetectionEngine)
     e.capture = SimpleNamespace(resolution=(1280, 720), set_monitor=lambda m: None)
+    e.card_layout = None
     e.counter = SimpleNamespace(cards_seen=0, shoe_id="shoe-1")
     e._lock = threading.RLock()
     e._unread_positions = {}
@@ -33,19 +34,35 @@ def _monitor_engine(monkeypatch, mode, layout=None, custom=None):
 
 
 def test_selected_table_mode_does_not_require_seven_seat_regions(monkeypatch):
-    from lib.logic.card_layout import TABLE
-    layout = SimpleNamespace(dealer=((10, 10), (30, 30)), resolution=(1280, 720),
-                             mine=((1, 1), (2, 2)), table=((0, 0), (3, 3)))
-    e = _monitor_engine(monkeypatch, TABLE, layout=layout, custom=None)
+    from lib.logic.app_modes import MULTIPLAYER
+    from lib.logic.card_layout import CardLayout
+    layout = CardLayout.from_payload({
+        "mode": MULTIPLAYER, "resolution": [1280, 720],
+        "table": [[0, 0], [500, 0], [500, 500], [0, 500]],
+        "mine": [[10, 100], [100, 100], [100, 200], [10, 200]],
+        "dealer": [[600, 100], [700, 100], [700, 200], [600, 200]],
+    }, (1280, 720))
+    monkeypatch.setattr(engine_module.region_profiles, "layout_mode", lambda *a, **k: MULTIPLAYER)
+    monkeypatch.setattr(engine_module.region_profiles, "get_card_layout", lambda *a, **k: layout)
+    monkeypatch.setattr(engine_module.region_profiles, "active_name", lambda: "demo")
+    monkeypatch.setattr(engine_module.region_profiles, "get_source_context", lambda *a, **k: None)
+    from lib.logic.engine import DetectionEngine
+    class Provider:
+        backend_name = "test"
+        def players_model(self): return object()
+    e = DetectionEngine(provider=Provider(), persist=False, log=lambda *a, **k: None)
     e.set_monitor(SimpleNamespace(width=1280, height=720), profile="demo")
-    assert e.card_layout is layout
-    assert e._active_mode == TABLE
+    assert e.card_layout.mode == layout.mode
+    assert e.card_layout.to_payload() == layout.to_payload()
+    assert e._active_mode == MULTIPLAYER
+    for name in ("_pool", "_advice_pool", "_io_pool", "_predeal_pool"):
+        getattr(e, name).shutdown(wait=True, cancel_futures=True)
 
 
 def test_seven_seat_profile_without_regions_still_rejects(monkeypatch):
-    from lib.logic.card_layout import SEVEN_SEATS
-    e = _monitor_engine(monkeypatch, SEVEN_SEATS, custom=None)
-    with pytest.raises(ValueError, match="seven-seat layout"):
+    from lib.logic.app_modes import INDIVIDUAL
+    e = _monitor_engine(monkeypatch, INDIVIDUAL, custom=None)
+    with pytest.raises(ValueError, match="calibraci.n Individual"):
         e.set_monitor(SimpleNamespace(width=1280, height=720), profile="demo")
     assert not hasattr(e, "_active_profile")
 

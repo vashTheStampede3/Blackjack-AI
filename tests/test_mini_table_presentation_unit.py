@@ -170,7 +170,7 @@ def test_all_states_keep_window_visible_and_obey_shared_notice(mini, status):
     assert "SIN CONSEJO" in mini.canvas.texts()
 
 
-@pytest.mark.parametrize("status", ["stopped", "uncertain", "reading", "waiting", "error", "needs_calibration", "source_mismatch"])
+@pytest.mark.parametrize("status", ["stopped", "reading", "waiting", "error", "needs_calibration", "source_mismatch"])
 def test_nonready_reading_never_displays_even_explicit_old_advice(mini, status):
     p = presentation(status=status)
     p["advice_available"] = True

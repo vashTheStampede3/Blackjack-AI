@@ -39,6 +39,8 @@ class _FakeModel:
 def engine_with_models(player_preds=(), rank_preds=()):
     eng = DetectionEngine(log=lambda *a, **k: None)
     eng.store = None
+    eng.capture.set_monitor(types.SimpleNamespace(x=0, y=0, width=2560,
+                                                 height=1440, is_primary=False))
     eng.regions = []  # no seats: nothing in the dealer area double-routes
     eng._dealer_rect = (0, 0, 600, 300)
     players = _FakeModel(player_preds)

@@ -40,7 +40,8 @@ class Moments(unittest.TestCase):
             self.assertGreater(moments[1], 1.0)  # high-paytable variance
 
     def test_evaluate_all_carries_variance(self):
-        results = sidebets.evaluate_all(full_comp52(8), full_shoe(8))
+        enabled = {key: dict(cfg, enabled=True) for key, cfg in constants.SIDE_BETS.items()}
+        results = sidebets.evaluate_all(full_comp52(8), full_shoe(8), side_bets=enabled)
         for item in results:
             self.assertIn("variance", item)
             self.assertGreater(item["variance"], 0)
@@ -56,6 +57,15 @@ class KellyStake(unittest.TestCase):
 
 
 class Outcomes(unittest.TestCase):
+    def setUp(self):
+        self._enabled = {key: cfg["enabled"] for key, cfg in constants.SIDE_BETS.items()}
+        for cfg in constants.SIDE_BETS.values():
+            cfg["enabled"] = True
+
+    def tearDown(self):
+        for key, enabled in self._enabled.items():
+            constants.SIDE_BETS[key]["enabled"] = enabled
+
     def outcome(self, key, first_two, dealer=None, extras=()):
         return sidebet_outcomes.seat_outcomes(
             first_two, dealer, list(extras))[key]
@@ -116,6 +126,9 @@ class EngineSideBetSettlement(unittest.TestCase):
         self._betting = dict(constants.BETTING)
         self._stakes = {k: cfg.get("stake") for k, cfg in
                         constants.SIDE_BETS.items()}
+        self._enabled = {k: cfg.get("enabled") for k, cfg in constants.SIDE_BETS.items()}
+        constants.SIDE_BETS["perfect_pairs"]["enabled"] = True
+        constants.SIDE_BETS["bust_it"]["enabled"] = True
         constants.BETTING["auto_bankroll"] = 0
 
     def tearDown(self):
@@ -123,6 +136,7 @@ class EngineSideBetSettlement(unittest.TestCase):
         constants.BETTING.update(self._betting)
         for key, stake in self._stakes.items():
             constants.SIDE_BETS[key]["stake"] = stake
+            constants.SIDE_BETS[key]["enabled"] = self._enabled[key]
 
     def test_owned_seat_side_bet_books_into_pnl(self):
         eng = self.eng

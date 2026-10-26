@@ -9,7 +9,7 @@ from lib.common import constants
 from lib.interfaces.region_editor import RegionEditor
 from lib.interfaces.video_frame_picker import VideoFramePicker
 from lib.logic import region_profiles
-from lib.logic.card_layout import SEVEN_SEATS, SINGLE_SEAT, TABLE, MODE_LABELS
+from lib.logic.app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODES, APP_MODE_LABELS
 from lib.logic.video_source import VideoFrameSource
 from tests.test_video_source import video
 
@@ -46,22 +46,21 @@ def test_choose_draw_save_reload_exact_profile_and_frozen_frame(ui, video):
     assert not picker.seek(.5)
     assert np.array_equal(editor._frame_bgr, before)
     editor.draw_mode.set(True)
-    for seat in range(7):
-        editor.zone_combo.current(seat)
-        editor._press(SimpleNamespace(x=5 + seat * 40, y=90))
-        editor._release(SimpleNamespace(x=35 + seat * 40, y=150))
-    editor.zone_combo.current(7)
+    editor.zone_combo.current(0)
+    editor._press(SimpleNamespace(x=5, y=90))
+    editor._release(SimpleNamespace(x=35, y=150))
+    editor.zone_combo.current(1)
     editor._press(SimpleNamespace(x=100, y=20))
     editor._release(SimpleNamespace(x=190, y=60))
     editor._save()
     ui.update()
-    saved = region_profiles.get_regions((320, 180), profile="My layout")
-    assert len(saved["players"]) == 7
-    assert saved["players"][0] == [[5., 90.], [35., 90.], [35., 150.], [5., 150.], [5., 90.]]
-    assert saved["dealer"] == [100, 20, 190, 60]
-    assert saved["reference_source"]["frame_index"] == 2
-    assert saved["reference_source"]["resolution"] == [320, 180]
-    assert len(picker.canvas.find_withtag("regions")) == 15
+    saved = region_profiles.get_card_layout((320, 180), INDIVIDUAL, profile="My layout")
+    assert np.allclose(np.asarray(saved.mine).min(axis=0), [5, 90])
+    assert np.allclose(np.asarray(saved.mine).max(axis=0), [35, 150])
+    assert saved.table is None
+    assert saved.reference_source["frame_index"] == 2
+    assert saved.reference_source["resolution"] == [320, 180]
+    assert len(picker.canvas.find_withtag("regions")) == 4
     assert picker.source.frame_index == 2
     assert picker.seek(.5) and picker.source.frame_index == 5
     assert sorted(p.name for p in constants.OUTPUT_DIR.iterdir()) == ["region_profiles.json"]
@@ -89,7 +88,7 @@ def test_failed_save_keeps_editor_open_and_does_not_announce_success(ui, video, 
     picker._edit_regions()
     ui.update()
     errors, saved = [], []
-    monkeypatch.setattr("lib.interfaces.region_editor.monitor_utils.save_custom_regions", lambda *a, **k: None)
+    monkeypatch.setattr(region_profiles, "set_card_layout", lambda *a, **k: None)
     monkeypatch.setattr("lib.interfaces.region_editor.messagebox.showerror", lambda *a, **k: errors.append(a))
     picker.editor.on_save = lambda *a: saved.append(True)
     picker.editor._save()
@@ -101,20 +100,25 @@ def test_scaled_editor_saves_native_coordinates_and_preserves_other_profile(ui):
     sentinel = {"players": [[[1, 1], [2, 1], [2, 2]]] * 7, "dealer": [1, 1, 2, 2]}
     region_profiles.set_regions((800, 450), sentinel, profile="Keep me")
     source = VideoFrameSource(np.zeros((900, 1600, 3), np.uint8), "sample.avi", 12, .4)
-    editor = RegionEditor(ui, source, profile="Large video")
+    editor = RegionEditor(ui, source, profile="Large video", mode=INDIVIDUAL)
     ui.update()
     assert editor.scale < 1
     editor.draw_mode.set(True)
     editor.zone_combo.current(0)
-    editor._press(SimpleNamespace(x=round(100*editor.scale), y=round(200*editor.scale)))
-    editor._release(SimpleNamespace(x=round(300*editor.scale), y=round(400*editor.scale)))
+    editor._press(SimpleNamespace(x=round(100*editor.scale), y=round(500*editor.scale)))
+    editor._release(SimpleNamespace(x=round(500*editor.scale), y=round(800*editor.scale)))
+    editor.zone_combo.current(1)
+    editor._press(SimpleNamespace(x=round(700*editor.scale), y=round(100*editor.scale)))
+    editor._release(SimpleNamespace(x=round(1000*editor.scale), y=round(300*editor.scale)))
     editor._save()
-    data = region_profiles.get_regions((1600, 900), profile="Large video")
-    points = np.array(data["players"][0])
-    assert np.allclose(points.min(axis=0), [100, 200], atol=2)
-    assert np.allclose(points.max(axis=0), [300, 400], atol=2)
+    data = region_profiles.get_card_layout((1600, 900), INDIVIDUAL, profile="Large video")
+    mine = np.array(data.mine)
+    assert np.allclose(mine.min(axis=0), [100, 500], atol=2)
+    assert np.allclose(mine.max(axis=0), [500, 800], atol=2)
+    assert np.allclose(np.asarray(data.dealer).min(axis=0), [700, 100], atol=2)
+    assert np.allclose(np.asarray(data.dealer).max(axis=0), [1000, 300], atol=2)
     assert region_profiles.get_regions((800, 450), profile="Keep me") == sentinel
-    assert region_profiles.get_regions((1280, 720), profile="Large video") is None
+    assert region_profiles.get_card_layout((1280, 720), INDIVIDUAL, profile="Large video") is None
 
 
 def draw_zone(editor, index, left, top, right, bottom):
@@ -124,40 +128,45 @@ def draw_zone(editor, index, left, top, right, bottom):
     editor._release(SimpleNamespace(x=right * editor.scale, y=bottom * editor.scale))
 
 
-@pytest.mark.parametrize("mode", [TABLE, SINGLE_SEAT])
-def test_new_modes_draw_save_reload_without_replacing_seven_seats(ui, video, mode):
+@pytest.mark.parametrize("mode", [MULTIPLAYER, INDIVIDUAL])
+def test_new_modes_draw_save_reload_without_replacing_seven_seats(ui, video, mode, monkeypatch):
     old = {"players": [[[1, 1], [2, 1], [2, 2]]] * 7, "dealer": [1, 1, 2, 2]}
     region_profiles.set_regions((320, 180), old, profile="Both modes")
+    monkeypatch.setattr("lib.interfaces.region_editor.messagebox.askyesnocancel",
+                        lambda *a, **k: True)
     picker = VideoFramePicker(ui, video_path=video, profile="Both modes")
-    picker.mode_var.set(MODE_LABELS[mode])
+    picker.mode_var.set(APP_MODE_LABELS[mode])
     picker._mode_changed()
     assert picker.seek(.2)
     picker._edit_regions()
     ui.update()
     editor = picker.editor
-    assert list(editor.zone_combo["values"]) == ["Mesa", "Mi asiento", "Crupier"]
-    draw_zone(editor, 0, 5, 5, 315, 175)
-    draw_zone(editor, 1, 20, 100, 100, 160)
-    draw_zone(editor, 2, 100, 20, 200, 60)
+    if mode == MULTIPLAYER:
+        assert list(editor.zone_combo["values"]) == ["Mesa general", "Mi mano", "Crupier"]
+        draw_zone(editor, 0, 5, 5, 315, 175)
+        draw_zone(editor, 1, 20, 100, 100, 160)
+        draw_zone(editor, 2, 100, 20, 200, 60)
+    else:
+        assert list(editor.zone_combo["values"]) == ["Mi mano", "Crupier"]
+        draw_zone(editor, 0, 20, 100, 100, 160)
+        draw_zone(editor, 1, 100, 20, 200, 60)
     assert not picker.seek(.4)
     editor._save()
     ui.update()
     saved = region_profiles.get_card_layout((320, 180), mode, profile="Both modes")
     assert saved.owner_at(50, 120) == "mine"
     assert saved.reference_source["frame_index"] == 2
-    assert len(picker.canvas.find_withtag("regions")) == 6
+    assert len(picker.canvas.find_withtag("regions")) == (6 if mode == MULTIPLAYER else 4)
     assert region_profiles.get_regions((320, 180), profile="Both modes") == old
     picker.close()
     picker = VideoFramePicker(ui, video_path=video, profile="Both modes")
-    assert picker.mode_var.get() == MODE_LABELS[mode]
-    picker.mode_var.set(MODE_LABELS[SEVEN_SEATS])
-    picker._mode_changed()
-    assert len(picker.canvas.find_withtag("regions")) == 15
+    assert picker.mode_var.get() == APP_MODE_LABELS[mode]
+    assert list(picker.mode_combo["values"]) == [APP_MODE_LABELS[m] for m in APP_MODES]
 
 
 def test_missing_invalid_zones_and_cancel_do_not_save(ui, video, monkeypatch):
     picker = VideoFramePicker(ui, video_path=video, profile="No defaults")
-    picker.mode_var.set(MODE_LABELS[TABLE])
+    picker.mode_var.set(APP_MODE_LABELS[MULTIPLAYER])
     picker._mode_changed()
     picker._edit_regions()
     editor = picker.editor
@@ -177,7 +186,7 @@ def test_missing_invalid_zones_and_cancel_do_not_save(ui, video, monkeypatch):
 
 def test_new_mode_adds_polygon_vertex_and_failed_save_stays_open(ui, video, monkeypatch):
     picker = VideoFramePicker(ui, video_path=video, profile="Polygon")
-    picker.mode_var.set(MODE_LABELS[TABLE])
+    picker.mode_var.set(APP_MODE_LABELS[MULTIPLAYER])
     picker._mode_changed()
     picker._edit_regions()
     editor = picker.editor
@@ -195,7 +204,7 @@ def test_new_mode_adds_polygon_vertex_and_failed_save_stays_open(ui, video, monk
 
 def test_polygon_vertices_survive_save_and_scaled_native_reload(ui):
     source = VideoFrameSource(np.zeros((900, 1600, 3), np.uint8), "large.avi", 0, 0.)
-    editor = RegionEditor(ui, source, profile="Polygon", mode=TABLE)
+    editor = RegionEditor(ui, source, profile="Polygon", mode=MULTIPLAYER)
     assert editor.scale < 1
     draw_zone(editor, 0, 10, 10, 1590, 890)
     draw_zone(editor, 1, 100, 500, 500, 800)
@@ -203,17 +212,17 @@ def test_polygon_vertices_survive_save_and_scaled_native_reload(ui):
     editor.zone_combo.current(0)
     editor._edit_vertex(SimpleNamespace(x=800 * editor.scale, y=10 * editor.scale))
     editor._save()
-    loaded = region_profiles.get_card_layout((1600, 900), TABLE, profile="Polygon")
+    loaded = region_profiles.get_card_layout((1600, 900), MULTIPLAYER, profile="Polygon")
     assert len(loaded.table) == 5
     assert np.allclose(loaded.table[1], [800, 10], atol=.2)
     assert loaded.owner_at(300, 700) == "mine"
     assert loaded.owner_at(800, 200) == "dealer"
-    assert region_profiles.get_card_layout((1280, 720), TABLE, profile="Polygon") is None
+    assert region_profiles.get_card_layout((1280, 720), MULTIPLAYER, profile="Polygon") is None
 
 
 def test_existing_valid_layout_survives_rejected_edit(ui, video, monkeypatch):
     picker = VideoFramePicker(ui, video_path=video, profile="Keep saved")
-    picker.mode_var.set(MODE_LABELS[TABLE])
+    picker.mode_var.set(APP_MODE_LABELS[MULTIPLAYER])
     picker._mode_changed()
     picker._edit_regions()
     editor = picker.editor
@@ -231,44 +240,58 @@ def test_existing_valid_layout_survives_rejected_edit(ui, video, monkeypatch):
     assert errors and editor.winfo_exists()
     assert region_profiles.store_path().read_bytes() == before
     assert not picker.open_video(video)  # source/mode cannot change under a frozen editor
-    picker.mode_var.set(MODE_LABELS[SINGLE_SEAT])
+    picker.mode_var.set(APP_MODE_LABELS[INDIVIDUAL])
     picker._mode_changed()
-    assert picker.mode_var.get() == MODE_LABELS[TABLE]
+    assert picker.mode_var.get() == APP_MODE_LABELS[MULTIPLAYER]
 
 
-def test_seven_seat_dealer_corners_remain_draggable(ui, video):
-    picker = VideoFramePicker(ui, video_path=video, profile="Legacy drag")
+def test_multiplayer_dealer_corners_remain_draggable(ui, video):
+    picker = VideoFramePicker(ui, video_path=video, profile="Dynamic drag")
+    picker.mode_var.set(APP_MODE_LABELS[MULTIPLAYER])
+    picker._mode_changed()
     picker._edit_regions()
     editor = picker.editor
-    draw_zone(editor, 7, 100, 20, 200, 60)
+    draw_zone(editor, 0, 5, 5, 315, 175)
+    draw_zone(editor, 1, 20, 100, 100, 160)
+    draw_zone(editor, 2, 100, 20, 200, 60)
+    editor.zone_combo.current(2)
     editor.draw_mode.set(False)
     editor._press(SimpleNamespace(x=200 * editor.scale, y=60 * editor.scale))
     editor._move(SimpleNamespace(x=220 * editor.scale, y=70 * editor.scale))
     editor._release(SimpleNamespace(x=220 * editor.scale, y=70 * editor.scale))
     editor._save()
-    assert region_profiles.get_regions((320, 180), profile="Legacy drag")["dealer"] == [100, 20, 220, 70]
+    layout = region_profiles.get_card_layout((320, 180), MULTIPLAYER,
+                                             profile="Dynamic drag")
+    assert np.allclose(np.asarray(layout.dealer).max(axis=0), [220, 70])
 
 
-@pytest.mark.parametrize("mode", [TABLE, SINGLE_SEAT])
+@pytest.mark.parametrize("mode", [MULTIPLAYER, INDIVIDUAL])
 def test_viewer_saves_external_dealer_graphic_without_changing_table(ui, video, monkeypatch, mode):
     errors = []
     monkeypatch.setattr("lib.interfaces.region_editor.messagebox.showerror", lambda *a, **k: errors.append(a))
     picker = VideoFramePicker(ui, video_path=video, profile="Dealer graphic")
-    picker.mode_var.set(MODE_LABELS[mode])
+    picker.mode_var.set(APP_MODE_LABELS[mode])
     picker._mode_changed()
     picker._edit_regions()
     editor = picker.editor
-    draw_zone(editor, 0, 5, 85, 315, 175)
-    draw_zone(editor, 1, 20, 100, 100, 160)
-    draw_zone(editor, 2, 200, 10, 300, 60)
+    if mode == MULTIPLAYER:
+        draw_zone(editor, 0, 5, 85, 315, 175)
+        draw_zone(editor, 1, 20, 100, 100, 160)
+        draw_zone(editor, 2, 200, 10, 300, 60)
+    else:
+        draw_zone(editor, 0, 20, 100, 100, 160)
+        draw_zone(editor, 1, 200, 10, 300, 60)
     editor._save()
     assert not errors
     ui.update()
     loaded = region_profiles.get_card_layout((320, 180), mode, profile="Dealer graphic")
     assert loaded.owner_at(250, 35) == "dealer"
-    assert min(y for x, y in loaded.table) == 85
-    assert len(picker.canvas.find_withtag("regions")) == 6
+    if mode == MULTIPLAYER:
+        assert min(y for x, y in loaded.table) == 85
+    else:
+        assert loaded.table is None
+    assert len(picker.canvas.find_withtag("regions")) == (6 if mode == MULTIPLAYER else 4)
     picker.close()
     picker = VideoFramePicker(ui, video_path=video, profile="Dealer graphic")
-    assert picker.mode_var.get() == MODE_LABELS[mode]
-    assert len(picker.canvas.find_withtag("regions")) == 6
+    assert picker.mode_var.get() == APP_MODE_LABELS[mode]
+    assert len(picker.canvas.find_withtag("regions")) == (6 if mode == MULTIPLAYER else 4)
