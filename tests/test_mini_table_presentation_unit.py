@@ -218,11 +218,13 @@ def test_stale_selections_and_identity_lookup_follow_new_context(mini, change):
 
 def test_metrics_accept_only_aggregate_scalars_and_never_drive_reading_state(mini):
     metrics = {"running": 4, "true": 1.5, "count_uncertain": True,
+               "decks_remaining": 5.5, "cards_seen": 24,
                "seats": [{"advice": "Double"}], "card_groups": [card("bad")],
                "dealer_cards": [card("fake")], "advice": "Double"}
     before = deepcopy(metrics)
     mini.update_from_presentation(presentation(), metrics=metrics)
-    assert mini._metrics == {"running": 4, "true": 1.5, "count_uncertain": True}
+    assert mini._metrics == {"running": 4, "true": 1.5, "count_uncertain": True,
+                             "decks_remaining": 5.5, "cards_seen": 24}
     assert mini._last_state["status"] == "ready"
     assert identities(mini) == ["d1", "h1", "h2"]
     assert "Double" not in mini.canvas.texts() and metrics == before

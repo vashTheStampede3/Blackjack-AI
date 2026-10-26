@@ -63,6 +63,10 @@ class TableView:
         self.dealer_title = self.dealer["name"]
         self.status_label = self._label("")
         self.mode_label = self._label("")
+        self.telemetry_label = self._label("", constants.FONT_SMALL)
+        self.telemetry_label.config(bg="#111827", fg="#F8FAFC", padx=8, pady=3)
+        self.advice_label = self._label("", constants.FONT_BODY_BOLD)
+        self.advice_label.config(bg="#111827", fg="#CBD5E1", padx=8, pady=2)
         self.seats = []
         self._make_seats()
         self.canvas.bind("<Configure>", self._on_resize)
@@ -71,6 +75,34 @@ class TableView:
     def _label(self, text, font=None):
         return tk.Label(self.canvas, text=text, font=font or constants.FONT_BODY_BOLD,
                         bg=C["bg_canvas"], fg=C["text_on_felt"], cursor="")
+
+    def update_telemetry(self, data):
+        """Render a compact, detached HUD payload supplied by the GUI."""
+        data = data if isinstance(data, dict) else {}
+        running = data.get("running")
+        true_count = data.get("true")
+        decks = data.get("decks_remaining")
+        seen = data.get("cards_seen")
+        round_id = data.get("round_id")
+        mode = {"individual": "Individual", "multiplayer": "Multijugador"}.get(
+            data.get("mode"), "Sin calibrar")
+        state = data.get("running_state") or "Detenido"
+        rc_text = f"{running:+d}" if type(running) is int else "—"
+        tc_text = f"{true_count:+.1f}" if type(true_count) in (int, float) else "—"
+        decks_text = f"{decks:.1f}" if type(decks) in (int, float) else "—"
+        seen_text = str(seen) if type(seen) is int else "—"
+        round_text = f"Ronda #{round_id}" if type(round_id) is int else "Ronda —"
+        uncertain = bool(data.get("count_uncertain") or data.get("shoe_uncertainty"))
+        line = (f"RC: {rc_text}  |  TC: {tc_text}  |  Mazo: {decks_text} restante(s)  |  "
+                f"Vistas: {seen_text}  |  {round_text}  |  {mode}  |  {state}")
+        if uncertain:
+            line += "  |  ⚠ Lectura dudosa"
+        self.telemetry_label.config(text=line, fg="#FDE68A" if uncertain else "#F8FAFC")
+        advice = data.get("advice") or "SIN CONSEJO"
+        insurance = data.get("insurance")
+        if insurance:
+            advice = f"{advice}  |  {insurance}"
+        self.advice_label.config(text=advice, fg=data.get("advice_color") or "#CBD5E1")
 
     def _new_hand(self, title):
         return {"id": "hero" if title == "Yo" else "dealer", "cards": [],
@@ -303,10 +335,14 @@ class TableView:
         if self._preview_item is not None:
             self.canvas.coords(self._preview_item, w / 2, h / 2)
             return
-        self._place_hand(self.dealer, w / 2, scaling.px(52), dealer=True)
+        self.telemetry_label.config(wraplength=max(1, w - scaling.px(24)))
+        self.telemetry_label.place(x=w / 2, y=scaling.px(2), anchor="n")
+        self.advice_label.config(wraplength=max(1, w - scaling.px(24)))
+        self.advice_label.place(x=w / 2, y=scaling.px(27), anchor="n")
+        self._place_hand(self.dealer, w / 2, scaling.px(82), dealer=True)
         if self.seats:
             cw, ch = scaling.size(constants.CARD_RENDER_SIZE)
-            min_top = scaling.px(52) + scaling.size(constants.DEALER_CARD_RENDER_SIZE)[1] + scaling.px(80)
+            min_top = scaling.px(82) + scaling.size(constants.DEALER_CARD_RENDER_SIZE)[1] + scaling.px(50)
             count = len(self.seats)
             if count <= 3:
                 positions = seat_positions(w, h, count, cw, ch)
@@ -415,6 +451,8 @@ class TableView:
                 widget.place_forget()
         self.status_label.place_forget()
         self.mode_label.place_forget()
+        self.telemetry_label.place_forget()
+        self.advice_label.place_forget()
         self._preview_item = self.canvas.create_image(w / 2, h / 2, image=self._preview_photo)
         self._preview_close_btn = tk.Frame(self.canvas, bg=C["bg_secondary"])
         for text, command in (actions or []):

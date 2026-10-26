@@ -24,3 +24,19 @@
 - Commit de Iteracion 3: `feat(multiplayer): dynamic 0-7 player layout and incremental rendering across views` (incluye esta actualizacion de progreso).
 - Estado al cierre: Iteracion 3/5 validada y preparada para publicacion fast-forward. Commit base publicado antes de esta iteracion: `c7ef9a4d47178d023252ea6b323e97d9849ff82f`.
 - Proxima accion: Iteracion 4/5 segun su alcance.
+
+## Iteración 4/5 — HUD de telemetría y ciclo de vida
+
+- Fecha: 2026-10-26
+- Estado: implementada y validada localmente; pendiente de commit/publicación.
+- Objetivo: exponer conteo, progreso del mazo, estado, contexto y consejo en TableView y Mini Mesa; impedir inicios sin calibración vigente y endurecer transiciones/cierre del motor.
+- Producción modificada: `lib/interfaces/modern_gui.py`, `lib/interfaces/table_view.py`, `lib/interfaces/round_overlay.py`, `lib/logic/region_profiles.py`.
+- Pruebas: añadido `tests/test_gui_telemetry_and_lifecycle_unit.py`; ajustados tests unitarios de contrato vigente en `tests/test_individual_table_view_unit.py`, `tests/test_live_profile_gate.py` y `tests/test_mini_table_presentation_unit.py`.
+- Comportamiento: ambas vistas presentan RC/TC, cartas vistas, mazos restantes, incertidumbre, ronda, modo, motor y consejo solo cuando el estado está listo y la mano tiene cartas suficientes. La Mini Mesa recibe métricas escalares agregadas y extrae el consejo exclusivamente de TablePresentation. Los avisos de inicio identifican las regiones faltantes; cambios de contexto limpian cartas e invalidan diálogos; el cierre espera la salida limpia del worker y captura errores de fuente/arranque.
+- Launcher: verificado `C:\Users\PC\OneDrive\Desktop\Blackjack AI.lnk`; apunta a `.venv312\Scripts\pythonw.exe`, al `scripts\launch_blackjack.py` del repositorio y tiene el repositorio como directorio de trabajo. `python.exe`, `pythonw.exe` y `main.py` existen.
+- Pruebas finales: suite obligatoria — 303 aprobadas y 4 subtests aprobados; suite relacionada HUD/mesa — 218 aprobadas. No hubo skips ni exclusiones. Una ejecución intermedia detectó consejo residual en estados no listos; se endureció la presentación y se corrigió el fixture para representar una mano de dos cartas y un As confirmado. Ambas suites finales quedaron verdes.
+- `git diff --check`: pasó al interpretar CR como fin de línea (`core.whitespace=cr-at-eol`); Git advierte normalización CRLF en archivos editados. No se realizaron pruebas visuales, GUI, integración, E2E ni modelos.
+- Trabajo paralelo: el subagente creó únicamente `tests/test_gui_telemetry_and_lifecycle_unit.py`, en paralelo con los cambios del agente principal. Se solicitó `gpt-6-luna` / `medium`; la herramienta no confirmó de forma independiente la asignación real.
+- Errores conocidos: no se detectaron fallos en las ejecuciones finales. No se afirmó validación visual.
+- Último commit base: `5b80fd9c9337989e4fe1f393429bae1e243bae39` (`feat(multiplayer): dynamic 0-7 player layout and incremental rendering across views`).
+- Próxima acción: revisar el diff, publicar la Iteración 4 en `counter-vision` y luego continuar con la Iteración 5.

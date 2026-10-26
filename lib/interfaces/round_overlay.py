@@ -155,6 +155,12 @@ class MiniTableOverlay:
             aggregates["true"] = metrics["true"]
         if type(metrics.get("count_uncertain")) is bool:
             aggregates["count_uncertain"] = metrics["count_uncertain"]
+        if type(metrics.get("shoe_uncertainty")) is bool:
+            aggregates["shoe_uncertainty"] = metrics["shoe_uncertainty"]
+        if type(metrics.get("cards_seen")) is int and metrics["cards_seen"] >= 0:
+            aggregates["cards_seen"] = metrics["cards_seen"]
+        if type(metrics.get("decks_remaining")) in (int, float):
+            aggregates["decks_remaining"] = metrics["decks_remaining"]
         changed = (state != self._last_state or bool(running) != self._running
                    or aggregates != self._metrics)
         # No selection survives while editing is disabled, including stale
@@ -200,12 +206,27 @@ class MiniTableOverlay:
         rc, tc = metrics.get("running"), metrics.get("true")
         rc_text = f"{rc:+d}" if rc is not None else "—"
         tc_text = f"{tc:+.1f}" if tc is not None else "—"
-        marker = (" · INCIERTO" if metrics.get("count_uncertain")
-                  or state.get("count_has_pending_uncertainty") else "")
-        self._rect(8, 8, WIDTH - 8, 48, "#111827", "#64748B")
-        self._text(22, 27, f"RC {rc_text}   TC {tc_text}{marker}", "#F8FAFC", 12, "w")
-        self._text(WIDTH - 180, 28, self._advice_text(state, self._running), "#F8FAFC", 9, "center")
-        self._rect(8, 54, WIDTH - 8, 232, "#0F172A", "#334155")
+        decks, seen = metrics.get("decks_remaining"), metrics.get("cards_seen")
+        decks_text = f"{decks:.1f}" if type(decks) in (int, float) else "—"
+        seen_text = str(seen) if type(seen) is int else "—"
+        uncertain = bool(metrics.get("count_uncertain")
+                         or metrics.get("shoe_uncertainty")
+                         or state.get("count_has_pending_uncertainty"))
+        marker = " · ⚠ Lectura dudosa" if uncertain else ""
+        mode = "Individual" if state.get("mode") == "individual" else (
+            "Multijugador" if state.get("mode") == "multiplayer" else "Sin calibrar")
+        round_id = state.get("round_id")
+        round_text = f"Ronda #{round_id}" if type(round_id) is int else "Ronda —"
+        motor_state = "Activo" if self._running else "Detenido"
+        self._rect(8, 8, WIDTH - 8, 52, "#111827", "#64748B")
+        self._text(18, 18,
+                   f"RC: {rc_text}  |  TC: {tc_text}  |  Mazo: {decks_text}  |  Vistas: {seen_text}",
+                   "#F8FAFC", 9, "w")
+        self._text(18, 38, f"{round_text}  |  {mode}  |  {motor_state}{marker}",
+                   "#FDE68A" if uncertain else "#CBD5E1", 8, "w")
+        self._text(WIDTH - 175, 28, self._advice_text(state, self._running),
+                   "#F8FAFC", 8, "center")
+        self._rect(8, 58, WIDTH - 8, 232, "#0F172A", "#334155")
         self._text(WIDTH / 2, 65, "Crupier", "#BFDBFE", 9, "center")
         dealer_cards = [] if blocked else (state.get("dealer") or {}).get("cards", [])
         self._draw_hand(dealer_cards, WIDTH / 2, 80)
@@ -371,28 +392,47 @@ class MiniTableOverlay:
         state = presentation or {}
         blocked = state.get("status") in (
             "stopped", "error", "needs_calibration", "source_mismatch")
-        if not running or blocked:
+        if not running or blocked or state.get("status") != "ready":
             return "SIN CONSEJO"
         heroes = [p for p in state.get("players", []) if p.get("is_hero")]
         parts = []
         if (len(heroes) == 1 and not heroes[0].get("is_ambiguous")
-                and heroes[0].get("cards")
-                and (state.get("advice_available") is True
-                     or isinstance(heroes[0].get("hands"), list)
-                     or heroes[0].get("advice_reason"))):
+                and len(heroes[0].get("cards") or []) >= 2
+                and state.get("advice_available") is True):
             hero = heroes[0]
-            # Non-ready table status can reflect another player's uncertain
-            # card. In that case, only a hands list attached by
-            # TablePresentation proves this advice is bound to our group.
-            linked = (state.get("status") == "ready"
-                      or isinstance(hero.get("hands"), list)
-                      or hero.get("advice_reason"))
-            advice = hero.get("advice")
-            if linked and isinstance(advice, str) and advice.strip():
-                parts.append(advice.strip())
+            hands = hero.get("hands")
+            action_names = {"H": "PEDIR", "S": "PLANTARSE", "D": "DOBLAR",
+                            "P": "SEPARAR", "R": "RENDIRSE", "D/H": "DOBLAR / PEDIR",
+                            "D/S": "DOBLAR / PLANTARSE", "P/H": "SEPARAR / PEDIR",
+                            "R/H": "RENDIRSE / PEDIR", "H/S": "PEDIR / PLANTARSE"}
+            if isinstance(hands, list) and hands:
+                labels = []
+                for index, hand in enumerate(hands):
+                    payload = hand.get("advice") if isinstance(hand, dict) else None
+                    code = payload.get("action") if isinstance(payload, dict) else None
+                    if (not isinstance(hand, dict) or hand.get("status") != "ready"
+                            or code not in action_names):
+                        labels = []
+                        break
+                    hand_tag = hand.get("hand")
+                    prefix = (f"M{hand_tag + 1}: " if type(hand_tag) is int else
+                              f"M{index + 1}: " if len(hands) > 1 else "")
+                    labels.append(prefix + action_names[code])
+                if labels:
+                    parts.append(" | ".join(labels))
+            else:
+                advice = hero.get("advice")
+                if isinstance(advice, str) and advice.strip():
+                    parts.append(advice.strip())
         insurance = state.get("insurance") or {}
-        if insurance.get("status") == "ready" and insurance.get("text"):
-            parts.append(insurance["text"])
+        dealer_cards = (state.get("dealer") or {}).get("cards") or []
+        upcard = dealer_cards[0] if dealer_cards else {}
+        if (upcard.get("state") == "confirmed" and upcard.get("rank") in ("Ace", "A")
+                and insurance.get("status") == "ready"):
+            if type(insurance.get("take")) is bool:
+                parts.append("SEGURO: SÍ" if insurance["take"] else "SEGURO: NO")
+            elif insurance.get("text"):
+                parts.append(str(insurance["text"]))
         return " · ".join(parts) if parts else "SIN CONSEJO"
 
     def _drag_move(self, event):

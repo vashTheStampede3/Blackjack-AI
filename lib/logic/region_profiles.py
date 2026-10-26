@@ -32,7 +32,7 @@ import threading
 from datetime import datetime
 
 from ..common import constants
-from .app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODES, normalize_mode
+from .app_modes import INDIVIDUAL, MULTIPLAYER, APP_MODES, normalize_mode, zones_for_mode
 from .card_layout import SEVEN_SEATS, CardLayout
 
 DEFAULT_NAME = "Default"
@@ -362,6 +362,22 @@ def has_card_layout(resolution, mode, profile=None) -> bool:
         return get_card_layout(resolution, mode, profile=profile) is not None
     except ValueError:
         return False
+
+
+def missing_card_regions(resolution, mode, profile=None):
+    """Return the exact required zones absent from this saved mode layout.
+
+    A missing layout reports every required zone. A present but malformed
+    polygon is validated by ``get_card_layout`` and retains its specific error.
+    """
+    mode = normalize_mode(mode)
+    saved = _layout_modes(resolution, profile)
+    legacy = "single_seat" if mode == INDIVIDUAL else "table"
+    payload = saved.get(mode, saved.get(legacy))
+    if not isinstance(payload, dict):
+        return tuple(zones_for_mode(mode))
+    return tuple(zone for zone in zones_for_mode(mode)
+                 if zone not in payload or not payload.get(zone))
 
 
 def _valid_card_resolution(key, modes):

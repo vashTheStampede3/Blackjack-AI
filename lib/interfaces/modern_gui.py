@@ -795,7 +795,8 @@ class ModernBlackjackGUI(tk.Tk):
     # --------------------------------------------------------------- actions
 
     def _configuration_busy(self):
-        return bool(getattr(self.controller, "configuration_busy", self.controller.running))
+        return bool(getattr(self.controller, "configuration_busy", False)
+                    or getattr(self.controller, "running", False))
 
     def _selected_app_mode(self) -> str:
         label = self.mode_var.get()
@@ -829,6 +830,7 @@ class ModernBlackjackGUI(tk.Tk):
             self.mode_var.set(APP_MODE_LABELS[previous])
             self.set_status(str(exc), error=True)
             return
+        ModernBlackjackGUI._clear_visual_context(self)
         self._app_mode = mode
         self._source_configured = False
         self.start_btn.config(state="disabled")
@@ -864,21 +866,24 @@ class ModernBlackjackGUI(tk.Tk):
             self.source_kind.set(getattr(self, "_source_kind_selection", self.source_kind.get()))
             self.ui_actions.blocked("Detené la detección antes de cambiar la fuente.")
             return
+        ModernBlackjackGUI._clear_visual_context(self)
         self._source_kind_selection = self.source_kind.get()
         self._source_configured = False
-        if self.source_kind.get() == "Window":
-            from ..logic.window_capture import list_windows
-            try:
+        try:
+            if self.source_kind.get() == "Window":
+                from ..logic.window_capture import list_windows
                 self._monitors = list_windows()
-            except Exception as exc:
-                self.set_status(f"Cannot list windows: {exc}", error=True)
-                return
-            from ..logic.window_capture import window_display_labels
-            labels = window_display_labels(self._monitors)
-        else:
-            self._monitors = list(screeninfo.get_monitors())
-            labels = [f"Monitor {i + 1}: {m.width}x{m.height}"
-                      for i, m in enumerate(self._monitors)]
+                from ..logic.window_capture import window_display_labels
+                labels = window_display_labels(self._monitors)
+            else:
+                self._monitors = list(screeninfo.get_monitors())
+                labels = [f"Monitor {i + 1}: {m.width}x{m.height}"
+                          for i, m in enumerate(self._monitors)]
+        except Exception as exc:
+            self.log_manager.exception(f"No se pudo enumerar la fuente de captura: {exc}")
+            self.set_status(f"No se pudo enumerar la fuente de captura: {exc}", error=True)
+            self.monitor = None
+            return
         self.monitor_combo["values"] = labels
         self.monitor_combo.set("")
         self.monitor = None
@@ -948,15 +953,26 @@ class ModernBlackjackGUI(tk.Tk):
             self._sync_mode_context(profile, selected)
             selected_mode = self._selected_app_mode()
             resolution = (selected.width, selected.height)
+            descriptor = source_descriptor(selected, self.source_kind.get())
+            source_context = (profile, selected_mode, resolution,
+                              tuple(sorted(descriptor.items())))
+            previous_source_context = getattr(self, "_applied_source_context", None)
+            if (previous_source_context is not None
+                    and previous_source_context != source_context):
+                ModernBlackjackGUI._clear_visual_context(self)
             available = region_profiles.has_card_layout(resolution, selected_mode, profile=profile)
             if not available:
                 # Explicit load distinguishes corrupt geometry from missing geometry.
                 region_profiles.get_card_layout(resolution, selected_mode, profile=profile)
-                raise ValueError(f'El perfil "{profile}" necesita calibraci\u00f3n '
-                                 f'{APP_MODE_LABELS[selected_mode]} para {resolution[0]}x{resolution[1]}. '
+                missing = region_profiles.missing_card_regions(
+                    resolution, selected_mode, profile=profile)
+                zone_names = {"mine": "Mi asiento", "dealer": "Crupier", "table": "Mesa"}
+                missing_text = ", ".join(zone_names.get(zone, zone) for zone in missing)
+                raise ValueError(f'El perfil "{profile}" necesita calibración de '
+                                 f'{missing_text} ({APP_MODE_LABELS[selected_mode]}) '
+                                 f'para {resolution[0]}x{resolution[1]}. '
                                  'Us\u00e1 Calibrate Regions.')
             reference = region_profiles.get_source_context(resolution, profile=profile)
-            descriptor = source_descriptor(selected, self.source_kind.get())
             ambiguous = (reference and self.source_kind.get() == "Window"
                          and sum(source_descriptor(candidate, "Window") == descriptor
                                  for candidate in self._monitors) > 1)
@@ -1028,6 +1044,7 @@ class ModernBlackjackGUI(tk.Tk):
                            if self.source_kind.get() == "Window" else ""))
         self._source_configured = True
         self._applied_mode_context = (profile, selected_mode, resolution)
+        self._applied_source_context = source_context
         self.ui_actions.record("SOURCE_CONFIGURED", "Fuente y perfil aplicados al motor.",
                                details=self.ui_actions.context())
         return True
@@ -1063,6 +1080,7 @@ class ModernBlackjackGUI(tk.Tk):
         name = self._profile_by_label.get(self.profile_var.get())
         if not name:
             return
+        ModernBlackjackGUI._clear_visual_context(self)
         try:
             if self.monitor is not None:
                 mode = region_profiles.layout_mode((self.monitor.width, self.monitor.height), profile=name)
@@ -1087,7 +1105,10 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _toggle_detection(self):
         if self.controller.running:
+            ModernBlackjackGUI._invalidate_card_picker(self)
             self.controller.stop()
+            self._last_table_signature = None
+            ModernBlackjackGUI._render_table(self, None)
             # No fresh snapshots while stopped — acting on a stale phase
             # would be a blind click.
             self.executor.disarm("detection stopped")
@@ -1106,16 +1127,32 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status("Esper\u00e1 a que termine el trabajador.", error=True)
             return
         if self.monitor is None:
-            messagebox.showerror("No monitor", "Confirm a monitor first.")
+            self.set_status("Seleccioná y confirmá una fuente de captura antes de iniciar.", error=True)
             return
         if not self._source_configured:
-            self.ui_actions.blocked("La fuente tiene una calibración pendiente. Usá Calibrate Regions antes de iniciar.")
-            return
-        if not self._confirm_monitor():
+            confirm_monitor = getattr(self, "_confirm_monitor", None)
+            if not callable(confirm_monitor):
+                self.ui_actions.blocked("La fuente necesita una calibración válida antes de iniciar.")
+                return
+            if not confirm_monitor():
+                return
+        elif not self._confirm_monitor():
             return
         if self.round_enabled.get():
             self._toggle_round_overlay()
-        self.controller.start()
+        try:
+            started = self.controller.start()
+        except Exception as exc:
+            self.log_manager.exception(f"No se pudo iniciar la detección: {exc}")
+            self._set_configuration_controls(False)
+            self.start_btn.config(text="▶  Start Detection", bg=C["success"], state="normal")
+            self.start_btn._base_bg = C["success"]
+            self.set_status(f"No se pudo iniciar la detección: {exc}", error=True)
+            return
+        if not started:
+            self.set_status("La detección ya está iniciando o activa.", error=True)
+            ModernBlackjackGUI._sync_start_button(self)
+            return
         self._configuration_was_busy = True
         self._set_configuration_controls(True)
         self.start_btn.config(text="■  Stop Detection", bg=C["danger"],
@@ -1137,12 +1174,18 @@ class ModernBlackjackGUI(tk.Tk):
             "Inicio solicitado; esperando confirmación del motor."), "running")
 
     def _new_round(self):
+        ModernBlackjackGUI._invalidate_card_picker(self)
         self.controller.engine.new_round()
+        self._last_table_signature = None
+        ModernBlackjackGUI._render_table(self, ModernBlackjackGUI._current_display_snapshot(self))
         self.set_status("Round reset.")
 
     def _new_shoe(self):
         if messagebox.askyesno("New shoe", "Reset the running count and all per-card totals?"):
+            ModernBlackjackGUI._invalidate_card_picker(self)
             self.controller.engine.reset_shoe()
+            self._last_table_signature = None
+            ModernBlackjackGUI._render_table(self, ModernBlackjackGUI._current_display_snapshot(self))
             self.set_status("Shoe counts reset.")
 
     def _adjust_counter(self, key, delta):
@@ -1201,6 +1244,82 @@ class ModernBlackjackGUI(tk.Tk):
 
     def _clear_identity_picker(self):
         self._card_correction_picker = None
+
+    def _invalidate_card_picker(self):
+        """Close an identity dialog before its captured registry context expires."""
+        picker = getattr(self, "_card_correction_picker", None)
+        if picker is None:
+            return
+        try:
+            if picker.winfo_exists():
+                cancel = getattr(picker, "_cancel", None)
+                if callable(cancel):
+                    cancel()
+                else:
+                    picker.destroy()
+            else:
+                self._clear_identity_picker()
+        except (AttributeError, tk.TclError):
+            self._clear_identity_picker()
+
+    def _clear_visual_context(self):
+        """Remove the previous source's cards immediately and invalidate dialogs."""
+        ModernBlackjackGUI._invalidate_card_picker(self)
+        self._last_table_signature = None
+        ModernBlackjackGUI._render_table(self, None)
+
+    @staticmethod
+    def _hud_advice(presentation, running):
+        if not running or presentation.get("status") != "ready":
+            return "SIN CONSEJO", "#CBD5E1", ""
+        heroes = [player for player in presentation.get("players", [])
+                  if player.get("is_hero")]
+        action_names = {"H": "PEDIR", "S": "PLANTARSE", "D": "DOBLAR",
+                        "P": "SEPARAR", "R": "RENDIRSE", "D/H": "DOBLAR / PEDIR",
+                        "D/S": "DOBLAR / PLANTARSE", "P/H": "SEPARAR / PEDIR",
+                        "R/H": "RENDIRSE / PEDIR"}
+        advice = "SIN CONSEJO"
+        advice_color = "#CBD5E1"
+        if (len(heroes) == 1 and not heroes[0].get("is_ambiguous")
+                and len(heroes[0].get("cards") or []) >= 2
+                and presentation.get("advice_available") is True):
+            hands = heroes[0].get("hands")
+            if isinstance(hands, list) and hands:
+                items, colors = [], []
+                valid = True
+                for index, hand in enumerate(hands):
+                    if not isinstance(hand, dict):
+                        valid = False
+                        break
+                    payload = hand.get("advice") if isinstance(hand, dict) else None
+                    code = payload.get("action") if isinstance(payload, dict) else None
+                    text = (payload.get("text") if isinstance(payload, dict) else None)
+                    if hand.get("status") != "ready" or not text or code not in action_names:
+                        valid = False
+                        break
+                    hand_tag = hand.get("hand")
+                    prefix = (f"M{hand_tag + 1}: " if type(hand_tag) is int else
+                              f"M{index + 1}: " if len(hands) > 1 else "")
+                    items.append(prefix + action_names[code])
+                    colors.append(constants.ACTION_COLORS.get(code, "#CBD5E1"))
+                if valid:
+                    advice = " | ".join(items)
+                    advice_color = colors[0] if len(set(colors)) == 1 else "#FDE68A"
+        dealer_cards = (presentation.get("dealer") or {}).get("cards") or []
+        dealer_up = dealer_cards[0] if dealer_cards else {}
+        insurance = ""
+        if (presentation.get("status") == "ready"
+                and dealer_up.get("state") == "confirmed"
+                and dealer_up.get("rank") in ("Ace", "A")):
+            payload = presentation.get("insurance") or {}
+            if payload.get("status") == "ready":
+                if type(payload.get("take")) is bool:
+                    insurance = "SEGURO: SÍ" if payload["take"] else "SEGURO: NO"
+                else:
+                    insurance = str(payload.get("text") or "SEGURO: SIN CONSEJO")
+            else:
+                insurance = "SEGURO: SIN CONSEJO"
+        return advice, advice_color, insurance
 
     def _identity_is_current(self, identity):
         presentation = getattr(self, "_table_presentation", None) or {}
@@ -1446,6 +1565,9 @@ class ModernBlackjackGUI(tk.Tk):
         return snapshot
 
     def _poll_snapshot(self):
+        if getattr(self, "_closing", False):
+            ModernBlackjackGUI._finish_close(self)
+            return
         try:
             snapshot = ModernBlackjackGUI._current_display_snapshot(self)
             if snapshot is not None and snapshot["seq"] != self._last_seq:
@@ -1530,12 +1652,34 @@ class ModernBlackjackGUI(tk.Tk):
             elif snapshot is None and self.controller.running:
                 presentation["message"] = "Sin lectura válida de la configuración actual"
             count = snapshot.get("count", {}) if snapshot is not None and valid_configuration else {}
-            self._table_metrics = {key: count[key] for key in ("running", "true", "count_uncertain") if key in count}
+            reading = snapshot.get("reading", {}) if snapshot is not None else {}
+            self._table_metrics = {
+                key: count[key] for key in
+                ("running", "true", "count_uncertain", "decks_remaining", "cards_seen")
+                if key in count
+            }
             if presentation.get("count_has_pending_uncertainty"):
                 self._table_metrics["count_uncertain"] = True
+            if (presentation.get("status") == "uncertain"
+                    or (isinstance(reading, dict) and reading.get("count_uncertain"))):
+                self._table_metrics["count_uncertain"] = True
+            advice, advice_color, insurance = ModernBlackjackGUI._hud_advice(
+                presentation, self.controller.running)
+            telemetry = {
+                **self._table_metrics,
+                "advice": advice,
+                "advice_color": advice_color,
+                "insurance": insurance,
+                "round_id": presentation.get("round_id"),
+                "mode": presentation.get("mode"),
+                "running_state": ("Activo" if self.controller.running else "Detenido"),
+            }
             if table is not None:
                 table.remember_snapshot(presentation)
                 table.update(presentation)
+                update_telemetry = getattr(table, "update_telemetry", None)
+                if callable(update_telemetry):
+                    update_telemetry(telemetry)
             self._table_presentation = presentation
             self._last_table_signature = signature
         overlay = getattr(self, "round_overlay", None)
@@ -2073,13 +2217,32 @@ class ModernBlackjackGUI(tk.Tk):
             self.set_status(f"OCR calibration failed: {e}", error=True)
 
     def _on_close(self):
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+        ModernBlackjackGUI._invalidate_card_picker(self)
+        self.controller.stop()
+        ModernBlackjackGUI._set_configuration_controls(self, True)
+        if getattr(self, "start_btn", None) is not None:
+            self.start_btn.config(state="disabled")
         if self.round_overlay is not None:
             self.round_overlay.close()
             self.round_overlay = None
         self._capture_guard.close()
         self._stop_hotkeys()
         self.executor.disarm("app closing")
-        self.controller.stop()
+        ModernBlackjackGUI._finish_close(self)
+
+    def _finish_close(self):
+        if not getattr(self, "_closing", False):
+            return
+        if ModernBlackjackGUI._configuration_busy(self):
+            if getattr(self, "_close_wait_job", None) is None:
+                self._close_wait_job = self.after(
+                    max(25, constants.SNAPSHOT_POLL_MS),
+                    lambda: self._clear_close_wait_job_and_finish())
+            return
+        self._close_wait_job = None
         # OCR bankroll syncs persist at round end; a close mid-round must
         # not lose the latest value.
         try:
@@ -2098,3 +2261,7 @@ class ModernBlackjackGUI(tk.Tk):
         for job in self.tk.call("after", "info"):
             self.after_cancel(job)
         self.destroy()
+
+    def _clear_close_wait_job_and_finish(self):
+        self._close_wait_job = None
+        ModernBlackjackGUI._finish_close(self)

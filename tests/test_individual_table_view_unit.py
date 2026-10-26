@@ -463,7 +463,9 @@ def test_render_passes_presentation_preserving_statistics_money_and_minimesa(vie
     assert g.info_vars["true"].get() == "+0.5"
     g._sync_money_entries.assert_called_once_with(snap)
     g.round_overlay.update_from_presentation.assert_called_once_with(
-        p, running=True, metrics={key: snap["count"][key] for key in ("running", "true", "count_uncertain")})
+        p, running=True, metrics={key: snap["count"][key] for key in
+                                  ("running", "true", "count_uncertain",
+                                   "decks_remaining", "cards_seen")})
     assert snap == original
     g.controller.engine.get_snapshot.assert_not_called()
 
@@ -479,7 +481,9 @@ def test_running_change_without_new_seq_stops_table_but_preserves_overlay_flow(v
     assert g._render.call_count == 1
     assert g.round_overlay.update_from_presentation.call_count == 2
     g.round_overlay.update_from_presentation.assert_called_with(
-        view._last_snapshot, running=False, metrics={"running": 3, "true": .5, "count_uncertain": False})
+        view._last_snapshot, running=False,
+        metrics={"running": 3, "true": .5, "count_uncertain": False,
+                 "decks_remaining": 6, "cards_seen": 7})
     assert g.executor.step.call_count == 2
 
 
