@@ -210,6 +210,18 @@ def test_existing_capture_guard_restores_safely_without_real_capture(outcome):
     guard.close()
 
 
+def test_capture_guard_keeps_affinity_excluded_monitor_overlay_visible():
+    o = fake_overlay()
+    o.affinity_ok = True
+    source = SimpleNamespace(x=0, y=0, width=1920, height=1080)
+    guard = CaptureGuard(Mock(), lambda: o, source_fn=lambda: source)
+    with guard.capture():
+        assert not o._capture_hidden
+        o.set_capture_hidden = Mock()
+    o.set_capture_hidden.assert_not_called()
+    guard.close()
+
+
 @pytest.mark.parametrize("method", ["_show_window", "_show_noactivate"])
 @pytest.mark.parametrize("blocked", ["capture", "disabled", "inactive", "destroyed"])
 def test_native_show_paths_respect_all_guards(monkeypatch, method, blocked):
@@ -236,12 +248,61 @@ def test_native_show_paths_keep_noactivate_calls(monkeypatch, method):
     o = fake_overlay()
     o.hwnd = 123
     native = Mock()
+    native.IsWindowVisible.return_value = True
+    native.GetWindowLongPtrW.return_value = overlay_module.WS_EX_TOPMOST
+    native.GetWindow.return_value = 0
     monkeypatch.setattr(overlay_module.ctypes, "windll", SimpleNamespace(user32=native), raising=False)
     getattr(o, method)()
+    native.ShowWindow.assert_not_called()
+    native.SetWindowPos.assert_not_called()
+    o.win.deiconify.assert_not_called()
+
+
+def test_native_show_repairs_hidden_or_non_topmost_without_activation(monkeypatch):
+    o = fake_overlay()
+    o.hwnd = 123
+    native = Mock()
+    native.IsWindowVisible.return_value = False
+    native.GetWindowLongPtrW.return_value = 0
+    native.GetWindow.return_value = 0
+    monkeypatch.setattr(overlay_module.ctypes, "windll", SimpleNamespace(user32=native), raising=False)
+    o._show_window()
     native.ShowWindow.assert_called_once_with(123, 4)
     native.SetWindowPos.assert_called_once()
     assert native.SetWindowPos.call_args.args[-1] == 0x13
-    o.win.deiconify.assert_not_called()
+
+
+@pytest.mark.parametrize("locked,should_move", [(False, True), (True, False)])
+def test_drag_bar_supports_negative_coordinates_and_inline_lock(locked, should_move):
+    class Canvas:
+        def find_withtag(self, _tag):
+            return ()
+
+        def gettags(self, _item):
+            return ()
+
+    class Window:
+        x, y = -1920, -200
+
+        def winfo_x(self): return self.x
+        def winfo_y(self): return self.y
+        def geometry(self, value):
+            self.last_geometry = value
+            self.x, self.y = -1900, -190
+
+    overlay = object.__new__(Overlay)
+    overlay.canvas, overlay.win = Canvas(), Window()
+    overlay.locked = locked
+    overlay._pointer_start = overlay._pressed_identity = overlay._drag_origin = None
+    overlay.identity_corrections_enabled = False
+    overlay._drawn_cards = []
+    press = SimpleNamespace(x=120, y=24, x_root=-1800, y_root=-170)
+    move = SimpleNamespace(x_root=-1780, y_root=-160)
+    Overlay._pointer_press(overlay, press)
+    Overlay._drag_move(overlay, move)
+    assert hasattr(overlay.win, "last_geometry") is should_move
+    if should_move:
+        assert overlay.win.last_geometry.endswith("-1900-190")
 
 
 def fake_gui():
@@ -376,3 +437,27 @@ def test_options_preserve_instance_activation_and_save_position(sidebar, monkeyp
     assert gui_module.constants.UI["round_x"] == 30 and gui_module.constants.UI["round_y"] == 40
     factory.assert_not_called()
     top.destroy.assert_called_once()
+
+
+def test_force_hide_is_an_explicit_override_even_with_monitor_affinity():
+    overlay=fake_overlay();overlay.affinity_ok=True
+    guard=CaptureGuard(Mock(),lambda:overlay,source_fn=lambda:SimpleNamespace(width=1920,height=1080))
+    guard.force_hide=True
+    with guard.capture():
+        assert overlay._capture_hidden
+    assert not overlay._capture_hidden
+    guard.close()
+
+
+@pytest.mark.parametrize("x,y,recover", [(-1800,-150,False),(-500,50,False),(100,100,False),(32000,32000,True)])
+def test_recovery_allows_two_monitors_negative_coordinates_and_seam(monkeypatch,x,y,recover):
+    overlay=fake_overlay()
+    overlay.win.winfo_x.return_value=x;overlay.win.winfo_y.return_value=y
+    overlay.win.winfo_width.return_value=1000;overlay.win.winfo_height.return_value=310
+    overlay.move_to=Mock()
+    monkeypatch.setattr(overlay_module.screeninfo,"get_monitors",lambda:[
+        SimpleNamespace(x=-1920,y=-200,width=1920,height=1080,is_primary=False),
+        SimpleNamespace(x=0,y=0,width=1920,height=1080,is_primary=True)])
+    Overlay.ensure_on_screen(overlay)
+    assert bool(overlay.move_to.call_count)==recover
+    if recover: overlay.move_to.assert_called_once_with(30,60)

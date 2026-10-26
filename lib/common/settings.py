@@ -113,6 +113,8 @@ def apply(data: dict):
         # 0 = auto (per-monitor DPI); manual overrides clamp to the scaling
         # module's 75-300% factor bounds.
         constants.UI["scale"] = 0 if pct <= 0 else max(75, min(300, pct))
+    if type(ui.get("round_locked")) is bool:
+        constants.UI["round_locked"] = ui["round_locked"]
     for key, lo, hi in (("round_x", -32000, 32000), ("round_y", -32000, 32000),
                         ("round_opacity", .25, 1.0)):
         if key in ui:

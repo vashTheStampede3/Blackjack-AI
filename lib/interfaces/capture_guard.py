@@ -14,14 +14,21 @@ def apply_capture_guard(hwnd):
         fn = ctypes.windll.user32.SetWindowDisplayAffinity
         fn.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         fn.restype = ctypes.c_bool
-        return bool(fn(hwnd, 0x11))  # WDA_EXCLUDEFROMCAPTURE
+        if not fn(hwnd, 0x11):  # WDA_EXCLUDEFROMCAPTURE
+            return False
+        affinity = ctypes.c_uint()
+        get_affinity = ctypes.windll.user32.GetWindowDisplayAffinity
+        get_affinity.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+        get_affinity.restype = ctypes.c_bool
+        return bool(get_affinity(hwnd, ctypes.byref(affinity)) and affinity.value == 0x11)
     except (AttributeError, OSError):
         return False
 
 
 class CaptureGuard:
-    def __init__(self, root, overlay_fn):
+    def __init__(self, root, overlay_fn, source_fn=None):
         self.root, self.overlay_fn = root, overlay_fn
+        self.source_fn = source_fn
         self.ui_thread = threading.get_ident()
         self.requests = queue.Queue()
         self.lock = threading.Lock()
@@ -69,12 +76,19 @@ class CaptureGuard:
         try:
             def hide():
                 overlay = self.overlay_fn()
-                # WDA_EXCLUDEFROMCAPTURE is not honored by every capture API
-                # used by this app (notably MSS/PrintWindow). Hide for the
-                # capture window even when the native affinity call succeeded.
+                if overlay and not self.force_hide and self._external_window_source():
+                    # PrintWindow renders only the external target HWND's client
+                    # area. A separate top-level overlay cannot be in that image.
+                    return False
+                if (overlay and not self.force_hide and self._monitor_source()
+                        and getattr(overlay, "affinity_ok", False)):
+                    # Verified on this Windows host: MSS desktop capture omits
+                    # a Tk fixture carrying WDA_EXCLUDEFROMCAPTURE. Keep the
+                    # native exclusion active and avoid per-frame withdraw/show.
+                    return False
                 if overlay:
                     overlay.set_capture_hidden(True)
-                    return True
+                    return overlay
                 return False
             hidden = self._call(hide)
             yield
@@ -82,12 +96,35 @@ class CaptureGuard:
             try:
                 if hidden and not self.closed:
                     def restore():
-                        overlay = self.overlay_fn()
-                        if overlay:
-                            overlay.set_capture_hidden(False)
+                        hidden.set_capture_hidden(False)
                     self._call(restore)
             finally:
                 self.lock.release()
+
+    def _external_window_source(self):
+        if self.source_fn is None:
+            return False
+        try:
+            source = self.source_fn()
+            hwnd = getattr(source, "hwnd", None)
+            if not hwnd:
+                return False
+            import ctypes
+            pid = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(
+                ctypes.c_void_p(int(hwnd)), ctypes.byref(pid))
+            return bool(pid.value and pid.value != __import__("os").getpid())
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+
+    def _monitor_source(self):
+        if self.source_fn is None:
+            return False
+        try:
+            source = self.source_fn()
+            return source is not None and not getattr(source, "hwnd", None)
+        except Exception:
+            return False
 
     def close(self):
         self.closed = True

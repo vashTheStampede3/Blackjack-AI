@@ -195,7 +195,9 @@ def test_recommendations_require_explicit_link_to_one_hero(mini, case):
 
 def test_display_has_no_card_corrections_or_seven_seat_selector(mini):
     mini.update_from_presentation(presentation())
-    assert set(mini.canvas.bindings) == {("close", "<Button-1>")}
+    assert set(mini.canvas.bindings) == {("close", "<Button-1>"),
+                                         ("lock-control", "<Button-1>"),
+                                         ("opacity-control", "<Button-1>")}
     assert not any(str(text).startswith(("J1", "J2", "Cambiar jugador", "Corregir carta")) for text in mini.canvas.texts())
     mini.on_correct_card.assert_not_called()
 
@@ -266,7 +268,9 @@ def test_opacity_and_position_editing_do_not_replace_reading_or_enable_correctio
     assert mini.enabled and mini._active and mini._last_state == p
     assert identities(mini) == ["d1", "h1", "h2"]
     assert "AJUSTE DE POSICIÓN" in mini.canvas.texts()
-    assert set(mini.canvas.bindings) == {("close", "<Button-1>")}
+    assert set(mini.canvas.bindings) == {("close", "<Button-1>"),
+                                         ("lock-control", "<Button-1>"),
+                                         ("opacity-control", "<Button-1>")}
     mini.set_editing(False)
     assert mini._last_state == p and mini.opacity == .6
 

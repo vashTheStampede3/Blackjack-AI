@@ -48,11 +48,12 @@ WS_EX_TOPMOST = 0x00000008
 
 class MiniTableOverlay:
     """One overlay window with card correction routed through the GUI callback."""
-    def __init__(self, parent, on_correct_card=None, on_close=None):
+    def __init__(self, parent, on_correct_card=None, on_close=None, on_preferences_changed=None):
         self.parent = parent
         self.on_correct_card = on_correct_card
         self.identity_corrections_enabled = callable(on_correct_card)
         self.on_close = on_close
+        self.on_preferences_changed = on_preferences_changed
         self.win = tk.Toplevel(parent)
         self.win.withdraw()
         self.win.overrideredirect(True)
@@ -66,6 +67,7 @@ class MiniTableOverlay:
         self.count_label = self.canvas  # compatibility for the former text-only panel
         self.opacity = float(constants.UI.get("round_opacity", .88))
         self.editing = False
+        self.locked = bool(constants.UI.get("round_locked", False))
         self.enabled = True
         self._capture_hidden = False
         self.affinity_ok = False
@@ -73,6 +75,10 @@ class MiniTableOverlay:
         self._last_state = None
         self._metrics = {}
         self._drawn_cards = []
+        self._items = []
+        self._item_pools = {"rectangle": [], "text": []}
+        self._item_pool_cursors = {"rectangle": 0, "text": 0}
+        self._item_cursor = 0
         self._running = False
         self._selected_id = None
         self._selected_round = None
@@ -84,7 +90,8 @@ class MiniTableOverlay:
         self._drag_origin = None
         self._pointer_start = None
         self._pressed_identity = None
-        self.win.geometry(f"{WIDTH}x{HEIGHT}+{int(constants.UI.get('round_x', 60))}+{int(constants.UI.get('round_y', 60))}")
+        self.win.geometry(f"{WIDTH}x{HEIGHT}{int(constants.UI.get('round_x', 60)):+d}{int(constants.UI.get('round_y', 60)):+d}")
+        self.canvas.bind("<ButtonPress-1>", self._control_press, add="+")
         self.canvas.bind("<ButtonPress-1>", self._pointer_press, add="+")
         self.canvas.bind("<ButtonRelease-1>", self._pointer_release, add="+")
         self.canvas.bind("<B1-Motion>", self._drag_move, add="+")
@@ -127,18 +134,34 @@ class MiniTableOverlay:
         if not self.enabled or self._capture_hidden or not self._active or not self.win.winfo_exists():
             return
         if self.hwnd:
-            ctypes.windll.user32.ShowWindow(self.hwnd, 4)  # SW_SHOWNOACTIVATE
-            ctypes.windll.user32.SetWindowPos(self.hwnd, ctypes.c_void_p(-1),
-                                              0, 0, 0, 0, 0x13)
+            self._place_topmost_if_needed()
         else:
-            self.win.deiconify()
+            if getattr(self.win, "state", lambda: "withdrawn")() != "normal":
+                self.win.deiconify()
 
     def _keep_topmost(self):
         if not self.win.winfo_exists():
             return
-        if self._active:
-            self._show_noactivate()
         self._topmost_job = self.win.after(1500, self._keep_topmost)
+
+    def _place_topmost_if_needed(self):
+        if (not self.hwnd or not self.enabled or self._capture_hidden or not self._active
+                or getattr(self, "raise_blocked", False)):
+            return
+        user32 = ctypes.windll.user32
+        visible = bool(user32.IsWindowVisible(self.hwnd))
+        get_style = user32.GetWindowLongPtrW
+        get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        get_style.restype = ctypes.c_ssize_t
+        topmost = bool(get_style(self.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+        if not visible:
+            user32.ShowWindow(self.hwnd, 4)
+        previous = user32.GetWindow(self.hwnd, 3)  # GW_HWNDPREV
+        previous_is_topmost = False
+        if previous:
+            previous_is_topmost = bool(get_style(previous, GWL_EXSTYLE) & WS_EX_TOPMOST)
+        if not topmost or previous_is_topmost:
+            user32.SetWindowPos(self.hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x13)
 
     def update_from_presentation(self, presentation, *, running=True, metrics=None):
         """Receive detached UI data, never interpret engine snapshots or advice."""
@@ -195,7 +218,19 @@ class MiniTableOverlay:
         return False
 
     def _draw(self):
-        self.canvas.delete("all")
+        native_canvas = callable(getattr(self.canvas, "coords", None)) and callable(
+            getattr(self.canvas, "itemconfigure", None))
+        if not native_canvas:
+            self.canvas.delete("all")
+            self._item_pools = {"rectangle": [], "text": []}
+        self._item_cursor = 0
+        if not hasattr(self, "_items"):
+            self._items = []
+        if not hasattr(self, "_item_pools"):
+            self._item_pools = {"rectangle": [], "text": []}
+        self._item_pool_cursors = {"rectangle": 0, "text": 0}
+        if not hasattr(self, "locked"):
+            self.locked = False
         self._drawn_cards = []
         state = self._last_state or {}
         active, notice = overlay_visibility(state, self._running, self.editing, self.enabled)
@@ -237,9 +272,15 @@ class MiniTableOverlay:
                 self._draw_group(player, center=center, blocked=blocked)
         elif state.get("mode") == "multiplayer":
             self._text(WIDTH / 2, 172, "Sin grupos observados", "#94A3B8", 9, "center")
-        self.canvas.create_text(WIDTH - 22, 28, text="×", fill="#CBD5E1",
-                                font=("Segoe UI", 13, "bold"), tags=("close",))
+        self._text(WIDTH - 22, 28, "×", "#CBD5E1", 13, "center", tags=("close",))
         self.canvas.tag_bind("close", "<Button-1>", lambda _event: self._close_by_user())
+        self._text(WIDTH - 82, 28, "LOCKED" if self.locked else "UNLOCKED",
+                   "#FDE68A", 8, "center", tags=("lock-control",))
+        self.canvas.tag_bind("lock-control", "<Button-1>", lambda _event: self.set_locked(not self.locked))
+        self._text(WIDTH - 220, 28, f"Opacity {int(self.opacity * 100)}%  −  +",
+                   "#CBD5E1", 8, "center", tags=("opacity-control",))
+        self.canvas.tag_bind("opacity-control", "<Button-1>", self._opacity_click)
+        self._text(630, 28, "DRAG TO MOVE", "#94A3B8", 7, "center")
         group_warning = state.get("group_warning")
         if group_warning:
             self._text(WIDTH / 2, 238, group_warning, "#FDE68A", 9, "center")
@@ -251,6 +292,43 @@ class MiniTableOverlay:
             self.win.attributes("-alpha", self.opacity)
         else:
             self.win.withdraw()
+        for kind, pool in self._item_pools.items():
+            used = self._item_pool_cursors[kind]
+            for item in pool[used:]:
+                self.canvas.delete(item)
+            del pool[used:]
+
+    def _item(self, kind, coords, **options):
+        if not hasattr(self, "_items"):
+            self._items = []
+        if not hasattr(self, "_item_pools"):
+            self._item_pools = {"rectangle": [], "text": []}
+        if not hasattr(self, "_item_pool_cursors"):
+            self._item_pool_cursors = {"rectangle": 0, "text": 0}
+        if not hasattr(self, "_item_cursor"):
+            self._item_cursor = 0
+        pool = self._item_pools[kind]
+        cursor = self._item_pool_cursors[kind]
+        can_reuse = callable(getattr(self.canvas, "coords", None)) and callable(
+            getattr(self.canvas, "itemconfigure", None))
+        if can_reuse and cursor < len(pool):
+            item = pool[cursor]
+            previous = getattr(self, "_item_state", {}).get(item)
+            if previous is None or previous[0] != tuple(coords):
+                self.canvas.coords(item, *coords)
+            if previous is None or previous[1] != options:
+                self.canvas.itemconfigure(item, **options)
+            self.canvas.tag_raise(item)
+        else:
+            create = self.canvas.create_rectangle if kind == "rectangle" else self.canvas.create_text
+            item = create(*coords, **options)
+            pool.append(item)
+        if not hasattr(self, "_item_state"):
+            self._item_state = {}
+        self._item_state[item] = (tuple(coords), dict(options))
+        self._item_pool_cursors[kind] += 1
+        self._item_cursor += 1
+        return item
 
     def _draw_hand(self, cards, center, y, span=WIDTH - 80):
         if not cards:
@@ -317,11 +395,10 @@ class MiniTableOverlay:
         fill, edge, fg = (("#F8FAFC", "#38BDF8", "#0F172A") if confirmed else
                           ("#7C2D12", "#F97316", "#FFEDD5"))
         tag = f"physical-card-{len(self._drawn_cards)}"
-        item = self.canvas.create_rectangle(x, y, x + card_w, y + card_h,
-                                             fill=fill, outline=edge, width=2,
-                                             tags=(tag,))
-        self.canvas.create_text(x + card_w / 2, y + card_h / 2, text=label,
-                                fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
+        item = self._item("rectangle", (x, y, x + card_w, y + card_h),
+                          fill=fill, outline=edge, width=2, tags=(tag,))
+        self._item("text", (x + card_w / 2, y + card_h / 2), text=label,
+                   fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
         identity_fields = (
             "card_id", "legacy_ref", "rank", "suit", "state", "reason", "owner",
             "hand", "group_id", "round_id", "shoe_id", "profile_name", "mode",
@@ -354,15 +431,27 @@ class MiniTableOverlay:
     def _pointer_press(self, event):
         self._pointer_start = (event.x_root, event.y_root)
         self._pressed_identity = self._identity_at_pointer(event)
+        current = self.canvas.find_withtag("current")
+        tags = self.canvas.gettags(current[0]) if current else ()
         self._drag_origin = ((event.x_root - self.win.winfo_x(),
                               event.y_root - self.win.winfo_y())
-                             if self.editing and 8 <= event.y <= 48 and event.x < 240
+                             if (not getattr(self, "locked", False) and not any(tag in tags for tag in
+                                 ("close", "lock-control", "opacity-control"))
+                                 and 8 <= event.y <= 52 and event.x < WIDTH - 245)
                              else None)
 
     def _pointer_release(self, event):
         start = self._pointer_start
         identity = self._pressed_identity
+        drag_origin = self._drag_origin
         self._pointer_start = self._pressed_identity = self._drag_origin = None
+        if start is not None and math.hypot(event.x_root-start[0], event.y_root-start[1]) >= 5:
+            if drag_origin is not None and callable(getattr(self.win, "update_idletasks", None)):
+                self.ensure_on_screen()
+            if drag_origin is not None:
+                self.remember_position()
+                self._persist_preferences()
+            return
         if start is None or math.hypot(event.x_root - start[0], event.y_root - start[1]) >= 5:
             return
         released = self._identity_at_pointer(event)
@@ -376,12 +465,13 @@ class MiniTableOverlay:
                 and self._selection_exists(identity)):
             self.on_correct_card(deepcopy(identity))
 
-    def _rect(self, x1, y1, x2, y2, fill, outline):
-        self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=1)
+    def _rect(self, x1, y1, x2, y2, fill, outline, tags=()):
+        return self._item("rectangle", (x1, y1, x2, y2), fill=fill,
+                          outline=outline, width=1, tags=tags)
 
-    def _text(self, x, y, text, color, size, anchor):
-        self.canvas.create_text(x, y, text=text, fill=color,
-                                font=("Segoe UI", size, "bold"), anchor=anchor)
+    def _text(self, x, y, text, color, size, anchor, tags=()):
+        return self._item("text", (x, y), text=text, fill=color,
+                          font=("Segoe UI", size, "bold"), anchor=anchor, tags=tags)
 
     @staticmethod
     def _rank(rank):
@@ -418,7 +508,7 @@ class MiniTableOverlay:
         return " · ".join(parts) if parts else "SIN CONSEJO"
 
     def _drag_move(self, event):
-        if self.editing and self._drag_origin:
+        if not getattr(self, "locked", False) and self._drag_origin:
             if (self._pointer_start is None
                     or math.hypot(event.x_root - self._pointer_start[0],
                                   event.y_root - self._pointer_start[1]) < 5):
@@ -431,6 +521,9 @@ class MiniTableOverlay:
         self.opacity = max(.25, min(1., float(opacity)))
         constants.UI["round_opacity"] = self.opacity
         self.win.attributes("-alpha", self.opacity)
+        if getattr(self, "_items", None) is not None:
+            self._draw()
+        self._persist_preferences()
 
     def set_editing(self, enabled):
         self.editing = bool(enabled)
@@ -438,14 +531,35 @@ class MiniTableOverlay:
                                           self.editing, self.enabled)[1]
         self._draw()
 
+    def _control_press(self, event):
+        # Controls are actionable; their presses cannot begin a window drag.
+        current = self.canvas.find_withtag("current")
+        tags = self.canvas.gettags(current[0]) if current else ()
+        if any(tag in tags for tag in ("close", "lock-control", "opacity-control")):
+            self._drag_origin = None
+
+    def _opacity_click(self, event):
+        self.set_opacity(self.opacity + (.05 if event.x >= WIDTH - 190 else -.05))
+
+    def set_locked(self, locked):
+        self.locked = bool(locked)
+        constants.UI["round_locked"] = self.locked
+        self._draw()
+        self._persist_preferences()
+
+    def _persist_preferences(self):
+        callback = getattr(self, "on_preferences_changed", None)
+        if callable(callback):
+            callback()
+
     def _show_window(self):
         if not self.enabled or not self.win.winfo_exists() or self._capture_hidden or not self._active:
             return
         if self.hwnd:
-            ctypes.windll.user32.ShowWindow(self.hwnd, 4)
-            ctypes.windll.user32.SetWindowPos(self.hwnd, -1, 0, 0, 0, 0, 0x13)
+            self._place_topmost_if_needed()
         else:
-            self.win.deiconify()
+            if getattr(self.win, "state", lambda: "withdrawn")() != "normal":
+                self.win.deiconify()
 
     def hide(self):
         self.enabled = False
@@ -459,6 +573,9 @@ class MiniTableOverlay:
         if any(x >= m.x and y >= m.y and x+width <= m.x+m.width
                and y+height <= m.y+m.height for m in monitors):
             return
+        if any(min(x+width, m.x+m.width)-max(x, m.x) >= min(120, width)
+               and m.y <= y+8 and y+52 <= m.y+m.height for m in monitors):
+            return  # Keep a reachable bar, including windows spanning monitors.
         monitor = next((m for m in monitors if getattr(m, "is_primary", False)),
                        monitors[0] if monitors else None)
         if monitor:
@@ -519,6 +636,7 @@ class MiniTableOverlay:
             except tk.TclError:
                 pass
             self.remember_position()
+            self._persist_preferences()
             self.win.destroy()
 
 

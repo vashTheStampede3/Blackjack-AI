@@ -157,6 +157,7 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
     import tkinter as tk
     from lib.interfaces.round_overlay import RoundOverlay
     from lib.interfaces.capture_guard import CaptureGuard
+    from lib.common import constants
     from lib.logic.monitor_utils import ScreenCapture
     from lib.logic.window_capture import WindowSource
 
@@ -193,6 +194,12 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         overlay.geometry(f"+{source.x+30}+{source.y+40}")
         state = _overlay_presentation()
         overlay.update_from_presentation(state, running=True)
+        original_items = tuple(overlay.canvas.find_all())
+        changed_presentation = dict(state)
+        changed_presentation["message"] = "Fixture refresh"
+        overlay.update_from_presentation(changed_presentation, running=True)
+        assert tuple(overlay.canvas.find_all()) == original_items, \
+            "Canvas items were replaced during an incremental presentation refresh"
         root.update()
         time.sleep(.15)
         root.update()
@@ -216,8 +223,6 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         point = W.POINT(source.x+30+500, source.y+40+97)
         hit = u.WindowFromPoint(point)
         assert u.GetAncestor(hit, 2) == overlay.hwnd, "Rendered card does not receive input"
-        overlay.set_editing(True)
-        root.update()
         overlay._pointer_press(SimpleNamespace(x=60, y=20,
                                                x_root=source.x+30+60,
                                                y_root=source.y+40+20))
@@ -226,9 +231,10 @@ def test_native_overlay_focus_clickthrough_capture_exclusion_and_minimized_paren
         root.update()
         assert (overlay.winfo_x(), overlay.winfo_y()) == (old_position[0]+10, old_position[1]+10)
         overlay._pointer_release(SimpleNamespace(x_root=source.x+100, y_root=source.y+70))
+        assert constants.UI["round_x"] == overlay.winfo_x()
+        assert constants.UI["round_y"] == overlay.winfo_y()
         overlay.geometry(f"+{source.x+30}+{source.y+40}")
         root.update()
-        overlay.set_editing(False)
         assert overlay.affinity_ok, "Capture exclusion unsupported on this Windows"
         # This screenshot is confined to an opaque test fixture and stays in RAM.
         guard = CaptureGuard(root, lambda: overlay)

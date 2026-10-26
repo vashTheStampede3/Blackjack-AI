@@ -25,3 +25,10 @@
 - Launcher preflight reports a missing environment or local model; Tcl/Tk discovery uses the actual Python installation when Windows exposes an invalid alias. The CMD and PowerShell launch paths use the same guarded entry point.
 - Validation: 29 launcher and Tk runtime unit tests passed. No dependencies or models were downloaded.
 - Next: finish overlay, inspector and replay checkpoints; repeat full regression and Tk smoke.
+
+## Mini Mesa window and capture checkpoint
+
+- A permanent drag bar, position lock and opacity controls replace the edit-only drag. Position and lock are persisted through the GUI integration; a five-pixel threshold separates drags from card selection. Negative monitor coordinates and partial monitor overlap are handled.
+- The canvas reuses items, avoids redundant native ShowWindow/topmost calls, and uses a verified Windows capture exclusion for MSS. Unsupported capture paths hide and restore on the Tk thread; external PrintWindow sources are independent of this window.
+- Validation: 236 overlay, mode and GUI sections tests passed, including real Tk capture exclusion with synthetic pixels. Full continuous live capture and physical multi-monitor movement remain unmeasured.
+- Next: finish the registry inspector and complete the original-code replay comparison.
