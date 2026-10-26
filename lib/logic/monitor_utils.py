@@ -94,6 +94,11 @@ class ScreenCapture:
             return self._grab_bgr()
 
     def _grab_bgr(self) -> np.ndarray:
+        from .window_capture import native_pixel_context
+        with native_pixel_context():
+            return self._grab_native_bgr()
+
+    def _grab_native_bgr(self) -> np.ndarray:
         """Full-monitor frame as a BGR numpy array (what cv2/models expect)."""
         if self.monitor is None:
             raise ValueError("Monitor not set. Select a monitor before capturing.")

@@ -12,6 +12,7 @@ from tests.test_video_source import video
 from lib.logic.video_source import VideoFile
 from lib.logic.card_layout import CardLayout
 from lib.logic.app_modes import INDIVIDUAL
+from lib.logic.table_inference import prepare_layout_rois
 
 
 def test_replay_position_follows_elapsed_time_not_number_of_cycles(video):
@@ -70,10 +71,16 @@ def test_explicit_profile_and_injected_model_use_production_counting_without_db(
         region_profiles.set_card_layout(layout, profile=profile, overwrite=True)
     save_layout((320, 180), "Measured")
     save_layout((640, 360), "Other active")
-    predictions = [{"class": "5", "cx": 20., "cy": 45., "width": 15., "height": 25., "confidence": .95},
-                   {"class": "7", "cx": 55., "cy": 125., "width": 15., "height": 25., "confidence": .95}]
+    predictions = [{"class": "5", "cx": 20., "cy": 120., "width": 15., "height": 25., "confidence": .95},
+                   {"class": "7", "cx": 150., "cy": 30., "width": 15., "height": 25., "confidence": .95}]
+    measured = region_profiles.get_card_layout((320, 180), INDIVIDUAL, profile="Measured")
+    rois = prepare_layout_rois(np.zeros((180, 320, 3), np.uint8), measured)
+    def infer(image, *args):
+        l, t, r, b = next(bounds for _, bounds, crop in rois if crop.shape == image.shape)
+        return [dict(p, cx=p["cx"]-l, cy=p["cy"]-t) for p in predictions
+                if l <= p["cx"] < r and t <= p["cy"] < b]
     provider = SimpleNamespace(backend_name="Synthetic plumbing test", players_model=lambda: SimpleNamespace(
-        hosted=False, predict=lambda *a: [dict(p) for p in predictions]),
+        hosted=False, predict=infer),
         dealer_model=lambda: SimpleNamespace(predict=lambda *a: []))
     source = SimpleNamespace(width=320, height=180, timestamp=.1,
                              grab_bgr=lambda: np.full((180, 320, 3), 40, np.uint8))

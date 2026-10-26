@@ -3,10 +3,31 @@ import ctypes
 from ctypes import wintypes as W
 from dataclasses import dataclass, replace
 import os
+from contextlib import contextmanager
 
-import cv2
 import numpy as np
 import psutil
+
+PW_CLIENTONLY = 1
+PW_RENDERFULLCONTENT = 2
+
+
+@contextmanager
+def native_pixel_context():
+    """Use physical client pixels on the current UI or capture worker thread."""
+    setter, previous = None, None
+    if os.name == "nt":
+        try:
+            setter = ctypes.WinDLL("user32", use_last_error=True).SetThreadDpiAwarenessContext
+            setter.argtypes, setter.restype = [ctypes.c_void_p], ctypes.c_void_p
+            previous = setter(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+        except (AttributeError, OSError):
+            setter = None  # main.py still declares process per-monitor awareness
+    try:
+        yield
+    finally:
+        if setter is not None and previous:
+            setter(previous)
 
 
 def _api():
@@ -42,8 +63,9 @@ def _api():
 
 def _dimensions(u, hwnd):
     rect = W.RECT()
-    if not u.GetClientRect(hwnd, ctypes.byref(rect)):
-        raise RuntimeError("The selected window is closed. Select it again.")
+    with native_pixel_context():
+        if not u.GetClientRect(hwnd, ctypes.byref(rect)):
+            raise RuntimeError("The selected window is closed. Select it again.")
     return rect.right - rect.left, rect.bottom - rect.top
 
 
@@ -80,11 +102,15 @@ class WindowSource:
         width, height = _dimensions(u, self.hwnd)
         if width < 2 or height < 2:
             raise RuntimeError("Window has no client area yet. Restore it and select again.")
-        if self.minimized or self.width < 2 or self.height < 2:
+        if self.minimized or (self.width, self.height) != (width, height):
             return replace(self, width=width, height=height, minimized=False)
         return self
 
     def grab_bgr(self):
+        with native_pixel_context():
+            return self._grab_native_bgr()
+
+    def _grab_native_bgr(self):
         u, g = _api()
         pid = W.DWORD()
         u.GetWindowThreadProcessId(self.hwnd, ctypes.byref(pid))
@@ -107,7 +133,7 @@ class WindowSource:
             previous = g.SelectObject(mem, bitmap)
             # PW_CLIENTONLY | PW_RENDERFULLCONTENT. Never fall back to desktop
             # pixels: another app covering the target must never enter OCR.
-            if not u.PrintWindow(self.hwnd, mem, 3):
+            if not u.PrintWindow(self.hwnd, mem, PW_CLIENTONLY | PW_RENDERFULLCONTENT):
                 raise RuntimeError("This app does not support background capture.")
             g.SelectObject(mem, previous)
             previous = None
@@ -120,8 +146,8 @@ class WindowSource:
             result = frame[:, :, :3].copy()
             if int(result.max()) < 3:
                 raise RuntimeError("Window returned a black image. Keep its video active or use Monitor mode.")
-            if (width, height) != (self.width, self.height):
-                result = cv2.resize(result, (self.width, self.height))
+            # Return the actual native dimensions. Engine/editor reject a
+            # resolution change; stretching here silently moved calibrated ROIs.
             return result
         finally:
             if previous and mem:

@@ -8,6 +8,13 @@ import pytest
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows capture")
 
 
+@pytest.fixture(autouse=True)
+def physical_pixel_thread():
+    from lib.logic.window_capture import native_pixel_context
+    with native_pixel_context():
+        yield
+
+
 def test_window_capture_tracks_client_while_moved_covered_and_resized():
     import tkinter as tk
     import time
@@ -49,11 +56,11 @@ def test_window_capture_tracks_client_while_moved_covered_and_resized():
         time.sleep(.2)
         root.update()
         resized = capture.grab_bgr()
-        assert resized.shape == first.shape
+        assert resized.shape == (480, 640, 3)
         # Native edge/border antialiasing changes on resize; landmarks must
         # remain at their calibrated normalized client coordinates.
-        assert np.allclose(resized[70, 90], [32, 64, 224], atol=2)
-        assert np.allclose(resized[100, 100], [96, 160, 32], atol=2)
+        assert np.allclose(resized[140, 180], [32, 64, 224], atol=2)
+        assert np.allclose(resized[200, 200], [96, 160, 32], atol=2)
         root.iconify()
         root.update()
         with pytest.raises(RuntimeError, match="minimized"):

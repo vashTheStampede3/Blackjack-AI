@@ -88,6 +88,10 @@ def build_region_preview(engine, source=None, *, live_running=False) -> Image.Im
     model_label = model_info.get("artifact") or model_info["model"]
     model_type = model_info.get("model_type") or "model type unknown"
     input_line = f"{input_label} | {network_label}"
+    if isinstance(bounds, dict) and bounds.get("strategy") == "roi":
+        sizes = ", ".join(f"{p['role']} {p['input_size'][0]}x{p['input_size'][1]}"
+                          for p in bounds.get("patches", []))
+        input_line = f"Native ROIs: {sizes} | {network_label}"
     model_line = f"artifact {model_label} | {model_type} | {version} | quant: {quant}"
     cv2.putText(img, input_line[:115], (5, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 220, 220), 1)

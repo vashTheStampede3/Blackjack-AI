@@ -49,7 +49,7 @@ class LocalYoloModel:
         iou = max(0.05, min(1.0, overlap / 100.0))
         results = self._model.predict(
             source=image_bgr, conf=conf, iou=iou, imgsz=640,
-            verbose=False, device=self._device,
+            verbose=False, device=self._device, agnostic_nms=False,
         )
         preds = []
         if not results:
@@ -249,7 +249,12 @@ class OnnxModel:
         xyxy[:, 1] = boxes[:, 1] - boxes[:, 3] / 2
         xyxy[:, 2] = boxes[:, 0] + boxes[:, 2] / 2
         xyxy[:, 3] = boxes[:, 1] + boxes[:, 3] / 2
-        keep = nms(xyxy, scores, iou)
+        # Different ranks may be distinct overlapping cards. Match the
+        # class-aware YOLO backend instead of suppressing them globally.
+        keep = [i for label in np.unique(cls)
+                for i in np.flatnonzero(cls == label)[nms(
+                    xyxy[cls == label], scores[cls == label], iou)]]
+        keep.sort(key=lambda i: float(scores[i]), reverse=True)
         results = []
         ratio_x,ratio_y = ratio if isinstance(ratio,tuple) else (ratio,ratio)
         for i in keep:

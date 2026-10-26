@@ -14,7 +14,7 @@ def test_synthetic_detection_to_registry_presentation_real_tk_views_and_correcti
     from lib.logic.card_layout import CardLayout
     from lib.logic.engine import DetectionEngine
     from lib.logic.region_profiles import set_card_layout
-    from lib.logic.table_inference import prepare_layout_image
+    from lib.logic.table_inference import prepare_layout_rois
     from lib.logic.table_presentation import build_table_presentation
     from lib.interfaces.table_view import TableView
     from lib.interfaces.round_overlay import MiniTableOverlay
@@ -32,8 +32,8 @@ def test_synthetic_detection_to_registry_presentation_real_tk_views_and_correcti
         "dealer": [[440, 20], [620, 20], [620, 150], [440, 150]],
     }, (width, height))
     set_card_layout(layout, profile="Default")
-    packed, patches = prepare_layout_image(np.zeros((height, width, 3), np.uint8), layout)
-    regions = {patch["role"]: patch["packed"] for patch in patches}
+    rois = prepare_layout_rois(np.zeros((height, width, 3), np.uint8), layout)
+    regions = {role: bounds for role, bounds, _ in rois}
     mx, my, mr, mb = regions["mine"]
     dx, dy, dr, db = regions["dealer"]
     observations = [
@@ -48,7 +48,13 @@ def test_synthetic_detection_to_registry_presentation_real_tk_views_and_correcti
     class SyntheticModel:
         hosted = False
         def predict(self, _image, *_args):
-            return [dict(prediction) for prediction in observations]
+            roi = next((bounds for role, bounds, crop in rois
+                        if crop.shape == _image.shape), None)
+            if roi is None:
+                return []
+            left, top, right, bottom = roi
+            return [dict(p, cx=p["cx"]-left, cy=p["cy"]-top) for p in observations
+                    if left <= p["cx"] < right and top <= p["cy"] < bottom]
 
     class Provider:
         backend_name = "Synthetic integration fixture"

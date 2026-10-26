@@ -10,6 +10,7 @@ import math
 
 from ..common import constants
 from .card_layout import TableGroupTracker
+from .card_evidence import resolve_inverted_corners
 
 
 @dataclass(frozen=True)
@@ -211,18 +212,55 @@ class CardMemory:
         return min(math.hypot(card.cx-pred["cx"], card.cy-pred["cy"]),
                    math.hypot(card.cx+card.vx*dt-pred["cx"], card.cy+card.vy*dt-pred["cy"]))
 
+    def _corner_aliases(self, predictions):
+        """Keep a pending physical ID when its upper index becomes visible."""
+        aliases = {}
+        for index, pred in enumerate(predictions):
+            evidence = pred.get("corner_observations") or []
+            if not pred.get("inverted_corner_pair") or len(evidence) != 2:
+                continue
+            def nearby(point):
+                return [card for card in self.cards.values()
+                        if card.status == "active" and card.owner == pred["owner"]
+                        and math.hypot(card.cx-point["cx"], card.cy-point["cy"])
+                        <= max(2., min(card.width, card.height,
+                                      point.get("width", 30), point.get("height", 40))*.15)]
+            upper = nearby(pred)
+            lower = [card for card in nearby(evidence[1])
+                     if card.rank in ("6", "9") and card.rank != pred.get("name")]
+            if len(lower) != 1:
+                continue
+            card = lower[0]
+            if not upper:
+                aliases[index] = card.id
+            elif len(upper) == 1 and upper[0].id != card.id:
+                if not card.counted and not card.manual:
+                    card.state = card.status = "retired"
+                    card.reason = "Indice inferior duplicado"
+                    self.counter.clear_uncertainty(card.id)
+                else:
+                    # Never silently reverse a contribution already booked.
+                    self._issue(card, "Indices contradictorios; revisar carta")
+                    self._issue(upper[0], "Indices contradictorios; revisar carta")
+        return aliases
+
     def observe(self, predictions, now):
         self.now = now
         # One box per location per frame is one observation, never two votes.
         unique = []
-        for raw_pred in sorted(predictions, key=lambda p: p.get("confidence", 0), reverse=True):
+        for raw_pred in sorted(resolve_inverted_corners(predictions),
+                               key=lambda p: p.get("confidence", 0), reverse=True):
             pred = self._normalize(raw_pred)
             if pred.get("owner") not in ("mine", "dealer", "other"):
                 continue
             if pred.get("class") in ("back", "cardback", "cuttingcard"):
                 continue
-            radius = max(3., min(pred.get("width", 30), pred.get("height", 40))*.35)
-            if any(math.hypot(p["cx"]-pred["cx"], p["cy"]-pred["cy"]) < radius for p in unique):
+            radius = max(2., min(pred.get("width", 30), pred.get("height", 40))*.10)
+            duplicate = next((p for p in unique if p["owner"] == pred["owner"]
+                and math.hypot(p["cx"]-pred["cx"], p["cy"]-pred["cy"]) < radius), None)
+            if duplicate is not None:
+                if duplicate.get("name") != pred.get("name"):
+                    duplicate["ambiguous"] = True
                 continue
             unique.append(pred)
         if unique:
@@ -233,6 +271,7 @@ class CardMemory:
             if self.empty_since is None:
                 self.empty_since = now
 
+        corner_aliases = self._corner_aliases(unique)
         choices, ambiguous = {}, {}
         original_ids = set(self.cards)
         same_rank_near = {
@@ -244,6 +283,9 @@ class CardMemory:
             for key, card in self.cards.items() if card.rank is not None and not card.manual
         }
         for index, pred in enumerate(unique):
+            if index in corner_aliases:
+                choices[index] = [(-1., corner_aliases[index])]
+                continue
             options = []
             for key, card in self.cards.items():
                 distance = self._distance(card, pred, now)
@@ -256,7 +298,7 @@ class CardMemory:
                 if distance <= scale*(.85 if same else .35):
                     options.append((distance + (0 if same else scale*.4), key))
             options.sort()
-            margin = max(3., min(pred.get("width", 30), pred.get("height", 40))*.2)
+            margin = max(2., min(pred.get("width", 30), pred.get("height", 40))*.08)
             if len(options) > 1 and options[1][0]-options[0][0] <= margin:
                 ambiguous[index] = [key for cost, key in options if cost-options[0][0] <= margin]
             else:

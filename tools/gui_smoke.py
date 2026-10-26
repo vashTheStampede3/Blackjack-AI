@@ -23,7 +23,7 @@ from tools.common import write_json
 from lib.common import constants,settings
 from lib.logic.app_modes import INDIVIDUAL
 from lib.logic.card_layout import CardLayout
-from lib.logic.table_inference import prepare_layout_image
+from lib.logic.table_inference import prepare_layout_rois
 from lib.logic import region_profiles
 import screeninfo
 
@@ -55,12 +55,16 @@ def main():
                                     source_context=calibration_source)
     region_profiles.set_source_context((width,height),calibration_source,
                                        profile=region_profiles.active_name())
-    _,patches=prepare_layout_image(np.zeros((height,width,3),np.uint8),layout)
+    rois=prepare_layout_rois(np.zeros((height,width,3),np.uint8),layout)
     predictions=[]
     class SyntheticModel:
         hosted=False
         def predict(self,_frame,*_args):
-            return [dict(item) for item in predictions]
+            bounds=next((bounds for role,bounds,crop in rois if crop.shape==_frame.shape),None)
+            if bounds is None: return []
+            l,t,r,b=bounds
+            return [dict(p,cx=p["cx"]-l,cy=p["cy"]-t) for p in predictions
+                    if l<=p["cx"]<r and t<=p["cy"]<b]
     model=SyntheticModel()
     class SyntheticProvider:
         backend_name="Deterministic synthetic fixture"
@@ -89,8 +93,8 @@ def main():
     app.report_callback_exception=lambda *exc:callback_errors.append("".join(traceback.format_exception(*exc)))
     engine=app.controller.engine
     engine._warm_advice_job=lambda *a:None # avoid an unrelated full-shoe EV sweep
-    mine_patch=next(p["packed"] for p in patches if p["role"]=="mine")
-    dealer_patch=next(p["packed"] for p in patches if p["role"]=="dealer")
+    mine_patch=next(bounds for role,bounds,_ in rois if role=="mine")
+    dealer_patch=next(bounds for role,bounds,_ in rois if role=="dealer")
     mx,my,mr,mb=mine_patch
     dx,dy,dr,db=dealer_patch
     predictions.extend([
@@ -343,6 +347,46 @@ def main():
         assert len(dialog._cd_deck)==52 and dialog._cd_started is not None
         close_tops()
 
+    def compact_pending_hands():
+        from copy import deepcopy
+        from lib.interfaces.table_view import TableView
+        from lib.interfaces import scaling
+        pending={"mode":"individual","status":"uncertain","message":"Lectura dudosa",
+            "dealer":{"cards":[{"card_id":"smoke-dealer","rank":None,"state":"pending"}]},
+            "players":[{"id":"hero","label":"Yo","is_hero":True,"cards":[
+                {"card_id":"smoke-hero","rank":None,"state":"pending","hand":0}]}]}
+        top=tk.Toplevel(app)
+        view=TableView(top)
+        view.canvas.pack(fill=tk.BOTH,expand=True)
+        app.round_enabled.set(True)
+        app._toggle_round_overlay()
+        mini=app.round_overlay
+        old_state=deepcopy(mini._last_state)
+        try:
+            for height in (220,280,400):
+                top.geometry(f"800x{height}+30+30")
+                top.update()
+                view.update(pending)
+                view._relayout()
+                top.update_idletasks()
+                for hand in (view.dealer,view.seats[0]):
+                    for widget in (hand["name"],hand["cards"][0]):
+                        assert widget.winfo_ismapped()
+                        assert 0<=widget.winfo_y()
+                        assert widget.winfo_y()+widget.winfo_height()<=view.canvas.winfo_height()
+                    assert hand["cards"][0].card_identity["card_id"].startswith("smoke-")
+            mini.update_from_presentation(pending,running=True)
+            texts=[mini.canvas.itemcget(item,"text") for item in mini.canvas.find_all()
+                   if mini.canvas.type(item)=="text"]
+            assert "Yo" in texts and "Crupier" in texts and texts.count("?")==2
+            assert len(mini._drawn_cards)==2
+        finally:
+            mini.update_from_presentation(old_state,running=app.controller.running)
+            if view._resize_job is not None:
+                view.canvas.after_cancel(view._resize_job)
+            scaling.off_change(view._rescale)
+            top.destroy()
+
     def run():
         try:
             check("opens and auto-selects monitor",lambda:(_ for _ in ()).throw(AssertionError("No monitor")) if app.monitor is None else None)
@@ -362,6 +406,7 @@ def main():
             check("region preview open/close",preview)
             check("local detection start/stop",detection)
             check("window selection, OCR client coordinates, refresh and monitor fallback",window_source_workflow)
+            check("pending Yo/dealer visible in compact canvas and Mini Mesa",compact_pending_hands)
             assert app.executor.mode=="off" and not app.executor.armed
             app.update_idletasks()
             required_controls=("Individual", "Multijugador", "Calibrate Regions",

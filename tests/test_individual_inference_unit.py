@@ -10,7 +10,7 @@ from lib.logic.card_layout import CardLayout
 from lib.logic.engine import DetectionEngine
 from lib.logic.monitor_utils import Polygon
 from lib.logic import region_preview
-from lib.logic.table_inference import inference_regions, prepare_layout_image, predict_layout
+from lib.logic.table_inference import inference_regions, prepare_layout_image, prepare_layout_rois, predict_layout
 
 
 def rect(l, t, r, b):
@@ -45,6 +45,26 @@ class FakeModel:
         self.calls += 1
         self.last_input = image.copy()
         return [dict(p) for p in self.predictions]
+
+
+class RoiModel(FakeModel):
+    def __init__(self, frame, zones, predictions):
+        super().__init__(predictions)
+        self.rois = prepare_layout_rois(frame, zones)
+        self.inputs = []
+
+    def predict(self, image, confidence, overlap):
+        role, (left, top, right, bottom), expected = self.rois[self.calls % len(self.rois)]
+        assert np.array_equal(image, expected)
+        self.inputs.append(image.copy())
+        self.calls += 1
+        return [dict(p, cx=p['cx']-left, cy=p['cy']-top) for p in self.predictions
+                if left <= p['cx'] < right and top <= p['cy'] < bottom]
+
+
+def native_prediction(cx, cy):
+    return {'class': '8', 'confidence': .95, 'width': 8., 'height': 12.,
+            'cx': cx, 'cy': cy}
 
 
 def prediction(patch, cx, cy):
@@ -111,11 +131,7 @@ def test_mask_crop_packing_gap_and_immutable_frame(mode, tall):
 def test_dealer_hole_mask_and_no_duplicate_acceptance():
     zones = layout("multiplayer", inside=True)
     frame = np.full((240, 400, 3), 255, np.uint8)
-    packed, patches = prepare_layout_image(frame, zones)
-    table, dealer = patches
-    spurious = prediction(table, 280, 140)
-    assert np.all(packed[int(spurious["cy"]), int(spurious["cx"])] == 0)
-    model = FakeModel([spurious, prediction(dealer, 280, 140)])
+    model = RoiModel(frame, zones, [native_prediction(280, 140)])
     results, _ = predict_layout(model, frame, zones, 55, 45)
     assert len(results) == 1 and results[0]["owner"] == "dealer"
 
@@ -125,26 +141,21 @@ def test_dealer_hole_mask_and_no_duplicate_acceptance():
 def test_predictions_restore_native_once_preserve_boxes_and_equal_ranks(mode, tall):
     zones = layout(mode, tall=tall)
     frame = np.full((240, 400, 3), 80, np.uint8)
-    packed, patches = prepare_layout_image(frame, zones)
-    a, b = patches
-    mine_point = (30, 130)
-    dealer_point = (310, 30)
-    points = [(a, mine_point, "mine"), (b, dealer_point, "dealer")]
+    points = [(30, 130, "mine"), (310, 30, "dealer")]
     if mode == "multiplayer":
-        points.append((a, (200, 180), "other"))
-    model = FakeModel([prediction(p, *point) for p, point, _ in points])
+        points.append((200, 180, "other"))
+    model = RoiModel(frame, zones, [native_prediction(x, y) for x, y, _ in points])
     results, metadata = predict_layout(model, frame, zones, 55, 45)
-    assert model.calls == 1
-    assert np.array_equal(model.last_input, packed)
-    assert metadata == {"size": [packed.shape[1], packed.shape[0]], "patches": patches}
+    assert model.calls == (2 if mode == "individual" else 3)
+    assert metadata["strategy"] == "roi"
     assert len(results) == len(points)
-    for result, source, (_, point, owner) in zip(results, model.predictions, points):
-        assert (result["cx"], result["cy"], result["owner"]) == (*point, owner)
-        for key in ("class", "confidence", "width", "height"):
-            assert result[key] == source[key]
-        assert result["prepared_bbox"] == [source["cx"]-4, source["cy"]-6,
-                                            source["cx"]+4, source["cy"]+6]
-        assert result["input_size"] == metadata["size"]
+    assert {(p["cx"], p["cy"], p["owner"]) for p in results} == set(points)
+    for result in results:
+        left, top, _, _ = next(bounds for role, bounds, _ in model.rois
+                              if role == result["roi_role"])
+        x, y = result["cx"]-left, result["cy"]-top
+        assert result["prepared_bbox"] == [x-4, y-6, x+4, y+6]
+        assert result["width"] == 8 and result["height"] == 12
         assert result["network_bbox"] is None
     assert np.all(frame == 80)
 
@@ -153,16 +164,8 @@ def test_predictions_restore_native_once_preserve_boxes_and_equal_ranks(mode, ta
 def test_individual_discards_polygon_exterior_and_gap(tall):
     zones = layout(concave=True, tall=tall)
     frame = np.zeros((240, 400, 3), np.uint8)
-    _, patches = prepare_layout_image(frame, zones)
-    a, b = patches
-    # Point in the concave polygon's bounding box but outside the polygon.
-    outside = prediction(a, 80, 180)
-    # A point strictly inside the eight-pixel gap, for either packing direction.
-    if b["packed"][0] == 0:
-        gap = {"cx": 1, "cy": a["packed"][3]+3}
-    else:
-        gap = {"cx": a["packed"][2]+3, "cy": 1}
-    model = FakeModel([outside, gap, {"cx": -1, "cy": -1}, prediction(a, 30, 130)])
+    model = RoiModel(frame, zones, [native_prediction(80, 180), native_prediction(30, 130),
+                                   native_prediction(12, 112)])
     results, _ = predict_layout(model, frame, zones, 55, 45)
     assert [p["owner"] for p in results] == ["mine"]
 
@@ -181,11 +184,12 @@ def test_rejects_wrong_resolution_or_hosted_before_model_call(hosted):
 def test_preview_regions_patches_native_boxes_and_cache(monkeypatch, mode, cached):
     zones = layout(mode)
     frame = np.full((240, 400, 3), 40, np.uint8)
-    _, patches = prepare_layout_image(frame, zones)
-    pred = prediction(patches[0], 30, 130)
-    model = FakeModel([pred])
-    metadata = {"size": [80, 138], "patches": patches}
-    native = pred | {"cx": 30, "cy": 130}
+    rois = prepare_layout_rois(frame, zones)
+    patches = [{"role": role, "native": list(bounds),
+                "input_size": [image.shape[1], image.shape[0]]} for role, bounds, image in rois]
+    native = native_prediction(30, 130)
+    model = RoiModel(frame, zones, [native])
+    metadata = {"strategy": "roi", "size": [400, 240], "patches": patches}
     capture = SimpleNamespace(grab_bgr=Mock(return_value=frame), close_local=Mock(), resolution=(400, 240))
     provider = SimpleNamespace(players_model=Mock(return_value=model),
                                loaded_model_metadata=lambda _: {"model": "fake"})
@@ -211,7 +215,7 @@ def test_preview_regions_patches_native_boxes_and_cache(monkeypatch, mode, cache
         assert ((l, t), (r-1, b-1), region_preview.ZONE_COLORS[patch["role"]]) in boxes
     assert ((26, 124), (34, 136), (0, 200, 0)) in boxes
     assert result.size == (400, 240) and np.all(frame == 40)
-    assert model.calls == (0 if cached else 1)
+    assert model.calls == (0 if cached else len(rois))
     assert provider.players_model.call_count == (0 if cached else 1)
     assert capture.grab_bgr.call_count == (0 if cached else 1)
     assert capture.close_local.call_count == (0 if cached else 1)

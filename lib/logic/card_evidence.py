@@ -3,6 +3,66 @@ import math
 import cv2
 
 from ..common import constants
+from ..common.card_mappings import PLAYER_CLASS_MAP
+
+
+def _rank_suit(prediction):
+    name = prediction.get("name") or PLAYER_CLASS_MAP.get(
+        prediction.get("class"), prediction.get("class"))
+    rank, _, suit = str(name).partition(" of ")
+    return rank, prediction.get("suit") or suit or None
+
+
+def resolve_inverted_corners(predictions):
+    """Reconcile opposite 6/9 indices, never nearby staggered upper indices.
+
+    This is a conservative geometric check for index-sized boxes, not an
+    orientation classifier. Two different physical cards can be indistinguishable
+    without pixels of their upper indices; isolated moderate 6/9 stays uncertain.
+    Pairing needs compatible ownership/suit and a long lower-right diagonal.
+    """
+    observations = [dict(p) for p in predictions]
+    options = []
+    for i, upper in enumerate(observations):
+        rank, suit = _rank_suit(upper)
+        if rank not in ("6", "9"):
+            continue
+        w, h = upper.get("width", 30), upper.get("height", 40)
+        for j, lower in enumerate(observations):
+            other, other_suit = _rank_suit(lower)
+            if {rank, other} != {"6", "9"} or upper.get("owner") != lower.get("owner"):
+                continue
+            if suit and other_suit and suit != other_suit:
+                continue
+            lw, lh = lower.get("width", 30), lower.get("height", 40)
+            dx, dy = lower["cx"]-upper["cx"], lower["cy"]-upper["cy"]
+            if (min(w, lw, h, lh) <= 0
+                    or not .5 <= w/lw <= 2 or not .5 <= h/lh <= 2):
+                continue
+            if (.7*max(w, lw) <= dx <= 4*max(w, lw)
+                    and 1.4*max(h, lh) <= dy <= 6*max(h, lh)
+                    and .8 <= dy/dx <= 4.5):
+                options.append((i, j))
+    # Multiple plausible counterparts cannot establish a physical pair.
+    paired, removed = set(), set()
+    for i, j in options:
+        if (sum(i in pair for pair in options) != 1
+                or sum(j in pair for pair in options) != 1):
+            continue
+        observations[i]["inverted_corner_pair"] = True
+        observations[i]["corner_observations"] = [dict(observations[i]), dict(observations[j])]
+        paired.add(i)
+        removed.add(j)
+    result = []
+    for i, pred in enumerate(observations):
+        if i in removed:
+            continue
+        rank, _ = _rank_suit(pred)
+        if rank in ("6", "9") and i not in paired and not pred.get("inverted_corner_pair"):
+            if pred.get("confidence", 1.) < .70:
+                pred["ambiguous"] = True
+        result.append(pred)
+    return result
 
 
 class CardEvidence:
@@ -12,7 +72,7 @@ class CardEvidence:
     def observe(self, frame, predictions):
         current, result = [], []
         available = set(range(len(self.previous)))
-        for pred in predictions:
+        for pred in resolve_inverted_corners(predictions):
             x, y = pred["cx"], pred["cy"]
             w, h = pred.get("width", 30), pred.get("height", 40)
             l, t = max(0, round(x-w/2)), max(0, round(y-h/2))
@@ -35,8 +95,8 @@ class CardEvidence:
                 "char_scale": math.sqrt(max(1., w) * max(1., h)),
                 "is_rotated_double": w / max(1., h) > 1.15,
                 "unstable": bool(unstable and constants.CARD_EVIDENCE_ENABLED),
-                "ambiguous": bool(constants.CARD_EVIDENCE_ENABLED and
-                                  pred.get("class_margin", 1.) < .10)})
+                "ambiguous": bool(pred.get("ambiguous") or (
+                    constants.CARD_EVIDENCE_ENABLED and pred.get("class_margin", 1.) < .10))})
         self.previous = current
         return result
 

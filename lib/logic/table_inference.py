@@ -1,4 +1,4 @@
-"""Single region-union crop; detector outputs stay in original frame pixels."""
+"""Native ROI inference; detector outputs stay in original frame pixels."""
 import math
 
 import cv2
@@ -125,26 +125,61 @@ def prepare_layout_image(frame, layout):
     return packed, patches
 
 
+def prepare_layout_rois(frame, layout, padding=8):
+    """Independent native crops, including context around calibrated edges.
+
+    Pixels are never scaled or packed here. Ownership is checked against the
+    original polygons after inference, so padding never expands a player's zone.
+    Multiplayer adds a dedicated mine pass to the wider table pass.
+    """
+    if (frame.shape[1], frame.shape[0]) != layout.resolution:
+        raise ValueError("Frame and layout resolutions differ; no automatic stretching")
+    regions = list(inference_regions(layout))
+    if layout.mode == MULTIPLAYER:
+        regions.insert(1, ("mine", layout.mine))
+    result = []
+    for role, polygon in regions:
+        if polygon is None:
+            raise ValueError(f"Falta la region {role} para el modo {layout.mode}")
+        pad = max(0, int(padding))
+        left = max(0, math.floor(min(x for x, _ in polygon)) - pad)
+        top = max(0, math.floor(min(y for _, y in polygon)) - pad)
+        right = min(frame.shape[1], math.ceil(max(x for x, _ in polygon)) + pad)
+        bottom = min(frame.shape[0], math.ceil(max(y for _, y in polygon)) + pad)
+        result.append((role, (left, top, right, bottom),
+                       frame[top:bottom, left:right].copy()))
+    return result
+
+
 def predict_layout(model, frame, layout, confidence, overlap):
     if getattr(model, "hosted", False):
         raise ValueError("Table-layout replay requires a local model")
-    image, patches = prepare_layout_image(frame, layout)
-    predictions = model.predict(image, confidence, overlap)
-    input_size = [image.shape[1], image.shape[0]]
-    geometry = model_input_geometry(model, *input_size)
-    restored = []
-    for p in predictions:
-        for patch in patches:
-            x, y, right, bottom = patch["packed"]
-            if not (x <= p["cx"] < right and y <= p["cy"] < bottom):
+    restored, patches = [], []
+    for role, bounds, image in prepare_layout_rois(frame, layout):
+        left, top, right, bottom = bounds
+        input_size = [right-left, bottom-top]
+        patches.append({"role": role, "native": list(bounds), "input_size": input_size})
+        geometry = model_input_geometry(model, *input_size)
+        # Keep weak observations visible for review; they cannot confirm a
+        # rank below the configured acceptance threshold. Higher NMS IoU keeps
+        # overlapping cards available to the physical-identity stage.
+        predictions = model.predict(image, min(confidence, 35), max(overlap, 80))
+        for p in predictions:
+            if not (0 <= p["cx"] < right-left and 0 <= p["cy"] < bottom-top):
                 continue
-            left, top, _, _ = patch["native"]
-            cx, cy = p["cx"]-x+left, p["cy"]-y+top
+            cx, cy = p["cx"]+left, p["cy"]+top
             owner = layout.owner_at(cx, cy)
-            if ((patch["role"] == "mine" and owner == "mine")
-                    or (patch["role"] == "dealer" and owner == "dealer")
-                    or (patch["role"] == "table" and owner in ("mine", "other"))):
-                restored.append(p | _box_scale(p, input_size, geometry) |
-                                {"cx": cx, "cy": cy, "owner": owner})
-            break
-    return restored, {"size": [image.shape[1], image.shape[0]], "patches": patches}
+            if not ((role == "mine" and owner == "mine")
+                    or (role == "dealer" and owner == "dealer")
+                    or (role == "table" and owner == "other")):
+                continue
+            candidate = p | _box_scale(p, input_size, geometry) | {
+                "cx": cx, "cy": cy, "owner": owner, "roi_role": role,
+                "ambiguous": bool(p.get("ambiguous")
+                                  or p.get("confidence", 0) < confidence/100.)}
+            # A native point has exactly one primary pass: mine, dealer or
+            # other/table. Exclude table proposals from mine/dealer, so border
+            # deduplication cannot collapse two overlapping cards by distance.
+            restored.append(candidate)
+    size = [max(p["input_size"][i] for p in patches) for i in (0, 1)]
+    return restored, {"strategy": "roi", "size": size, "patches": patches}

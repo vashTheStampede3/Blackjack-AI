@@ -431,3 +431,40 @@ rank conflict was rejected. It exposed the missing 4 as pending, but also
 blocked a later 9 in the same crowded hand. `table_registry_08` fell to
 21/22 then 15/15, 36/37 overall; RC happened to stay 0. The code and its
 synthetic-only test were reverted. The retained result is `table_registry_07`.
+
+## Iteration 6 - Fullscreen ROI and overlapping index repair (2026-10-26)
+
+Hypothesis: sharing a single network resize between packed calibrated patches
+reduces small-index detail, global ONNX NMS removes different overlapping ranks,
+and a 35%-of-box identity radius merges nearby cards. Fixed table geometry can
+also hide a pending hero hand in a small window. These are code-inspection
+findings; the user's Zen Q/K/J/9 report was not independently recorded here.
+
+Change: run independent native 8-pixel-padded ROIs, partition accepted proposals
+by calibrated owner, use class-aware NMS and an overlap-tolerant ROI threshold,
+resolve unique opposed 6/9 corner pairs by the upper-left index, retain moderate
+isolated 6/9 as pending, reduce per-frame duplicate radius, fit both hand rows
+to actual canvas height, and preserve native DPI/client dimensions on capture.
+Preview shares the ROI path and shows native model boxes/confidences.
+
+Before: packed one-call inference and legacy fixture expectations were verified
+by inspection; no pre-change live or held-out accuracy score was obtained. The
+first broad regression after implementation exposed only old one-call metadata
+expectations; they were migrated to ROI-local coordinates, preserving native-box
+and frame-immutability checks.
+
+After: 18 deterministic fullscreen tests passed; full regression 1540 passed
+plus 37 subtests, no skips/exclusions. The real-Tk synthetic smoke passed 24
+features, including pending dealer/hero visibility at 220/280/400 px. A real
+DetectionEngine with synthetic detections counted the reported rank scenario as
+four cards, RC -3, dealer 20, hero 19, with a physical recommendation available.
+
+An additional temporal regression first failed with two active candidates when
+a weak lower 6 appeared before the upper 9. Reusing the pending physical ID
+when the unique corner pair becomes visible resolves it to one confirmed 9,
+RC 0 and no remaining uncertainty; that regression now passes.
+
+Decision: retain the repair. No model was replaced/trained and no desktop frame
+was persisted. These are functional and geometric measurements, not live vision
+accuracy. Opposing-corner geometry cannot prove orientation in every occlusion;
+GPU-browser freshness, live CPU and cycle p95 still require actual source data.

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from lib.logic.card_layout import CardLayout
-from lib.logic.table_inference import predict_layout, prepare_layout_image
+from lib.logic.table_inference import predict_layout, prepare_layout_rois
 
 
 def layout(dealer_inside=False):
@@ -21,33 +21,25 @@ def test_one_pass_native_pixels_exact_mapping_and_no_duplicate_dealer(inside):
     zones = layout(inside)
     frame = np.full((240, 400, 3), 255, np.uint8)
     frame[120:230, 10:310] = [10, 20, 30]
+    rois = prepare_layout_rois(frame, zones)
     xs, ys = zip(*zones.dealer)
-    frame[int(min(ys)):int(max(ys)), int(min(xs)):int(max(xs))] = [50, 60, 70]
-    packed, patches = prepare_layout_image(frame, zones)
-    assert not np.any(np.all(packed == 255, axis=2))  # no surrounding account/UI pixels
+    positions = [(140, 180), (sum(xs)/len(xs), sum(ys)/len(ys))]
     calls = []
     def predict(image, confidence, overlap):
+        role, (left, top, right, bottom), expected = rois[len(calls)]
+        assert np.array_equal(image, expected)
         calls.append((image.copy(), confidence, overlap))
-        result = []
-        for patch in patches:
-            left, top, right, bottom = patch["native"]
-            x, y, _, _ = patch["packed"]
-            cx, cy = ((140, 180) if patch["role"] == "table" else ((left+right)/2, (top+bottom)/2))
-            result.append({"cx": cx-left+x, "cy": cy-top+y, "width": 20., "height": 30.,
-                           "class": "8", "confidence": .95})
-            if inside and patch["role"] == "table":
-                # A spurious second box in the masked dealer hole cannot become another card.
-                result.append(result[-1] | {"cx": 250-left+x, "cy": 160-top+y})
-        return result + [{"cx": -1, "cy": -1}]
+        return [{"cx": cx-left, "cy": cy-top, "width": 20., "height": 30.,
+                 "class": "8", "confidence": .95} for cx, cy in positions
+                if left <= cx < right and top <= cy < bottom] + [{"cx": -1, "cy": -1}]
     model = SimpleNamespace(hosted=False, predict=predict)
     result, metadata = predict_layout(model, frame, zones, 55, 45)
-    assert len(calls) == 1 and calls[0][1:] == (55, 45)
-    assert np.array_equal(calls[0][0], packed)
+    assert len(calls) == 3 and all(call[1] <= 55 and call[2] > 45 for call in calls)
     assert len(result) == 2
     assert {(p["owner"], p["cx"], p["cy"]) for p in result} == {
         ("mine", 140, 180), ("dealer", sum(xs)/len(xs), sum(ys)/len(ys))}
     assert all(p["width"] == 20 and p["height"] == 30 for p in result)
-    assert metadata["size"] == [packed.shape[1], packed.shape[0]]
+    assert metadata["strategy"] == "roi" and len(metadata["patches"]) == 3
 
 
 def test_wrong_resolution_and_remote_model_are_rejected_before_inference():

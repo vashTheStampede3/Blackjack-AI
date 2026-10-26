@@ -230,7 +230,8 @@ class TableView:
         return rank
 
     def _update_hand(self, hand, cards, presentation, *, dealer=False):
-        size = scaling.size(constants.DEALER_CARD_RENDER_SIZE if dealer else constants.CARD_RENDER_SIZE)
+        size = hand.get("render_size", scaling.size(
+            constants.DEALER_CARD_RENDER_SIZE if dealer else constants.CARD_RENDER_SIZE))
         old = {key: (widget, rendered) for key, widget, rendered in
                zip(hand["card_keys"], hand["cards"], hand["rendered"])}
         keys = [(card.get("card_id") if isinstance(card.get("card_id"), str)
@@ -271,10 +272,11 @@ class TableView:
                             lambda _event, target=widget: self._dispatch_card_identity(target))
                 widget._identity_click_bound = True
             name = self._visual_name(card)
-            if rendered != name:
+            if rendered != name or getattr(widget, "_visual_size", None) != size:
                 photo = self.card_image(name, size)
                 widget.config(image=photo)
                 widget.image = photo
+                widget._visual_size = size
             widgets.append(widget)
             rendered_names.append(name)
         for widget, _rendered in old.values():
@@ -296,8 +298,11 @@ class TableView:
         self._resize_job = self.canvas.after(120, self._relayout)
 
     def _place_hand(self, hand, x, top, *, dealer=False):
-        cw, ch = scaling.size(constants.DEALER_CARD_RENDER_SIZE if dealer else constants.CARD_RENDER_SIZE)
-        hand["name"].place(x=x, y=top - scaling.px(30), anchor="n")
+        cw, ch = hand.get("render_size", scaling.size(
+            constants.DEALER_CARD_RENDER_SIZE if dealer else constants.CARD_RENDER_SIZE))
+        name_gap = hand.get("name_gap", scaling.px(30))
+        split_gap = hand.get("split_gap", scaling.px(26))
+        hand["name"].place(x=x, y=top - name_gap, anchor="n")
         count = len(hand["cards"])
         hand["empty"].place_forget()
         for title in hand["hand_titles"]:
@@ -317,15 +322,24 @@ class TableView:
                 n = hand["hand_of"].count(h)
                 cx = x + (h * 2 - 1) * (cw + scaling.px(40))
                 left = cx - (cw + (n - 1) * step) / 2
-                widget.place(x=left + depths[h] * step, y=top + scaling.px(26), anchor="nw")
+                widget.place(x=left + depths[h] * step, y=top + split_gap, anchor="nw")
                 depths[h] += 1
             else:
                 left = x - (cw + (count - 1) * step) / 2
                 widget.place(x=left + i * step, y=top, anchor="nw")
             widget.lift()
-        bottom = top + (ch if count else scaling.px(24)) + (scaling.px(26) if split else 0)
-        hand["split_notice"].place(x=x, y=bottom + scaling.px(8), anchor="n")
-        hand["advice"].place(x=x, y=bottom + scaling.px(32), anchor="n")
+        bottom = top + (ch if count else min(ch, scaling.px(24))) + (split_gap if split else 0)
+        hand["split_notice"].place(x=x, y=bottom + hand.get("notice_gap", scaling.px(8)), anchor="n")
+        hand["advice"].place(x=x, y=bottom + hand.get("advice_gap", scaling.px(32)), anchor="n")
+
+    def _fit_hand_images(self, hand, size):
+        """Resize only when the available card size changed; keep IDs/widgets."""
+        hand["render_size"] = size
+        for widget in hand["cards"]:
+            if getattr(widget, "_visual_size", None) != size:
+                photo = self.card_image(self._visual_name(widget.card_data), size)
+                widget.config(image=photo)
+                widget.image, widget._visual_size = photo, size
 
     def _relayout(self):
         self._resize_job = None
@@ -339,8 +353,41 @@ class TableView:
         self.telemetry_label.place(x=w / 2, y=scaling.px(2), anchor="n")
         self.advice_label.config(wraplength=max(1, w - scaling.px(24)))
         self.advice_label.place(x=w / 2, y=scaling.px(27), anchor="n")
-        self._place_hand(self.dealer, w / 2, scaling.px(82), dealer=True)
-        if self.seats:
+        individual = self._mode == "individual"
+        if individual:
+            # Reserve two visible rows instead of pushing Yo below a fixed
+            # dealer height. Card images shrink using the existing cache.
+            header = min(scaling.px(76), h * .24)
+            footer = min(scaling.px(34), h * .10)
+            row_height = max(1., (h-header-footer)/2)
+            name_gap = min(scaling.px(30), row_height*.25)
+            text_space = min(scaling.px(44), row_height*.35)
+            for index, hand in enumerate([self.dealer] + self.seats):
+                default = scaling.size(constants.DEALER_CARD_RENDER_SIZE
+                                       if index == 0 else constants.CARD_RENDER_SIZE)
+                split_gap = min(scaling.px(26), row_height*.16) if hand["split_valid"] else 0
+                fit = min(1., max(1., row_height-name_gap-text_space-split_gap)/default[1])
+                size = (max(1, round(default[0]*fit)), max(1, round(default[1]*fit)))
+                self._fit_hand_images(hand, size)
+                hand.update(name_gap=name_gap, split_gap=split_gap,
+                            notice_gap=2, advice_gap=min(16, text_space*.4))
+                for key in ("name", "empty", "advice", "split_notice"):
+                    hand[key].config(font=(constants.FONT_FAMILY,
+                        -max(9, round(min(scaling.px(15), row_height*.15))), "bold"))
+                hand["max_span"] = w - scaling.px(24)
+                self._place_hand(hand, w/2, header+index*row_height+name_gap,
+                                 dealer=index == 0)
+        else:
+            for index, hand in enumerate([self.dealer] + self.seats):
+                for key in ("name_gap", "split_gap", "notice_gap", "advice_gap"):
+                    hand.pop(key, None)
+                hand["name"].config(font=constants.FONT_SECTION)
+                for key in ("empty", "advice", "split_notice"):
+                    hand[key].config(font=constants.FONT_BODY_BOLD)
+                self._fit_hand_images(hand, scaling.size(constants.DEALER_CARD_RENDER_SIZE
+                                          if index == 0 else constants.CARD_RENDER_SIZE))
+            self._place_hand(self.dealer, w / 2, scaling.px(82), dealer=True)
+        if self.seats and not individual:
             cw, ch = scaling.size(constants.CARD_RENDER_SIZE)
             min_top = scaling.px(82) + scaling.size(constants.DEALER_CARD_RENDER_SIZE)[1] + scaling.px(50)
             count = len(self.seats)

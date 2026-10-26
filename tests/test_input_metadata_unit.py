@@ -47,14 +47,16 @@ def test_layout_predictions_keep_input_scale_bbox_and_native_center_once():
     calls = []
     def predict_inside(image, *args):
         calls.append(image.shape)
-        # crop packing order is table then dealer, so derive table patch origin.
-        return [{"cx": 12., "cy": 15., "width": 6., "height": 8., "class": "8"}]
+        return [{"cx": 12., "cy": 15., "width": 6., "height": 8.,
+                 "class": "8", "confidence": .95}]
     results, metadata = predict_layout(SimpleNamespace(hosted=False, predict=predict_inside),
                                        frame, zones, 50, 40)
-    assert len(calls) == 1
+    assert len(calls) == 3
     assert results[0]["prepared_bbox"] == [9., 11., 15., 19.]
     assert results[0]["network_bbox"] is None
-    assert results[0]["input_size"] == metadata["size"]
+    assert results[0]["input_size"] == metadata["patches"][0]["input_size"]
+    assert results[0]["cx"] == 12 + metadata["patches"][0]["native"][0]
+    assert results[0]["cy"] == 15 + metadata["patches"][0]["native"][1]
 
 
 def test_model_metadata_is_a_loaded_local_peek_and_unknown_stays_unknown():
@@ -143,7 +145,7 @@ def test_live_preview_cache_miss_never_captures_or_runs_another_detector():
         build_region_preview(engine, live_running=True)
 
 
-def test_offline_layout_preview_uses_same_packed_preparation_once():
+def test_offline_layout_preview_uses_same_native_rois_as_engine():
     from lib.logic.region_preview import build_region_preview
     source = ImageSource(np.zeros((80, 100, 3), np.uint8))
     calls = []
@@ -157,6 +159,6 @@ def test_offline_layout_preview_uses_same_packed_preparation_once():
         monkeypatch.setattr("lib.logic.region_preview.scaled_player_regions", lambda *_: [])
         monkeypatch.setattr("lib.logic.region_preview.dealer_area_rect", lambda *_: (80, 5, 95, 20))
         result = build_region_preview(engine, source=source)
-    assert len(calls) == 1
-    assert calls[0][0] == (68, 70, 3)
+    assert len(calls) == 3
+    assert [call[0] for call in calls] == [(58, 83, 3), (46, 31, 3), (28, 28, 3)]
     assert result.size == (100, 80)

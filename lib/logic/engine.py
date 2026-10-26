@@ -608,6 +608,8 @@ class DetectionEngine:
                       else [input_bounds[2]-input_bounds[0],
                             input_bounds[3]-input_bounds[1]])
         self._metrics["input_bounds"] = input_bounds
+        self._metrics["roi_count"] = (len(input_bounds.get("patches", []))
+                                      if isinstance(input_bounds, dict) else 1)
         player_preds = self._card_evidence.observe(frame, player_preds)
         # The dealer area is watched for the whole round: before the lock to
         # find the up-card, after it to count the dealer's playout cards —
