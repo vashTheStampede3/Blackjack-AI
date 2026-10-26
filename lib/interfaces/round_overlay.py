@@ -1,4 +1,5 @@
-"""One compact, interactive table overlay. The main application stays intact."""
+"""Mini Mesa renders the shared TablePresentation; card editing is deferred."""
+from copy import deepcopy
 import ctypes
 import sys
 import tkinter as tk
@@ -8,102 +9,34 @@ from ..common import constants
 from .capture_guard import apply_capture_guard
 
 TRANSPARENT_KEY = "#010203"
-VALID_RANKS = ("A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K")
-SUIT_SYMBOLS = {"S": "♠", "H": "♥", "D": "♦", "C": "♣"}
+SUIT_SYMBOLS = {"S": "♠", "H": "♥", "D": "♦", "C": "♣",
+                "Spades": "♠", "Hearts": "♥", "Diamonds": "♦", "Clubs": "♣"}
 RANK_SHORT = {"Ace": "A", "Jack": "J", "Queen": "Q", "King": "K"}
-RANK_FULL = {"A": "Ace", "J": "Jack", "Q": "Queen", "K": "King"}
 WIDTH, HEIGHT = 1000, 310
 
 
-def overlay_visibility(snapshot, running, editing=False, hud_on=True):
-    """Keep a requested overlay visible; describe why no current advice is available."""
+def overlay_visibility(presentation, running, editing=False, hud_on=True):
+    """Pure visibility policy; reading state belongs to the shared presenter."""
     if not hud_on:
         return False, ""
     if editing:
         return True, "AJUSTE DE POSICIÓN"
-    if not running:
+    state = presentation or {}
+    if not running or state.get("status") == "stopped":
         return True, "DETECCIÓN DETENIDA"
-    snap = snapshot or {}
-    if snap.get("error") or snap.get("source_error"):
-        return True, "ERROR DE DETECCIÓN"
-    reading = snap.get("reading") or {}
-    groups = snap.get("card_groups") or []
-    dealer = snap.get("dealer_cards") or []
-    count = snap.get("count") or {}
-    phase = (snap.get("phase") or {}).get("phase")
-    clean = reading.get("table_clean_confirmed") or reading.get("clean_table_confirmed")
-    waiting = reading.get("waiting_for_deal") or reading.get("phase") in ("waiting", "betting_open")
-    if (count.get("count_uncertain") or reading.get("count_uncertain")
-            or reading.get("count_pending") or reading.get("stale") or reading.get("ambiguous")
-            or phase == "unknown" or any(group.get("is_ambiguous") for group in groups)):
-        return True, "LECTURA INCIERTA · SIN CONSEJO"
-    present = any(group.get("cards") for group in groups) or dealer or reading.get("present")
-    if clean or waiting or phase in ("waiting", "betting_open") or not present:
-        return True, "ESPERANDO CARTAS"
-    return True, ""
+    message = state.get("message") or "Esperando cartas"
+    if state.get("status") == "uncertain" and "SIN CONSEJO" not in message:
+        message += " · SIN CONSEJO"
+    return True, message
 
 
-def confirmed_slot(group):
-    """Physical slot index, explicitly zero-based from the table's left edge."""
-    slot = group.get("slot_index", group.get("seat_slot"))
-    if isinstance(slot, int) and 0 <= slot < 7:
-        return slot
-    return None
+def card_chip_position(index, count, center=WIDTH / 2, y=80, span=WIDTH - 80):
+    """A centered, bounded fan of exactly the published cards."""
+    card_w, card_h = 27, 34
+    step = min(34, max(0, (span - card_w) / max(count - 1, 1)))
+    left = center - (card_w + max(0, count - 1) * step) / 2
+    return left + index * step, y, (card_w, card_h)
 
-
-def group_x(group, group_index=0, width=WIDTH):
-    """Place groups by confirmed slot, otherwise by relative observed bbox/order."""
-    slot = confirmed_slot(group)
-    if slot is not None:
-        return 18 + slot * 137
-    # Seat IDs are logical assignments and J1 is the rightmost table seat.
-    # This mapping preserves gaps: only occupied IDs get cards drawn.
-    sid = str(group.get("seat_id", ""))
-    if sid.startswith("J") and sid[1:].isdigit() and 1 <= int(sid[1:]) <= 7:
-        return 18 + (7-int(sid[1:])) * 137
-    box = group.get("bbox") or group.get("bbox_norm")
-    if box is None:
-        for card in group.get("cards", []):
-            if card.get("center_norm") is not None:
-                box = {"cx": card["center_norm"][0]}
-                break
-            if card.get("bbox"):
-                box = card["bbox"]
-                break
-    if isinstance(box, dict):
-        center = box.get("cx", box.get("x"))
-        if center is not None:
-            # x/cx values in [0, 1] are normalized; absolute values are
-            # deliberately ignored because no screen-to-overlay mapping exists.
-            try:
-                center = float(center)
-                if 0 <= center <= 1:
-                    return min(width-150, max(18, int(center*width)-66))
-            except (TypeError, ValueError):
-                pass
-    return 18 + group_index * 137
-
-
-def group_page(cards, page, per_page):
-    """Return one bounded local page, clamping stale page indices safely."""
-    pages = max(1, (len(cards)+per_page-1)//per_page)
-    page = min(max(0, int(page)), pages-1)
-    return cards[page*per_page:(page+1)*per_page], page, pages
-
-
-def card_chip_position(index, split_hand_index=None, x=18, y=105):
-    """Bounded chip layout inside one group hit area (132 x 104 px)."""
-    if split_hand_index is None:
-        return x+6+(index % 4)*30, y+27+(index//4)*28, (25, 27)
-    return x+6+split_hand_index*59+(index % 2)*27, y+33+(index//2)*29, (23, 27)
-
-
-def group_controls_y(y=105):
-    return y+99
-
-
-def supports_suit_correction(reference):
-    return not bool((reference or {}).get("legacy_ref"))
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
@@ -113,7 +46,7 @@ WS_EX_TOPMOST = 0x00000008
 
 
 class MiniTableOverlay:
-    """A single click-through Toplevel with clickable card chips and corrections."""
+    """One overlay window. Cards are display-only until identity editing is connected."""
     def __init__(self, parent, on_correct_card=None, on_close=None):
         self.parent = parent
         self.on_correct_card = on_correct_card or (lambda *_args, **_kwargs: None)
@@ -136,13 +69,14 @@ class MiniTableOverlay:
         self.affinity_ok = False
         self.hwnd = None
         self._last_state = None
+        self._metrics = {}
+        self._drawn_cards = []
         self._running = False
         self._selected_id = None
         self._selected_round = None
         self._selected_suit = None
         self._selected_ref = None
         self._selected_expected_name = None
-        self._group_pages = {}
         self._notice = ""
         self._active = False
         self._drag_origin = None
@@ -201,237 +135,136 @@ class MiniTableOverlay:
             self._show_noactivate()
         self._topmost_job = self.win.after(1500, self._keep_topmost)
 
-    def update_from_snapshot(self, snap, running=True):
+    def update_from_presentation(self, presentation, *, running=True, metrics=None):
+        """Receive detached UI data, never interpret engine snapshots or advice."""
         if not self.win.winfo_exists():
             return
-        self._last_state = snap or {}
+        state = presentation or {}
+        # Only scalar aggregate fields can enter the header. No physical data
+        # or recommendations are retained through this optional channel.
+        metrics = metrics or {}
+        aggregates = {}
+        if type(metrics.get("running")) is int:
+            aggregates["running"] = metrics["running"]
+        if type(metrics.get("true")) in (int, float):
+            aggregates["true"] = metrics["true"]
+        if type(metrics.get("count_uncertain")) is bool:
+            aggregates["count_uncertain"] = metrics["count_uncertain"]
+        changed = (state != self._last_state or bool(running) != self._running
+                   or aggregates != self._metrics)
+        # No selection survives while editing is disabled, including stale
+        # references retained by an older UI across a round/shoe change.
+        self._selected_id = self._selected_round = self._selected_ref = None
+        self._selected_suit = self._selected_expected_name = None
+        if not changed:
+            return
+        self._last_state = deepcopy(state)
+        self._metrics = deepcopy(aggregates)
         self._running = bool(running)
-        if snap is None or not self._running:
-            self._selected_id = self._selected_round = self._selected_ref = None
-            self._selected_suit = self._selected_expected_name = None
-        round_id = int(self._last_state.get("round", 0))
-        shoe_id = self._last_state.get("shoe_id") or (self._last_state.get("context") or {}).get("shoe_id")
-        if (self._selected_round is not None and self._selected_round != round_id) or (
-                self._selected_ref and self._selected_ref.get("shoe_id") not in (None, shoe_id)):
-            self._selected_id = None
-            self._selected_ref = None
-            self._selected_suit = None
-        if self._selected_ref and not self._selection_exists(self._selected_ref):
-            self._selected_id = None
-            self._selected_ref = None
-            self._selected_suit = None
-        self._notice = overlay_visibility(self._last_state, self._running,
-                                          self.editing, self.enabled)[1]
+        self._notice = overlay_visibility(state, self._running, self.editing, self.enabled)[1]
         self._draw()
 
     def _selection_exists(self, ref):
-        identity = ref.get("card_id")
-        cards = list(self._last_state.get("dealer_cards") or [])
-        for group in self._last_state.get("card_groups") or []:
-            cards.extend(group.get("cards") or [])
-        if identity is not None:
-            return any(str(card.get("card_id")) == str(identity) for card in cards)
-        legacy = ref.get("legacy_ref")
-        if not legacy:
+        """Identity lookup only; no visible selection or correction is enabled."""
+        state = self._last_state or {}
+        if any(ref.get(key) is not None and ref[key] != state.get(key)
+               for key in ("round_id", "shoe_id")):
             return False
-        for group in self._last_state.get("card_groups") or []:
-            for card in group.get("cards") or []:
-                if card.get("legacy_ref") == legacy:
-                    return True
-        for card in self._last_state.get("dealer_cards") or []:
-            if card.get("legacy_ref") == legacy:
-                return True
-        return False
+        cards = list((state.get("dealer") or {}).get("cards") or [])
+        for player in state.get("players") or []:
+            cards.extend(player.get("cards") or [])
+        if ref.get("card_id") is not None:
+            return any(card.get("card_id") == ref["card_id"] for card in cards)
+        return bool(ref.get("legacy_ref")) and any(
+            card.get("legacy_ref") == ref["legacy_ref"] for card in cards)
 
     def _draw(self):
-        c = self.canvas
-        c.delete("all")
+        self.canvas.delete("all")
+        self._drawn_cards = []
         state = self._last_state or {}
         active, notice = overlay_visibility(state, self._running, self.editing, self.enabled)
         self._active = active
-        if not self._running or notice in ("ESPERANDO CARTAS", "ERROR DE DETECCIÓN"):
-            state = state | {"card_groups": [], "dealer_cards": [], "dealer": {}, "seats": []}
-        count = state.get("count", {})
-        rc, tc = count.get("running", 0), count.get("true", 0.)
-        pending = bool((state.get("reading") or {}).get("count_pending"))
-        uncertain = bool(count.get("count_uncertain"))
-        status = " · INCIERTO" if uncertain else (" · LEYENDO" if pending else "")
-        self._rect(8, 8, WIDTH-8, 48, "#111827", "#64748B")
-        self._text(22, 27, f"RC {rc:+d}   TC {tc:+.1f}{status}", "#F8FAFC", 12, "w")
-        dealer = state.get("dealer") or {}
-        self._text(270, 27, "Crupier", "#BFDBFE", 9, "w")
-        dealer_cards = state.get("dealer_cards") or []
-        if dealer_cards:
-            for index, card in enumerate(dealer_cards[:8]):
-                self._draw_card(340+index*30, 10, card)
-        elif dealer.get("card"):
-            self._text(325, 27, self._rank(dealer.get("card")), "#F8FAFC", 10, "w")
-        advice = self._advice_text(state, running=self._running)
-        self._rect(WIDTH-310, 13, WIDTH-18, 43,
-                   "#7F1D1D" if uncertain else "#14532D", "#475569")
-        self._text(WIDTH-164, 28, advice, "#F8FAFC", 9, "center")
-        self._rect(8, 58, WIDTH-8, 216, "#0F172A", "#334155")
-        # A compact felt outline keeps dealer and player groups legible as one
-        # table. Only observed groups are painted; slot gaps remain empty.
-        self.canvas.create_oval(330, 64, 670, 108, fill="#123A31",
-                                outline="#2F6F5E", width=2)
-        self._text(WIDTH/2, 82, "DEALER", "#BFDBFE", 7, "center")
-        self.canvas.create_arc(72, 88, WIDTH-72, 248, start=0, extent=180,
-                               style=tk.ARC, outline="#2F6F5E", width=2)
-        groups = state.get("card_groups") or []
-        for index, group in enumerate(groups):
-            self._draw_group(group, index)
-        if not groups:
-            self._text(WIDTH/2, 108, "Detección detenida" if not self._running else "Esperando cartas",
-                       "#94A3B8", 11, "center")
-        close_tag = "close"
-        c.create_text(WIDTH-22, 28, text="×", fill="#CBD5E1", font=("Segoe UI", 13, "bold"), tags=(close_tag,))
-        c.tag_bind(close_tag, "<Button-1>", lambda _event: self._close_by_user())
-        if self._running and (self._selected_id or self._selected_ref):
-            self._draw_picker(state)
-        notice = self._notice or notice
+        blocked = not self._running or state.get("status") in (
+            "stopped", "error", "needs_calibration", "source_mismatch")
+        metrics = self._metrics
+        rc, tc = metrics.get("running"), metrics.get("true")
+        rc_text = f"{rc:+d}" if rc is not None else "—"
+        tc_text = f"{tc:+.1f}" if tc is not None else "—"
+        marker = " · INCIERTO" if metrics.get("count_uncertain") else ""
+        self._rect(8, 8, WIDTH - 8, 48, "#111827", "#64748B")
+        self._text(22, 27, f"RC {rc_text}   TC {tc_text}{marker}", "#F8FAFC", 12, "w")
+        self._text(WIDTH - 180, 28, self._advice_text(state, self._running), "#F8FAFC", 9, "center")
+        self._rect(8, 54, WIDTH - 8, 232, "#0F172A", "#334155")
+        self._text(WIDTH / 2, 65, "Crupier", "#BFDBFE", 9, "center")
+        dealer_cards = [] if blocked else (state.get("dealer") or {}).get("cards", [])
+        self._draw_hand(dealer_cards, WIDTH / 2, 80)
+        if state.get("mode") == "individual":
+            player = next((p for p in state.get("players", []) if p.get("id") == "hero"), {})
+            self._draw_group(player, blocked=blocked)
+        elif state.get("mode") == "multiplayer":
+            self._text(WIDTH / 2, 165, "Multijugador — representación dinámica pendiente",
+                       "#CBD5E1", 10, "center")
+        self.canvas.create_text(WIDTH - 22, 28, text="×", fill="#CBD5E1",
+                                font=("Segoe UI", 13, "bold"), tags=("close",))
+        self.canvas.tag_bind("close", "<Button-1>", lambda _event: self._close_by_user())
         if notice:
-            self._rect(8, 232, WIDTH-8, 260, "#7F1D1D", "#FCA5A5")
-            self._text(WIDTH/2, 246, notice, "#FEE2E2", 9, "center")
+            self._rect(8, 240, WIDTH - 8, 282, "#7F1D1D", "#FCA5A5")
+            self._text(WIDTH / 2, 261, notice, "#FEE2E2", 9, "center")
         if active:
-            self._show_window()
+            self._show_window()  # capture/activation guards remain authoritative
             self.win.attributes("-alpha", self.opacity)
         else:
             self.win.withdraw()
 
-    def _draw_group(self, group, group_index=0):
-        sid = str(group.get("seat_id", "?"))
-        # Unassigned groups use their normalized observed bbox when available;
-        # no empty physical seats are implied by the compact display.
-        x1 = group_x(group, group_index)
-        x2 = x1 + 132
-        y1, y2 = 105, 209
-        ambiguous = bool(group.get("is_ambiguous"))
-        hero = bool(group.get("is_hero"))
-        color = "#F59E0B" if ambiguous else ("#22C55E" if hero else "#475569")
-        self._rect(x1, y1, x2, y2, "#172417" if hero else "#1E293B", color)
-        label = f"⚠ {sid} · asiento dudoso" if ambiguous else (f"★ {sid} (Vos)" if hero else sid)
-        self._text((x1+x2)/2, y1+13, label, color if not ambiguous else "#FDE68A", 8, "center")
-        if group.get("closed_by_double") or group.get("doubled"):
-            self._text(x2-8, y1+13, "×2", "#FDE68A", 8, "e")
-        cards = group.get("cards", [])
-        split_hands = {}
-        for card in cards:
-            hand = card.get("hand", 0)
-            split_hands.setdefault(hand, []).append(card)
-        if group.get("has_split") or len(split_hands) > 1:
-            split_hands.setdefault(0, [])
-            split_hands.setdefault(1, [])
-            self._text(x2-8, y1+13, "DIV", "#FDE68A", 7, "e")
-            hand_keys = sorted(split_hands, key=str)
-            for hidx, hand in enumerate(hand_keys[:2]):
-                self._text(x1+34+hidx*59, y1+26, f"H{hidx+1}", "#CBD5E1", 6, "center")
-                hand_cards = split_hands[hand]
-                visible, page, page_count = group_page(
-                    hand_cards, self._group_pages.get((sid, hand), 0), 4)
-                for i, card in enumerate(visible):
-                    x, y, size = card_chip_position(i, hidx, x1, y1)
-                    self._draw_card(x, y, card, size=size)
-                if page_count > 1:
-                    self._page_controls(sid, hand, page, page_count,
-                                        x1+34+hidx*59, group_controls_y(y1))
-        else:
-            visible, page, page_count = group_page(
-                cards, self._group_pages.get((sid, None), 0), 8)
-            for i, card in enumerate(visible):
-                x, y, size = card_chip_position(i, None, x1, y1)
+    def _draw_hand(self, cards, center, y, span=WIDTH - 80):
+        if not cards:
+            self._text(center, y + 17, "[sin cartas]", "#94A3B8", 9, "center")
+        for index, card in enumerate(cards):
+            x, top, size = card_chip_position(index, len(cards), center, y, span)
+            self._draw_card(x, top, card, size=size)
+
+    def _draw_group(self, player, *, blocked=False):
+        """One logical hero. Existing hand tags control layout, never ownership."""
+        self._text(WIDTH / 2, 136, "Yo", "#22C55E", 10, "center")
+        cards = [] if blocked else player.get("cards", [])
+        tags = [card.get("hand") for card in cards]
+        split = bool(player.get("has_split"))
+        valid = (split and bool(cards)
+                 and all(type(tag) is int and tag in (0, 1) for tag in tags)
+                 and set(tags) == {0, 1})
+        if valid:
+            centers = (WIDTH / 2 - 180, WIDTH / 2 + 180)
+            for hand, center in enumerate(centers):
+                self._text(center, 155, f"Mano {hand + 1}", "#CBD5E1", 8, "center")
+            depths, counts = [0, 0], [tags.count(0), tags.count(1)]
+            # Iterate publication order, keeping the original identity on each
+            # item. Positioning by explicit tags does not discover a split.
+            for card, hand in zip(cards, tags):
+                x, y, size = card_chip_position(depths[hand], counts[hand], centers[hand], 174, 300)
                 self._draw_card(x, y, card, size=size)
-            if page_count > 1:
-                self._page_controls(sid, None, page, page_count,
-                                    x1+65, group_controls_y(y1))
-
-    def _page_controls(self, seat_id, hand, page, page_count, cx, y):
-        for dx, step, label in ((-22, -1, "‹"), (22, 1, "›")):
-            tag = f"page:{seat_id}:{hand}:{step}"
-            self.canvas.create_text(cx+dx, y, text=label, fill="#FDE68A",
-                                    font=("Segoe UI", 9, "bold"), tags=(tag,))
-            self.canvas.tag_bind(tag, "<Button-1>",
-                lambda _event, sid=seat_id, h=hand, delta=step, count=page_count:
-                    self._turn_group_page(sid, h, delta, count))
-        self._text(cx, y, f"{page+1}/{page_count}", "#CBD5E1", 6, "center")
-
-    def _turn_group_page(self, seat_id, hand, delta, count):
-        key = (seat_id, hand)
-        self._group_pages[key] = (self._group_pages.get(key, 0)+delta) % count
-        self._draw()
+                depths[hand] += 1
+        else:
+            self._draw_hand(cards, WIDTH / 2, 166)
+            if split and cards:
+                self._text(WIDTH / 2, 219, "Split incierto: etiquetas de mano incompletas",
+                           "#FDE68A", 8, "center")
 
     def _draw_card(self, x, y, card, size=(27, 34)):
         card_w, card_h = size
-        identity = str(card.get("card_id", ""))
         rank = card.get("rank")
-        suit = SUIT_SYMBOLS.get(card.get("suit"), "")
-        unknown = rank is None
-        fill, edge, fg = (("#7C2D12", "#F97316", "#FFEDD5") if unknown else
-                          ("#F8FAFC", "#EAB308", "#0F172A") if card.get("ambiguous_seat") else
-                          ("#F8FAFC", "#38BDF8", "#0F172A"))
-        tag = f"card:{identity or 'unsupported'}"
-        self.canvas.create_rectangle(x, y, x+card_w, y+card_h, fill=fill, outline=edge, width=2,
-                                     tags=(tag,))
-        self.canvas.create_text(x+card_w/2, y+card_h/2, text=("?" if unknown else self._rank(rank))+suit,
-                                fill=fg, font=("Segoe UI", 7, "bold"), tags=(tag,))
-        if identity:
-            self.canvas.tag_bind(tag, "<Button-1>",
-                                 lambda _event, cid=identity, value=card: self._select_card(cid, value))
-        elif card.get("legacy_ref"):
-            self.canvas.tag_bind(tag, "<Button-1>",
-                                 lambda _event, value=card: self._select_card(None, value))
-
-    def _draw_picker(self, state):
-        x1, y1, x2, y2 = 12, 174, WIDTH-12, HEIGHT-8
-        self._rect(x1, y1, x2, y2, "#0B1220", "#38BDF8")
-        self._text(x1+10, y1+14, "Corregir carta · vistos en shoe", "#E2E8F0", 8, "w")
-        if not self._selected_id and not self._selected_ref:
-            self._text(x1+380, y1+14, "Corrección no disponible para esta referencia", "#FCA5A5", 8, "w")
-            return
-        seen = state.get("seen_by_rank") or {}
-        step = (x2-x1-20)/13
-        for index, rank in enumerate(VALID_RANKS):
-            bx = x1+10+index*step
-            tag = f"rank:{rank}"
-            full = RANK_FULL.get(rank, rank)
-            amount = seen.get(full, 0)
-            self._rect(bx, y1+25, bx+step-3, y1+63, "#1E293B", "#64748B")
-            self.canvas.create_text(bx+(step-3)/2, y1+37, text=rank, fill="#F8FAFC",
-                                    font=("Segoe UI", 9, "bold"), tags=(tag,))
-            self.canvas.create_text(bx+(step-3)/2, y1+53, text=f"({amount})", fill="#7DD3FC",
-                                    font=("Consolas", 7), tags=(tag,))
-            self.canvas.tag_bind(tag, "<Button-1>",
-                lambda _event, val=rank: self._emit("set_rank", new_rank=val))
-        sy = y1+77
-        if supports_suit_correction(self._selected_ref):
-            self._text(x1+8, sy+10, "Palo", "#94A3B8", 8, "w")
-            sx = x1+54
-            for code, symbol in SUIT_SYMBOLS.items():
-                tag = f"suit:{code}"
-                self._rect(sx, sy, sx+28, sy+22, "#1D4ED8" if self._selected_suit == code else "#1E293B", "#475569")
-                self.canvas.create_text(sx+14, sy+11, text=symbol, fill="#F8FAFC", tags=(tag,))
-                self.canvas.tag_bind(tag, "<Button-1>", lambda _event, val=code: self._toggle_suit(val))
-                sx += 32
-        else:
-            self._text(x1+8, sy+10, "Palo: no compatible con esta referencia", "#FCA5A5", 8, "w")
-        self._button_text(x1+198, sy+11, "«no era carta»", "discard", "#7F1D1D")
-        self._text(x1+350, sy+11, "Cambiar jugador", "#CBD5E1", 8, "center")
-        sx = x1+421
-        for number in range(1, 8):
-            self._button_text(sx, sy+11, f"J{number}", f"seat:J{number}", "#1E293B", width=34)
-            sx += 38
-
-    def _button_text(self, x, y, text, tag, color, width=132):
-        self._rect(x-width/2, y-11, x+width/2, y+11, color, "#64748B")
-        self.canvas.create_text(x, y, text=text, fill="#F8FAFC",
-                                font=("Segoe UI", 8, "bold"), tags=(tag,))
-        action = "not_a_card" if tag == "discard" else None
-        seat = tag.split(":", 1)[1] if tag.startswith("seat:") else None
-        if action:
-            self.canvas.tag_bind(tag, "<Button-1>", lambda _event: self._emit(action))
-        if seat:
-            self.canvas.tag_bind(tag, "<Button-1>",
-                                 lambda _event, val=seat: self._emit("change_seat", new_seat_id=val))
+        confirmed = card.get("state") == "confirmed" and not card.get("reason") and rank is not None
+        label = self._rank(rank) + SUIT_SYMBOLS.get(card.get("suit"), "") if confirmed else "?"
+        fill, edge, fg = (("#F8FAFC", "#38BDF8", "#0F172A") if confirmed else
+                          ("#7C2D12", "#F97316", "#FFEDD5"))
+        item = self.canvas.create_rectangle(x, y, x + card_w, y + card_h,
+                                             fill=fill, outline=edge, width=2)
+        self.canvas.create_text(x + card_w / 2, y + card_h / 2, text=label,
+                                fill=fg, font=("Segoe UI", 7, "bold"))
+        identity = {key: deepcopy(card[key]) for key in ("card_id", "legacy_ref") if key in card}
+        identity.update(round_id=(self._last_state or {}).get("round_id"),
+                        shoe_id=(self._last_state or {}).get("shoe_id"))
+        self._drawn_cards.append({"item": item, "card": deepcopy(card), "identity": identity})
+        # No card tag bindings, picker, rank/suit editor or J1–J7 controls.
 
     def _rect(self, x1, y1, x2, y2, fill, outline):
         self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=1)
@@ -442,29 +275,18 @@ class MiniTableOverlay:
 
     @staticmethod
     def _rank(rank):
-        value = RANK_SHORT.get(rank, str(rank))
-        return value
+        return RANK_SHORT.get(rank, str(rank))
 
     @staticmethod
-    def _advice_text(state, running=True):
-        state = state or {}
-        _, notice = overlay_visibility(state, running)
-        if notice == "DETECCIÓN DETENIDA":
-            return "Detección detenida"
-        if notice == "ERROR DE DETECCIÓN":
-            return "ERROR DE DETECCIÓN · SIN CONSEJO"
-        if "SIN CONSEJO" in notice:
-            return "SIN CONSEJO · lectura dudosa"
-        if notice == "ESPERANDO CARTAS":
-            return "Esperando cartas"
-        reading = state.get("reading") or {}
-        mine = next((seat for seat in state.get("seats", []) if seat.get("mine")), None)
-        if mine and mine.get("advice_withdrawn_reason"):
-            return "SIN CONSEJO · lectura dudosa"
-        if (not reading.get("inferred_at") or not reading.get("present")
-                or not reading.get("dealer_ok") or not (mine or {}).get("cards")):
-            return "Esperando cartas"
-        return mine.get("optimal") or mine.get("advice") or "Esperando mano propia"
+    def _advice_text(presentation, running=True):
+        state = presentation or {}
+        if not running or state.get("status") != "ready" or state.get("advice_available") is not True:
+            return "SIN CONSEJO"
+        heroes = [p for p in state.get("players", []) if p.get("is_hero")]
+        if len(heroes) != 1 or heroes[0].get("is_ambiguous") or not heroes[0].get("cards"):
+            return "SIN CONSEJO"
+        advice = heroes[0].get("advice")
+        return advice.strip() if isinstance(advice, str) and advice.strip() else "SIN CONSEJO"
 
     def _canvas_click(self, event):
         if 8 <= event.y <= 48 and event.x < 240:
@@ -476,46 +298,6 @@ class MiniTableOverlay:
             x = event.x_root-self._drag_origin[0]
             y = event.y_root-self._drag_origin[1]
             self.win.geometry(f"{WIDTH}x{HEIGHT}{x:+d}{y:+d}")
-
-    def _select_card(self, identity, card=None):
-        self._selected_id = identity
-        self._selected_round = int((self._last_state or {}).get("round", 0))
-        card = card or {}
-        self._selected_ref = {"card_id": identity, "legacy_ref": card.get("legacy_ref"),
-                              "shoe_id": (self._last_state or {}).get("shoe_id")}
-        self._selected_expected_name = card.get("rank")
-        self._selected_suit = None
-        self._draw()
-
-    def _toggle_suit(self, suit):
-        if not supports_suit_correction(self._selected_ref):
-            self._notice = "CAMBIO DE PALO NO DISPONIBLE PARA ESTA REFERENCIA"
-            self._draw()
-            return
-        self._selected_suit = None if self._selected_suit == suit else suit
-        self._draw()
-
-    def _emit(self, action, new_rank=None, new_seat_id=None):
-        if not self._selected_id and not (self._selected_ref or {}).get("legacy_ref"):
-            return
-        if new_seat_id:
-            self._notice = "CAMBIO DE JUGADOR NO DISPONIBLE PARA ESTA CARTA"
-            self._draw()
-            return
-        metadata = self._selected_ref or {}
-        args = (self._selected_id, self._selected_round, action,
-                new_rank, self._selected_suit, new_seat_id)
-        if metadata.get("legacy_ref"):
-            self.on_correct_card(*args, reference=metadata["legacy_ref"],
-                                 shoe_id=metadata.get("shoe_id"),
-                                 expected_name=self._selected_expected_name)
-        else:
-            self.on_correct_card(*args)
-        self._selected_id = None
-        self._selected_ref = None
-        self._selected_expected_name = None
-        self._selected_suit = None
-        self._draw()
 
     def set_opacity(self, opacity):
         self.opacity = max(.25, min(1., float(opacity)))

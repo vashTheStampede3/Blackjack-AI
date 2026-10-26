@@ -1,4 +1,4 @@
-"""Mini Mesa state, lifecycle and capture guards without windows or workers."""
+"""Mini Mesa presentation state, lifecycle and capture guards without windows."""
 from copy import deepcopy
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
@@ -9,6 +9,7 @@ from lib.interfaces import modern_gui as gui_module, round_overlay as overlay_mo
 from lib.interfaces.modern_gui import ModernBlackjackGUI as GUI
 from lib.interfaces.round_overlay import MiniTableOverlay as Overlay, overlay_visibility
 from lib.interfaces.capture_guard import CaptureGuard
+from lib.logic.table_presentation import build_table_presentation
 from tests.test_gui_sections_unit import Variable, Widget, sidebar
 
 
@@ -17,31 +18,36 @@ def isolated_ui_settings(monkeypatch):
     monkeypatch.setattr(overlay_module.constants, "UI", deepcopy(overlay_module.constants.UI))
 
 
-def current_state():
+def snapshot_state():
     return {"source_profile": "Profile", "source_mode": "individual", "source_resolution": [320, 180],
             "round": 8, "shoe_id": "shoe", "seq": 3,
-            "reading": {"present": True, "inferred_at": 10, "dealer_ok": True},
-            "card_groups": [{"seat_id": "J1", "is_hero": True,
-                             "cards": [{"card_id": "shoe:1", "rank": "8"}]}],
-            "dealer_cards": [{"card_id": "shoe:2", "rank": "10"}],
+            "card_groups": [{"seat_id": "J4", "is_hero": True,
+                             "cards": [{"card_id": "shoe:1", "rank": "8", "state": "confirmed", "owner": "mine"},
+                                       {"card_id": "shoe:3", "rank": "8", "state": "confirmed", "owner": "mine"}]}],
+            "dealer_cards": [{"card_id": "shoe:2", "rank": "10", "state": "confirmed", "owner": "dealer"}],
+            "count": {"running": 3, "true": 1.5, "count_uncertain": False},
             "seats": [{"mine": True, "cards": ["8", "8"], "optimal": "Split"}]}
+
+
+def current_state():
+    return build_table_presentation(snapshot_state(), selected_mode="individual", running=True)
 
 
 @pytest.mark.parametrize("state,running,editing,enabled,expected", [
     (None, False, False, False, (False, "")),
     ({}, True, True, False, (False, "")),
     (None, False, False, True, (True, "DETECCIÓN DETENIDA")),
-    (None, True, False, True, (True, "ESPERANDO CARTAS")),
-    ({}, True, False, True, (True, "ESPERANDO CARTAS")),
-    ({"reading": {"waiting_for_deal": True}}, True, False, True, (True, "ESPERANDO CARTAS")),
-    ({"reading": {"table_clean_confirmed": True}}, True, False, True, (True, "ESPERANDO CARTAS")),
-    ({"reading": {"clean_table_confirmed": True}}, True, False, True, (True, "ESPERANDO CARTAS")),
-    ({"card_groups": [{"cards": [{"rank": "8"}]}]}, True, False, True, (True, "")),
-    ({"dealer_cards": [{"rank": "10"}]}, True, False, True, (True, "")),
-    ({"error": "capture failed"}, True, False, True, (True, "ERROR DE DETECCIÓN")),
-    ({"source_error": "size changed"}, True, False, True, (True, "ERROR DE DETECCIÓN")),
-    ({"error": "failed"}, False, False, True, (True, "DETECCIÓN DETENIDA")),
-    ({"error": "failed"}, False, True, True, (True, "AJUSTE DE POSICIÓN")),
+    (None, True, False, True, (True, "Esperando cartas")),
+    ({}, True, False, True, (True, "Esperando cartas")),
+    ({"status": "waiting", "message": "Esperando cartas"}, True, False, True, (True, "Esperando cartas")),
+    ({"status": "reading", "message": "Lectura incompleta"}, True, False, True, (True, "Lectura incompleta")),
+    ({"status": "uncertain", "message": "Lectura dudosa"}, True, False, True, (True, "Lectura dudosa · SIN CONSEJO")),
+    ({"status": "ready", "message": "Mano lista"}, True, False, True, (True, "Mano lista")),
+    ({"status": "error", "message": "Error de captura"}, True, False, True, (True, "Error de captura")),
+    ({"status": "needs_calibration", "message": "Falta calibrar"}, True, False, True, (True, "Falta calibrar")),
+    ({"status": "source_mismatch", "message": "Otro modo"}, True, False, True, (True, "Otro modo")),
+    ({"status": "error", "message": "Error"}, False, False, True, (True, "DETECCIÓN DETENIDA")),
+    ({"status": "error", "message": "Error"}, False, True, True, (True, "AJUSTE DE POSICIÓN")),
 ])
 def test_visibility_priority_and_notices(state, running, editing, enabled, expected):
     original = deepcopy(state)
@@ -49,48 +55,43 @@ def test_visibility_priority_and_notices(state, running, editing, enabled, expec
     assert state == original
 
 
-@pytest.mark.parametrize("field", ["count_uncertain", "count_pending", "stale", "ambiguous"])
-def test_reading_uncertainty_precedes_waiting(field):
-    state = {"reading": {field: True, "waiting_for_deal": True}}
-    assert overlay_visibility(state, True) == (True, "LECTURA INCIERTA · SIN CONSEJO")
+@pytest.mark.parametrize("obsolete", [
+    {"count": {"count_uncertain": True}}, {"reading": {"count_pending": True, "stale": True}},
+    {"card_groups": [{"is_ambiguous": True}]}, {"phase": {"phase": "unknown"}},
+])
+def test_visibility_uses_published_status_instead_of_reinterpreting_snapshot_fields(obsolete):
+    state = current_state() | obsolete
+    assert overlay_visibility(state, True) == (True, "Mano lista")
 
 
-def test_count_and_group_uncertainty():
-    for state in ({"count": {"count_uncertain": True}}, {"card_groups": [{"is_ambiguous": True}]}):
-        assert overlay_visibility(state, True) == (True, "LECTURA INCIERTA · SIN CONSEJO")
-
-
-@pytest.mark.parametrize("phase", ["waiting", "betting_open"])
-@pytest.mark.parametrize("container", ["reading", "phase"])
-def test_waiting_phase_suppresses_residual_advice(phase, container):
+@pytest.mark.parametrize("status", ["waiting", "reading", "uncertain", "stopped", "error", "needs_calibration", "source_mismatch"])
+def test_nonready_status_suppresses_residual_advice(status):
     state = current_state()
-    state[container] = {"phase": phase}
-    assert overlay_visibility(state, True) == (True, "ESPERANDO CARTAS")
-    assert Overlay._advice_text(state) == "Esperando cartas"
+    state.update(status=status, message="mensaje", advice_available=True)
+    state["players"][0]["advice"] = "Split"
+    assert Overlay._advice_text(state) == "SIN CONSEJO"
 
 
-@pytest.mark.parametrize("case,expected", [("stopped", "Detección detenida"), ("empty", "Esperando cartas"),
-    ("pending", "SIN CONSEJO"), ("ambiguous", "SIN CONSEJO"), ("error", "SIN CONSEJO"),
-    ("no_reading", "Esperando cartas"), ("no_hand", "Esperando cartas"),
-    ("no_dealer", "Esperando cartas"), ("valid", "Split")])
-def test_advice_needs_current_reading_and_owned_hand(case, expected):
+@pytest.mark.parametrize("case", ["historical", "other_player", "no_link", "no_hand", "ambiguous", "multiple_heroes", "stopped", "valid"])
+def test_advice_requires_explicit_shared_contract(case):
     state = current_state()
-    if case == "empty":
-        state = {"seats": state["seats"]}
-    elif case == "pending":
-        state["reading"]["count_pending"] = True
-    elif case == "ambiguous":
-        state["card_groups"][0]["is_ambiguous"] = True
-    elif case == "error":
-        state["error"] = "failed"
-    elif case == "no_reading":
-        state["reading"] = {}
+    state["advice_available"] = case != "no_link"
+    hero = state["players"][0]
+    if case == "historical":
+        state["seats"] = [{"mine": True, "optimal": "Split"}]
+    else:
+        hero["advice"] = "Split"
+    if case == "other_player":
+        hero["is_hero"] = False
     elif case == "no_hand":
-        state["seats"][0]["cards"] = []
-    elif case == "no_dealer":
-        state["reading"]["dealer_ok"] = False
+        hero["cards"] = []
+    elif case == "ambiguous":
+        hero["is_ambiguous"] = True
+    elif case == "multiple_heroes":
+        state["players"].append(deepcopy(hero))
     original = deepcopy(state)
-    assert expected in Overlay._advice_text(state, running=case != "stopped")
+    expected = "Split" if case == "valid" else "SIN CONSEJO"
+    assert Overlay._advice_text(state, running=case != "stopped") == expected
     assert state == original
 
 
@@ -104,21 +105,22 @@ def fake_overlay(on_close=None):
     o.canvas = Mock()
     o.enabled, o._capture_hidden, o._active, o.editing = True, False, True, False
     o.hwnd, o.opacity, o._topmost_job = None, .8, "job"
-    o._last_state, o._running, o._notice = {}, False, ""
+    o._last_state, o._running, o._notice = None, False, ""
+    o._metrics, o._drawn_cards = {}, []
     o._selected_id = o._selected_round = o._selected_ref = o._selected_suit = o._selected_expected_name = None
-    o._text, o._rect, o._draw_card, o._draw_group, o._draw_picker = Mock(), Mock(), Mock(), Mock(), Mock()
+    o._text, o._rect, o._draw_card, o._draw_group = Mock(), Mock(), Mock(), Mock()
     o.on_close, o.ensure_on_screen = on_close, Mock()
     return o
 
 
 @pytest.mark.parametrize("running", [False, True])
-def test_none_snapshot_clears_obsolete_selections_and_state(running):
+def test_none_presentation_clears_obsolete_selections_and_state(running):
     o = fake_overlay()
     o._last_state = current_state()
     o._selected_id, o._selected_round = "shoe:1", 8
     o._selected_ref = {"card_id": "shoe:1", "shoe_id": "shoe"}
     o._selected_suit, o._selected_expected_name = "H", "8"
-    o.update_from_snapshot(None, running=running)
+    o.update_from_presentation(None, running=running)
     assert o._last_state == {} and o._running is running
     assert all(getattr(o, field) is None for field in (
         "_selected_id", "_selected_round", "_selected_ref", "_selected_suit", "_selected_expected_name"))
@@ -128,47 +130,40 @@ def test_none_snapshot_clears_obsolete_selections_and_state(running):
 
 
 @pytest.mark.parametrize("changed", ["round", "shoe", "card"])
-def test_snapshot_updates_preserve_stale_reference_protections(changed):
+def test_presentation_updates_preserve_stale_reference_protections(changed):
     o = fake_overlay()
     state = current_state()
     o._selected_id, o._selected_round = "shoe:1", 8
     o._selected_ref = {"card_id": "shoe:1", "shoe_id": "shoe"}
     if changed == "round":
-        state["round"] = 9
+        state["round_id"] = 9
     elif changed == "shoe":
         state["shoe_id"] = "new-shoe"
     else:
-        state["card_groups"] = []
-    o.update_from_snapshot(state, running=True)
+        state["players"][0]["cards"] = []
+    o.update_from_presentation(state, running=True)
     assert o._selected_id is None and o._selected_ref is None
-    o._draw_picker.assert_not_called()
+    assert not any(str(call.args[0]).startswith(("card:", "rank:", "seat:"))
+                   for call in o.canvas.tag_bind.call_args_list)
 
 
-@pytest.mark.parametrize("case", ["stopped", "waiting", "error", "uncertain", "active"])
+@pytest.mark.parametrize("case", ["stopped", "waiting", "error", "uncertain", "ready"])
 def test_draw_keeps_window_but_only_current_observations(case):
     o = fake_overlay()
     state = current_state()
+    state.update(status=case, message=f"mensaje {case}")
     if case == "waiting":
-        state["reading"]["waiting_for_deal"] = True
-    elif case == "error":
-        state["error"] = "failed"
-    elif case == "uncertain":
-        state["reading"]["stale"] = True
+        state["players"][0]["cards"] = []
+        state["dealer"]["cards"] = []
     before = deepcopy(state)
-    o.update_from_snapshot(state, running=case != "stopped")
+    o.update_from_presentation(state, running=case != "stopped")
     assert state == before and o._active and o.enabled
     o.win.deiconify.assert_called()
-    assert o._draw_group.call_count == int(case in ("uncertain", "active"))
-    assert o._draw_card.call_count == int(case in ("uncertain", "active"))
+    o._draw_group.assert_called_once()
+    assert o._draw_group.call_args.kwargs["blocked"] == (case in ("stopped", "error"))
+    assert o._draw_card.call_count == int(case in ("uncertain", "ready"))
     text = str(o._text.call_args_list)
-    if case == "stopped":
-        assert "Detección detenida" in text and "Split" not in text
-    elif case in ("uncertain", "error"):
-        assert "SIN CONSEJO" in text and "Split" not in text
-    elif case == "waiting":
-        assert "Esperando cartas" in text and "Split" not in text
-    else:
-        assert "Split" in text
+    assert "SIN CONSEJO" in text and "Split" not in text
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -253,8 +248,8 @@ def fake_gui():
     g = SimpleNamespace(round_enabled=Variable(False), round_overlay=None, hud=None, hud_nav_btn=Mock(),
         _source_configured=True, _applied_mode_context=("Profile", "individual", (320, 180)),
         controller=SimpleNamespace(running=False, engine=SimpleNamespace(
-            get_snapshot=Mock(return_value=current_state()), persist_settings_async=Mock())),
-        _correct_overlay_card=Mock(), set_status=Mock())
+            get_snapshot=Mock(return_value=snapshot_state()), persist_settings_async=Mock())),
+        _correct_overlay_card=Mock(), set_status=Mock(), _app_mode="individual")
     for method in ("_toggle_round_overlay", "_toggle_hud", "_on_hud_closed"):
         setattr(g, method, MethodType(getattr(GUI, method), g))
     return g
@@ -270,11 +265,18 @@ def test_activation_and_snapshot_filter_share_provenance(monkeypatch, mismatch):
         snapshot[mismatch] = [640, 360] if mismatch == "source_resolution" else "Other"
     before = deepcopy(snapshot)
     o = fake_overlay()
-    o.update_from_snapshot = Mock()
+    o.update_from_presentation = Mock()
     factory = Mock(return_value=o)
     monkeypatch.setattr(overlay_module, "MiniTableOverlay", factory)
     g._toggle_hud()
-    o.update_from_snapshot.assert_called_once_with(snapshot if mismatch is None else None, False)
+    o.update_from_presentation.assert_called_once()
+    args, kwargs = o.update_from_presentation.call_args
+    assert args[0] is g._table_presentation
+    assert args[0]["status"] == ("needs_calibration" if mismatch == "unconfigured" else "stopped")
+    assert args[0]["dealer"]["cards"] == []
+    assert kwargs["running"] is False
+    assert kwargs["metrics"] == (snapshot["count"] if mismatch is None else {})
+    g._correct_overlay_card.assert_not_called()
     assert g.round_overlay is g.hud is o
     assert snapshot == before
     assert snapshot["round"] == 8 and snapshot["shoe_id"] == "shoe"
@@ -285,7 +287,7 @@ def test_toggle_single_instance_close_x_poll_and_reopen(monkeypatch):
     g = fake_gui()
     instances = []
 
-    def make(parent, on_correct_card, on_close):
+    def make(parent, on_close):
         o = fake_overlay(on_close)
         instances.append(o)
         return o

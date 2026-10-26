@@ -20,6 +20,7 @@ from ..logic.background import DetectionController
 from ..logic.counting import COUNTER_KEYS
 from ..logic.phase import PHASE_LABELS
 from ..logic.region_preview import build_region_preview
+from ..logic.table_presentation import build_table_presentation
 from . import scaling
 from .card_picker import CardPicker
 from .table_view import TableView
@@ -87,6 +88,7 @@ class ModernBlackjackGUI(tk.Tk):
         self._capture_guard = CaptureGuard(self, lambda: self.round_overlay)
         self.controller.engine.capture.guard = self._capture_guard
         self._last_seq = -1
+        self._last_table_signature = None
         self._preview_busy = False
 
         # Ghost-mode executor (V4 Feature 2): a second consumer of the same
@@ -726,10 +728,9 @@ class ModernBlackjackGUI(tk.Tk):
         wrapper.grid(row=1, column=1, sticky="nsew", padx=12, pady=12)
         wrapper.rowconfigure(0, weight=1)
         wrapper.columnconfigure(0, weight=1)
-        self.table = TableView(wrapper, self._on_card_click, self._on_dealer_click,
-                               self._on_split_click, self._on_seat_name_click,
-                               self._on_dealer_extra_click,
-                               on_advice_click=self._on_advice_click)
+        # Index-based corrections/inspectors cannot identify physical cards.
+        # Keep them disconnected until the identity correction integration.
+        self.table = TableView(wrapper)
         self.table.canvas.grid(row=0, column=0, sticky="nsew")
         # Clicking the felt parks keyboard focus back on the window — an
         # Entry otherwise keeps focus for the whole session after one click
@@ -1322,8 +1323,8 @@ class ModernBlackjackGUI(tk.Tk):
             if snapshot is not None and snapshot["seq"] != self._last_seq:
                 self._last_seq = snapshot["seq"]
                 self._render(snapshot)
-            if self.round_overlay is not None:
-                self.round_overlay.update_from_snapshot(snapshot, self.controller.running)
+            # Stop, source invalidation and mode changes need no new sequence.
+            ModernBlackjackGUI._render_table(self, snapshot)
             # The executor ticks EVERY poll, not just on new snapshots —
             # its staleness disarm and verification deadlines must keep
             # running when the worker stalls and snapshots stop flowing.
@@ -1367,13 +1368,56 @@ class ModernBlackjackGUI(tk.Tk):
         self._set_configuration_controls(False)
         self.start_btn.config(state="normal" if self._source_configured else "disabled")
 
+    def _render_table(self, snapshot):
+        """Share one cached presentation from the provenance-filtered read.
+
+        No engine writes, profile reads or alternate snapshot filter. The
+        signature also notices loss of a valid read without a new engine seq.
+        """
+        table = getattr(self, "table", None)
+        mode_var = getattr(self, "mode_var", None)
+        try:
+            mode = (ModernBlackjackGUI._selected_app_mode(self) if mode_var is not None
+                    else getattr(self, "_app_mode", None))
+        except ValueError:
+            mode = None
+        configured = getattr(self, "_source_configured", False)
+        applied = getattr(self, "_applied_mode_context", None)
+        profile_var = getattr(self, "profile_var", None)
+        profile = profile_var.get() if profile_var is not None else None
+        monitor = getattr(self, "monitor", None)
+        resolution = (getattr(monitor, "width", None), getattr(monitor, "height", None))
+        signature = (snapshot.get("seq") if snapshot is not None else None,
+                     self.controller.running, mode, profile, applied, resolution, configured)
+        changed = (signature != getattr(self, "_last_table_signature", None)
+                   or getattr(self, "_table_presentation", None) is None)
+        if changed:
+            valid_configuration = configured and applied is not None and mode in APP_MODE_LABELS
+            presentation = build_table_presentation(snapshot if valid_configuration else None,
+                                                    selected_mode=mode,
+                                                    running=self.controller.running)
+            if not valid_configuration:
+                # Calibration validity belongs to the GUI, not the pure presenter.
+                presentation.update(status="needs_calibration", message="Falta calibrar la fuente para el modo seleccionado")
+            elif snapshot is None and self.controller.running:
+                presentation["message"] = "Sin lectura válida de la configuración actual"
+            count = snapshot.get("count", {}) if snapshot is not None and valid_configuration else {}
+            self._table_metrics = {key: count[key] for key in ("running", "true", "count_uncertain") if key in count}
+            if table is not None:
+                table.remember_snapshot(presentation)
+                table.update(presentation)
+            self._table_presentation = presentation
+            self._last_table_signature = signature
+        overlay = getattr(self, "round_overlay", None)
+        if overlay is not None and (changed or overlay is not getattr(self, "_presentation_overlay", None)):
+            overlay.update_from_presentation(self._table_presentation, running=self.controller.running,
+                                             metrics=self._table_metrics)
+        self._presentation_overlay = overlay
+        return self._table_presentation
+
     def _render(self, snap):
         self._sync_money_entries(snap)
-        self.table.remember_snapshot(snap)
-        self.table.update(snap)
-        hud = getattr(self, "hud", None)
-        if hud is not None and hud.winfo_exists():
-            hud.update_from_snapshot(snap, running=self.controller.running)
+        ModernBlackjackGUI._render_table(self, snap)
 
         count = snap["count"]
         for key, var in self.counter_vars.items():
@@ -1570,10 +1614,10 @@ class ModernBlackjackGUI(tk.Tk):
                     not self.round_overlay.winfo_exists()):
                 from .round_overlay import MiniTableOverlay
                 self.round_overlay = MiniTableOverlay(
-                    self, self._correct_overlay_card, on_close=self._on_hud_closed)
+                    self, on_close=self._on_hud_closed)
             self.hud = self.round_overlay
-            self.round_overlay.update_from_snapshot(
-                ModernBlackjackGUI._current_display_snapshot(self), self.controller.running)
+            ModernBlackjackGUI._render_table(
+                self, ModernBlackjackGUI._current_display_snapshot(self))
             self.round_overlay.ensure_on_screen()
             self.round_overlay._show_noactivate()
         elif self.round_overlay is not None:

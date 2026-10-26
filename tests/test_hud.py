@@ -82,8 +82,8 @@ class FormatHudLines(unittest.TestCase):
     def test_round_overlay_name_resolves_to_the_single_mini_table_surface(self):
         self.assertIs(RoundOverlay, MiniTableOverlay)
         self.assertEqual(MiniTableOverlay._advice_text({
-            "count": {"count_uncertain": True}, "seats": []}),
-            "SIN CONSEJO · lectura dudosa")
+            "status": "uncertain", "message": "Lectura dudosa", "players": [],
+            "advice_available": False}), "SIN CONSEJO")
 
 
 if __name__ == "__main__":
