@@ -13,7 +13,11 @@ COUNTER_KEYS = ["Ace", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
 
 def counter_key(card_name: str) -> str:
     rank = cards.rank_of(card_name)
-    return "10" if rank in ("Jack", "Queen", "King") else rank
+    if rank in ("Jack", "Queen", "King", "J", "Q", "K"):
+        return "10"
+    if rank in ("Ace", "A"):
+        return "Ace"
+    return rank
 
 
 class CardCounter:

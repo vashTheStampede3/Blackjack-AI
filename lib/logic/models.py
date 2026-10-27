@@ -344,6 +344,27 @@ class ManualShuffleModel:
         return []
 
 
+class DigitalCardModel:
+    """Specialized detector model for 2D digital cards with optional fallback."""
+    name = "Digital 2D Card Detector"
+    hosted = False
+
+    def __init__(self, fallback_model=None):
+        self.fallback_model = fallback_model
+        self._metadata = {"model_type": "digital_template_segmenter", "version": "1.0"}
+
+    def predict(self, image_bgr: np.ndarray, confidence=50, overlap=45, role="dealer"):
+        from .digital_detector import DigitalCardDetector
+        detector = DigitalCardDetector.get_instance()
+        preds = detector.detect_digital_strip(image_bgr, role=role, min_confidence=confidence / 100.)
+        if preds or self.fallback_model is None:
+            return preds
+        try:
+            return self.fallback_model.predict(image_bgr, confidence, overlap)
+        except Exception:
+            return []
+
+
 def model_metadata(model):
     """Report only already-loaded model identity and local sidecar facts.
 
@@ -448,6 +469,22 @@ class ModelProvider:
                         "dealer_cards.pt", constants.PROJECT_ID_DEALER, constants.MODEL_VERSION_DEALER)
             return self._dealer
 
+    def digital_model(self):
+        with self._lock:
+            if getattr(self, "_digital", None) is None:
+                self._digital = DigitalCardModel(fallback_model=self.dealer_model())
+            return self._digital
+
+    def physical_model(self):
+        return self.players_model()
+
+    def route_surface_model(self, mode: str, role: str):
+        from .app_modes import surface_type_for_zone, SURFACE_DIGITAL
+        surface = surface_type_for_zone(mode, role)
+        if surface == SURFACE_DIGITAL:
+            return self.digital_model()
+        return self.physical_model()
+
     def has_hosted(self):
         """True if any initialized backend is a hosted (network) session."""
         with self._lock:
@@ -520,3 +557,18 @@ class ModelProvider:
         if self._dealer is not None and (not parts or self._dealer.name != parts[0]):
             parts.append(self._dealer.name)
         return " + ".join(parts) if parts else "not loaded"
+
+
+def route_surface_model(provider_or_models, mode: str, role: str):
+    """Route to appropriate model (digital vs physical) based on mode and role."""
+    from .app_modes import surface_type_for_zone, SURFACE_DIGITAL
+    surface = surface_type_for_zone(mode, role)
+    if hasattr(provider_or_models, "route_surface_model"):
+        return provider_or_models.route_surface_model(mode, role)
+    if hasattr(provider_or_models, "digital_model") and surface == SURFACE_DIGITAL:
+        return provider_or_models.digital_model()
+    if isinstance(provider_or_models, dict):
+        if surface == SURFACE_DIGITAL:
+            return provider_or_models.get("digital") or provider_or_models.get("dealer")
+        return provider_or_models.get("physical") or provider_or_models.get("players")
+    return provider_or_models

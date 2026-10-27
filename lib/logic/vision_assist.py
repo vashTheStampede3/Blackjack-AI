@@ -230,3 +230,36 @@ def triage(frame_bgr) -> str | None:
     if not label and not detail:
         return None
     return f"{label} — {detail}" if detail else label
+
+
+def is_digital_surface(mode: str, role: str) -> bool:
+    """Return True if the given role in the mode is a 2D digital representation."""
+    from .app_modes import is_digital_zone
+    return is_digital_zone(mode, role)
+
+
+def detect_digital_cards(roi_bgr, role="dealer", offset=(0, 0)) -> list[dict]:
+    """Detect 2D digital cards in a ROI strip."""
+    from .digital_detector import detect_digital_cards as _detect
+    return _detect(roi_bgr, role=role, offset=offset)
+
+
+def triage_surface(frame_bgr, layout) -> dict:
+    """Return digital/physical surface classification and cards for all active layout zones."""
+    from .app_modes import zones_for_mode, surface_type_for_zone
+    result = {}
+    if layout is None:
+        return result
+    for role in zones_for_mode(layout.mode):
+        surface = surface_type_for_zone(layout.mode, role)
+        result[role] = {"surface": surface}
+        if surface == "digital":
+            poly = getattr(layout, role, None)
+            if poly is not None and len(poly) >= 3:
+                left = max(0, int(min(p[0] for p in poly)))
+                top = max(0, int(min(p[1] for p in poly)))
+                right = min(frame_bgr.shape[1], int(max(p[0] for p in poly)))
+                bottom = min(frame_bgr.shape[0], int(max(p[1] for p in poly)))
+                crop = frame_bgr[top:bottom, left:right]
+                result[role]["cards"] = detect_digital_cards(crop, role=role, offset=(left, top))
+    return result

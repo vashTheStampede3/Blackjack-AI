@@ -154,16 +154,32 @@ def prepare_layout_rois(frame, layout, padding=8):
 def predict_layout(model, frame, layout, confidence, overlap):
     if getattr(model, "hosted", False):
         raise ValueError("Table-layout replay requires a local model")
+    from .app_modes import surface_type_for_zone, SURFACE_DIGITAL
+    from .digital_detector import DigitalCardDetector
+    from .card_layout import CardLayout
+
+    detector = DigitalCardDetector.get_instance()
     restored, patches = [], []
     for role, bounds, image in prepare_layout_rois(frame, layout):
         left, top, right, bottom = bounds
         input_size = [right-left, bottom-top]
         patches.append({"role": role, "native": list(bounds), "input_size": input_size})
         geometry = model_input_geometry(model, *input_size)
-        # Keep weak observations visible for review; they cannot confirm a
-        # rank below the configured acceptance threshold. Higher NMS IoU keeps
-        # overlapping cards available to the physical-identity stage.
-        predictions = model.predict(image, min(confidence, 35), max(overlap, 80))
+        surface_type = surface_type_for_zone(layout.mode, role)
+
+        # Predictions from the model
+        model_predictions = model.predict(image, min(confidence, 35), max(overlap, 80))
+
+        if surface_type == SURFACE_DIGITAL and not model_predictions:
+            # 2D Digital Card Detector pass if model returned no predictions
+            try:
+                digital_preds = detector.detect_digital_strip(image, role=role, min_confidence=confidence / 100.)
+            except Exception:
+                digital_preds = []
+            predictions = digital_preds if digital_preds else []
+        else:
+            predictions = model_predictions
+
         for p in predictions:
             if not (0 <= p["cx"] < right-left and 0 <= p["cy"] < bottom-top):
                 continue
@@ -175,6 +191,7 @@ def predict_layout(model, frame, layout, confidence, overlap):
                 continue
             candidate = p | _box_scale(p, input_size, geometry) | {
                 "cx": cx, "cy": cy, "owner": owner, "roi_role": role,
+                "surface": surface_type,
                 "ambiguous": bool(p.get("ambiguous")
                                   or p.get("confidence", 0) < confidence/100.)}
             # A native point has exactly one primary pass: mine, dealer or
@@ -183,3 +200,139 @@ def predict_layout(model, frame, layout, confidence, overlap):
             restored.append(candidate)
     size = [max(p["input_size"][i] for p in patches) for i in (0, 1)]
     return restored, {"strategy": "roi", "size": size, "patches": patches}
+
+
+# ---------------------------------------------------------------------------
+# Surface Routing (Etapa 8: Digital vs Physical Detection)
+# ---------------------------------------------------------------------------
+
+SURFACE_DIGITAL = "digital"
+SURFACE_PHYSICAL = "physical"
+
+
+def surface_for_role(mode: str, role: str) -> str:
+    """Return expected surface representation ('digital' vs 'physical') for a given role and mode.
+
+    - In individual mode:
+      dealer -> digital
+      mine -> digital
+    - In multiplayer mode:
+      dealer -> digital (HUD / digital stream graphics)
+      table -> physical (physical cards on felt)
+      mine -> physical (physical cards on felt)
+    """
+    from .app_modes import normalize_mode, INDIVIDUAL, MULTIPLAYER
+    norm_mode = normalize_mode(mode)
+    if norm_mode == INDIVIDUAL:
+        if role in ("dealer", "mine"):
+            return SURFACE_DIGITAL
+        raise ValueError(f"Rol desconocido '{role}' para modo individual")
+    elif norm_mode == MULTIPLAYER:
+        if role == "dealer":
+            return SURFACE_DIGITAL
+        elif role in ("table", "mine"):
+            return SURFACE_PHYSICAL
+        raise ValueError(f"Rol desconocido '{role}' para modo multijugador")
+    raise ValueError(f"Modo desconocido: {mode}")
+
+
+def route_surface_model(mode: str, role: str, *,
+                        digital_model=None, physical_model=None,
+                        provider=None, fallback=True):
+    """Route to appropriate detector model based on surface type and mode.
+
+    In multiplayer:
+      dealer -> digital_model (with fallback to physical_model if digital_model is None)
+      table/mine -> physical_model
+    In individual:
+      dealer -> digital_model (with fallback to physical_model)
+      mine -> digital_model (with fallback to physical_model)
+
+    Returns tuple: (selected_model, effective_surface)
+    """
+    surface = surface_for_role(mode, role)
+
+    if provider is not None:
+        if digital_model is None:
+            if hasattr(provider, "digital_model"):
+                digital_model = provider.digital_model()
+            elif hasattr(provider, "dealer_model"):
+                digital_model = provider.dealer_model()
+        if physical_model is None:
+            if hasattr(provider, "physical_model"):
+                physical_model = provider.physical_model()
+            elif hasattr(provider, "players_model"):
+                physical_model = provider.players_model()
+
+    if surface == SURFACE_DIGITAL:
+        if digital_model is not None:
+            return digital_model, SURFACE_DIGITAL
+        if fallback and physical_model is not None:
+            return physical_model, "physical_fallback"
+        return digital_model, SURFACE_DIGITAL
+    else:  # SURFACE_PHYSICAL
+        return physical_model, SURFACE_PHYSICAL
+
+
+def predict_layout_dual(frame, layout, confidence, overlap, *,
+                        digital_model=None, physical_model=None,
+                        provider=None, fallback=True):
+    """Dual specialized inference routing digital models to digital surfaces
+    and physical models to physical surfaces according to layout mode.
+    """
+    if (frame.shape[1], frame.shape[0]) != layout.resolution:
+        raise ValueError("Frame and layout resolutions differ; no automatic stretching")
+    restored, patches = [], []
+    for role, bounds, image in prepare_layout_rois(frame, layout):
+        model, surface = route_surface_model(
+            layout.mode, role,
+            digital_model=digital_model,
+            physical_model=physical_model,
+            provider=provider,
+            fallback=fallback,
+        )
+        if model is None:
+            continue
+        if getattr(model, "hosted", False):
+            raise ValueError("Table-layout replay requires a local model")
+
+        left, top, right, bottom = bounds
+        input_size = [right - left, bottom - top]
+        patches.append({
+            "role": role,
+            "surface": surface,
+            "native": list(bounds),
+            "input_size": input_size,
+        })
+        geometry = model_input_geometry(model, *input_size)
+        raw_predictions = model.predict(image, min(confidence, 35), max(overlap, 80))
+
+        # If digital_model was used for dealer but yielded empty predictions and fallback is True,
+        # try physical fallback model
+        if surface == SURFACE_DIGITAL and not raw_predictions and fallback and physical_model is not None and model is not physical_model:
+            raw_predictions = physical_model.predict(image, min(confidence, 35), max(overlap, 80))
+            geometry = model_input_geometry(physical_model, *input_size)
+            surface = "physical_fallback"
+
+        for p in raw_predictions:
+            if not (0 <= p["cx"] < right - left and 0 <= p["cy"] < bottom - top):
+                continue
+            cx, cy = p["cx"] + left, p["cy"] + top
+            owner = layout.owner_at(cx, cy)
+            if not ((role == "mine" and owner == "mine")
+                    or (role == "dealer" and owner == "dealer")
+                    or (role == "table" and owner == "other")):
+                continue
+            candidate = p | _box_scale(p, input_size, geometry) | {
+                "cx": cx,
+                "cy": cy,
+                "owner": owner,
+                "roi_role": role,
+                "surface": surface,
+                "ambiguous": bool(p.get("ambiguous")
+                                  or p.get("confidence", 0) < confidence / 100.0),
+            }
+            restored.append(candidate)
+
+    size = [max(p["input_size"][i] for p in patches) for i in (0, 1)] if patches else [0, 0]
+    return restored, {"strategy": "roi_dual", "size": size, "patches": patches}

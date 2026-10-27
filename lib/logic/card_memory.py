@@ -78,6 +78,7 @@ class RememberedCard:
     user_locked: bool = False
     rank_votes: dict = field(default_factory=dict)
     suit_votes: dict = field(default_factory=dict)
+    surface: str = "physical"
 
     @property
     def is_locked(self):
@@ -249,6 +250,8 @@ class CardMemory:
             card.vx, card.vy = (pred["cx"]-card.cx)/dt, (pred["cy"]-card.cy)/dt
         card.cx, card.cy = pred["cx"], pred["cy"]
         card.width, card.height = pred.get("width", 30), pred.get("height", 40)
+        if pred.get("surface"):
+            card.surface = pred["surface"]
         card.last_seen, card.observed_owner = now, pred["owner"]
         card.trajectory.append((now, card.cx, card.cy))
         if len(card.trajectory) > 12:

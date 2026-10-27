@@ -159,6 +159,45 @@ class CardLayout:
             return "other"
         return None
 
+    def surface_for(self, role: str) -> str:
+        """Return 'digital' or 'physical' surface type for the given layout role."""
+        from .app_modes import surface_type_for_zone
+        return surface_type_for_zone(self.mode, role)
+
+    @staticmethod
+    def separate_horizontal_strip(cards):
+        """Ensure horizontal strips of cards (e.g. 2..5 dealer/mine cards)
+        never collapse adjacent cards by strictly preserving individual bounding boxes
+        and spacing along the x-axis."""
+        if not cards or len(cards) <= 1:
+            return list(cards)
+
+        # Sort cards by horizontal center
+        sorted_cards = sorted(cards, key=lambda c: (
+            c["cx"] if isinstance(c, dict) else getattr(c, "cx", 0.0)
+        ))
+
+        # If two distinct cards have practically identical horizontal center (< 0.5px),
+        # nudge the second one slightly right so they don't collapse into a single point
+        result = []
+        for card in sorted_cards:
+            if not result:
+                result.append(card)
+                continue
+            prev = result[-1]
+            prev_cx = prev["cx"] if isinstance(prev, dict) else getattr(prev, "cx", 0.0)
+            curr_cx = card["cx"] if isinstance(card, dict) else getattr(card, "cx", 0.0)
+
+            if abs(curr_cx - prev_cx) < 0.5:
+                if isinstance(card, dict):
+                    card["cx"] = prev_cx + 1.0
+                elif hasattr(card, "cx"):
+                    card.cx = prev_cx + 1.0
+
+            result.append(card)
+
+        return result
+
 
 @dataclass
 class PlayerSeatGroup:

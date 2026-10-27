@@ -138,3 +138,49 @@
   - `lib/interfaces/capture_guard.py`: omisión de ocultamiento durante arrastre activo para proteger la captura de puntero de Windows.
   - `lib/interfaces/table_view.py`: filtrado de configure para ignorar desplazamientos de posición y debounce ante cambios de tamaño.
   - `tests/test_drag_stability_and_geometry_unit.py`: 24 pruebas unitarias que cubren estabilidad de arrastre, congelamiento, hitbox y eventos configure.
+
+## Etapa 8 - Detección Dual Especializada para Cartas Digitales (Dealer Siempre y Modo Individual) vs Cartas Físicas (Jugadores en Multijugador)
+
+- Fecha: 2026-10-26. Rama: `counter-vision`.
+- Estado: Implementación y validación completadas al 100% de forma autónoma.
+- Problema resuelto: El casino muestra siempre las cartas del crupier (`dealer`) y las cartas de `mine` en modo 1 contra 1 (`individual`) mediante representaciones gráficas digitales 2D (sprites planos en el HUD de la interfaz), mientras que las cartas de los jugadores en multijugador (`table` y `mine`) son naipes físicos reales sobre el paño filmados con perspectiva y posibles sombras/solapamientos. El modelo YOLO generalista entrenado en cartas físicas perdía o no detectaba con fiabilidad las cartas digitales en estos contextos.
+- Implementación técnica:
+  1. Enrutamiento por Tipo de Superficie (`app_modes.py`, `table_inference.py`, `models.py`):
+     - `individual`: `dealer` = `DIGITAL`, `mine` = `DIGITAL`.
+     - `multiplayer`: `dealer` = `DIGITAL` (con fallback `PHYSICAL`), `mine` = `PHYSICAL`, `table` = `PHYSICAL`.
+     - Definidas constantes `SURFACE_DIGITAL` y `SURFACE_PHYSICAL`, mapa `SURFACE_ROUTING`, helpers `surface_type_for_zone(mode, zone)`, `is_digital_zone(mode, zone)`, `surface_for_role(mode, role)` y dispatch `route_surface_model`.
+     - En `ModelProvider` (`lib/logic/models.py`), añadidos `digital_model()` (con instancia de `DigitalCardModel`), `physical_model()` y enrutador dinámico `route_surface_model`.
+  2. Detector Especializado de Cartas Digitales 2D (`digital_detector.py`, `models.py`, `table_inference.py`):
+     - Creación de `DigitalCardDetector` (`lib/logic/digital_detector.py`):
+       - Carga de plantillas de glifos normalizados (24x32) correspondientes a los 13 rangos (`2..10, J, Q, K, A`) a partir de `assets/cards/` y fuentes tipográficas sintéticas de alto contraste.
+       - Segmentación precisa de cartas horizontales en la franja del HUD (`segment_cards_in_strip`) mediante proyecciones vertical y horizontal, límites de área, filtros de contraste (`std >= 15.0`) y proyección de bordes Sobel horizontal para individualizar naipes contiguos o levemente superpuestos sin colapsarlos.
+       - Clasificación por coincidencia de plantillas multiescala de glifos (`classify_card_crop`), con umbral de correlación normalizada y sin alucinación de cartas sobre fondos uniformes o vacíos.
+       - Detector en franjas `detect_digital_strip` y modelo empaquetado `DigitalCardModel` que expone la interfaz de inferencia estándar con `surface="digital"`.
+       - Inferencia dual `predict_layout_dual` y soporte en `predict_layout` manteniendo compatibilidad absoluta con modelos de prueba y preservación de coordenadas nativas exactas.
+  3. Preservación Estricta de Franjas y Bounding Boxes (`card_layout.py`):
+     - `CardLayout.separate_horizontal_strip`: garantiza que cartas en franjas horizontales de 2 a 5 cartas en `dealer` o `mine` nunca colapsen sus coordenadas `cx` ni sus cajas delimitadoras.
+  4. Generador de Datos Sintéticos para Entrenamiento (`tools/prepare_training.py`):
+     - `generate_digital_card_sprite`: genera sprites digitales 2D de alta calidad con fuentes tipográficas estándar para los 13 rangos y 4 palos.
+     - `generate_digital_card_strip`: genera franjas horizontales completas de 1 a 5 cartas con espaciado o solapamiento configurable (0 a 30 px).
+     - `format_yolo_labels`: genera etiquetas normalizadas en formato YOLO (`<class_id> <cx> <cy> <w> <h>`).
+     - `generate_synthetic_strip_dataset`: pipeline generador de conjuntos de datos sintéticos completos en disco o en memoria para reentrenamiento continuo.
+  5. Integración con Cerrojo de Persistencia (`CardMemory`) y Edición Manual:
+     - Detecciones digitales integran el campo `surface="digital"` y transicionan ordenadamente por consenso temporal a `CardState("locked")`.
+     - Inmutabilidad durante toda la ronda ante oclusión temporal o bajadas de confianza.
+     - Pruebas integradas de hit-testing de clics para edición de 1 clic en `RoundOverlay` y `TableView` tanto en cartas digitales como físicas.
+- Validación y Pruebas:
+  - Nueva suite unitaria: `tests/test_digital_vs_physical_detection_unit.py` (53/53 pruebas aprobadas al 100%).
+  - Suite completa de pytest: 1665 aprobados, 1 saltado (BitBlt en entorno headless), 37 subtests aprobados, 0 fallos.
+  - Smoke test GUI: `tools/gui_smoke.py` ejecutado y aprobado (26 funciones, 0 fallos, 0 errores de callback, 0 errores reportados).
+  - `git diff --check`: 0 errores ni advertencias de formato o espacios.
+- Archivos modificados/creados:
+  - `lib/logic/digital_detector.py`: nueva clase `DigitalCardDetector` con segmentación, clasificación por plantillas y detección de franjas digitales 2D.
+  - `lib/logic/models.py`: clase `DigitalCardModel`, métodos `digital_model()`, `physical_model()` y enrutamiento en `ModelProvider`.
+  - `lib/logic/table_inference.py`: funciones `surface_for_role`, `route_surface_model`, `predict_layout_dual` y soporte en `predict_layout`.
+  - `lib/logic/app_modes.py`: constantes de superficie `SURFACE_DIGITAL`, `SURFACE_PHYSICAL`, tabla de enrutamiento y helpers de zona.
+  - `lib/logic/card_layout.py`: método `CardLayout.surface_for` y `CardLayout.separate_horizontal_strip`.
+  - `lib/logic/card_memory.py`: atributo `surface` en `RememberedCard` e interoperabilidad con cerrojo `locked`.
+  - `lib/logic/vision_assist.py`: helpers `is_digital_surface`, `detect_digital_cards` y `triage_surface`.
+  - `lib/logic/ocr.py`: funciones `ocr_digital_rank` y `parse_digital_strip`.
+  - `tools/prepare_training.py`: generador sintético de sprites de cartas, franjas HUD de 1-5 cartas y formateador YOLO.
+  - `tests/test_digital_vs_physical_detection_unit.py`: suite exhaustiva de 53 tests unitarios para detección dual digital/física, persistencia locked, hit-testing y pipeline sintético.

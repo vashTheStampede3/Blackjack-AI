@@ -224,3 +224,17 @@ def interpret(texts: dict) -> dict:
         "stray_text": bool(len(words) >= 2 and status is None
                            and result is None),
     }
+
+
+def ocr_digital_rank(card_crop_bgr) -> tuple[str, float]:
+    """Recognize typographic rank glyph from a 2D digital card crop."""
+    from .digital_detector import DigitalCardDetector
+    detector = DigitalCardDetector.get_instance()
+    return detector.classify_card_crop(card_crop_bgr)
+
+
+def parse_digital_strip(roi_bgr, role="dealer", offset=(0, 0)) -> list[dict]:
+    """Detect and parse all digital cards in a horizontal ROI strip."""
+    from .digital_detector import DigitalCardDetector
+    detector = DigitalCardDetector.get_instance()
+    return detector.detect_digital_strip(roi_bgr, role=role, offset=offset)
